@@ -1,0 +1,83 @@
+# observatory height in km [2.4, 3.06] (default: 2.64)
+sm_h = 2.64
+
+# lower height limit in km (default: 2.0)
+sm_hmin = 2.0
+
+# altitude of object above horizon [0,90]
+alt      = 90.
+
+# separation of Sun and Moon as seen from Earth [0,360]
+# (> 180 for waning Moon)
+alpha    = 0.
+
+# separation of Moon and object [0,180]
+rho      = 180.
+
+# altitude of Moon above horizon [-90,90]
+altmoon  = -90.
+
+# distance to Moon (mean distance = 1; [0.91,1.08])
+moondist = 1.
+
+# pressure at observer altitude in hPa (default: 744)
+pres     = 744.
+
+# single scattering albedo for aerosols [0,1] (default: 0.97)
+ssa      = 0.97
+
+# calculation of double scattering of moonlight ('Y' or 'N')
+calcds   = N
+
+# relative UV/optical ozone column density (1 -> 258 DU)
+o3column = 1.
+
+# scaling factor for scattered moonlight (default: 1.0)
+moonscal = 1.0
+
+# heliocentric ecliptic longitude of object [-180,180]
+lon_ecl  = 135.
+
+# ecliptic latitude of object [-90,90]
+lat_ecl  = 90.
+
+# grey-body emissivity (comma-separated list)
+emis_str = 0.2
+
+# grey-body temperature in K (comma-separated list)
+temp_str = 290.
+
+# monthly-averaged solar radio flux [sfu]
+msolflux = 130.
+
+# bimonthly period (1: Dec/Jan, ..., 6: Oct/Nov; 0: entire year)
+season   = 0
+
+# period of the night (x/3 of night, x = 1,2,3; 0: entire night)
+time     = 0
+
+# vac[uum] or air wavelengths
+vac_air  = vac
+
+# precipitable water vapour in mm (-1: bimonthly mean)
+pwv      = -1
+
+# radiative transfer code L(BLRTM) or R(FM) for molecular spectra
+rtcode   = L
+
+# resolution of molecular spectra in library (crucial for run time)
+resol    = 1e6
+
+# path to file sm_filenames.dat for data paths and file names
+filepath = data
+
+# inclusion of sky model components
+# format: "xxxxxxx" where x = "Y" (yes) or x = "N" (no)
+# pos. 1: scattered moonlight
+#      2: scattered starlight
+#      3: zodiacal light
+#      4: thermal emission by telescope/instrument
+#      5: molecular emission of lower atmosphere
+#      6: sky emission lines of upper atmosphere
+#      7: airglow continuum (residual continuum)
+incl     = YYYYYYY

@@ -1,0 +1,50 @@
+# path to library structure files
+# (relative to folder with this file or absolute path)
+libpath      = .
+
+# names of files containing the LBLRTM/RFM library structure:
+# 1: time-dependent library, 2: PWV-dependent library
+# libstruct    = libstruct.dat libstruct_pwv.dat
+libstruct    = libstruct_pwv_time.dat libstruct_pwv_time.dat
+
+# path to input data files
+# (relative to folder with this file or absolute path)
+datapath     = .
+
+# solar spectrum [W m^-2 mum^-1]
+solspecname  = solspec_ext.dat
+
+# aerosol extinction table (optical depths; NONE = parametrisation)
+#mieextname   = mie_paranal_ref.dat
+mieextname   = NONE
+
+# parameters for lunar irradiance model
+lunirrname   = moonalbedo.dat
+
+# file for Mie scattering phase functions
+miephasename = mie_m15s1.dat
+
+# file for multiple scattering correction of single scattering calculations
+sscatcorname = sscatcor_m15s1.dat
+#sscatcorname = multiscat_m15s1.dat
+
+# file for multiple scattering correction of double scattering calculations
+dscatcorname = dscatcor_m15s1.dat
+
+# file for UV/optical ozone transmission
+o3transname  = o3trans.dat
+
+# mean spectrum of scattered starlight
+starspecname = scatstarlight.dat
+
+# V-brightness of zodiacal light [10^-8 W m^-2 sr^-1 mum^-1]
+zodtabname   = zodiacallight.dat
+
+# airglow line table (vacuum wavelengths)
+linetabname  = airglow_lines.dat
+
+# file for airglow lines scaling parameters
+vardatname   = airglow_var.dat
+
+# file for airglow continuum (scaling parameters included)
+acontname    = airglow_cont.dat

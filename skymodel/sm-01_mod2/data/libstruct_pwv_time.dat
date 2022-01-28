@@ -1,0 +1,24 @@
+# Structure of LBLRTM/RFM library of atmospheric molecular spectra
+# File name structure (increasing field numbers [1-7] from left to right):
+lib/111_A22_t3_s4_w555_R6666666_7.fits
+# Meaning of data fields:
+# 1st line: description
+# - ID (number in file name structure -> 1,2,3,...)
+# - label (code-defined variable name -> list of allowed labels:
+#          rtcode, season, time, alt, airmass, pwv, resol, spectype)
+# - factor (scaling constant 10^n, strings -> n = 0)
+# 2nd line: list of values (in ascending order and required format)
+1 rtcode 0
+LBL
+2 airmass -1
+10 15 20 25 30
+3 time 0
+0 1 2 3
+4 season 0
+0 1 2 3 4 5 6
+5 pwv -1
+005 010 015 025 035 050 075 100 200
+6 resol 0
+0060000 0300000 1000000
+7 spectype 0
+R T L

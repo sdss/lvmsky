@@ -1,0 +1,29 @@
+# Wavelength grid:
+
+# minimum and maximum wavelength [mum]
+limlam     = 0.3 2.5
+
+# step size [mum]
+dlam       = 0.0002
+
+
+# Line-spread function:
+
+# radius of convolution kernel [pixels] (N_pixel = 2 x kernrad + 1)
+kernrad    = 3
+
+# FWHM of boxcar kernel [pixels]
+wbox       = 0.
+
+# FWHM of Gaussian kernel [pixels]
+wgauss     = 3.
+
+# FWHM of Lorentzian kernel [pixels]
+wlorentz   = 0.
+
+# variable kernel (width proportional to wavelength)? -> 1 = yes; 0 = no
+# if varkern = 1: kernel radius and FWHM for central wavelength
+varkern    = 0
+
+# output file for kernel ("stdout": screen; "null": no output)
+kernelfile = output/kernel.dat

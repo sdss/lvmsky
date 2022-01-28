@@ -1,0 +1,80 @@
+# Airglow continuum (very uncertain at < 0.4 and > 0.9 mum)
+# for different solar activities, seasons, and time ranges
+# (adaption for 0.543 mum only -> constant shape)
+# Solar activity: correction performed by
+# slope * solar radio flux [s.f.u.] + const
+# Season: 6 double months starting with Dec+Jan
+# Time: 3 periods (equal lengths; full range: alt_sun < -18)
+# Full correction: relative mean * solar activity corr. * season/time corr.
+# (18 combinations with uncertainties)
+# Additional corrections: airmass and extinction
+# *** Numbers for data set size ***
+# nseason ntime
+6 3
+# ndat
+46
+# *** Airglow continuum scaling data for C543 ***
+# height (typical altitude of emission [km])
+90
+# scale (global scale factor for tabulated fluxes)
+79.829
+# cons slope (solar activity correction; solar flux in s.f.u.)
+2.068E-01 6.139E-03
+# mean (full year + 6 seasons, full night + 3 time ranges)
+0.998 0.809 0.916 1.24 1.071 1.036 0.918
+0.982 0.847 1.045 1.115 1.095 0.955 0.832
+0.905 0.773 0.81 1.256 0.896 0.84 0.876
+1.108 0.829 0.895 1.35 1.232 1.321 1.035
+# sig (full year + 6 seasons, full night + 3 time ranges)
+0.382 0.305 0.255 0.458 0.379 0.448 0.232
+0.32 0.202 0.248 0.302 0.343 0.474 0.158
+0.368 0.189 0.199 0.598 0.301 0.353 0.181
+0.424 0.469 0.258 0.411 0.466 0.375 0.287
+# *** Airglow continuum template ***
+# lam rflux drflux (wavelengths [mum], relative fluxes, and uncertainties)
+0.3 0.92 0.65
+0.369 0.92 0.13
+0.387 0.65 0.11
+0.42 0.69 0.1
+0.45 0.7 0.11
+0.48 0.79 0.11
+0.51 0.79 0.09
+0.543 1.0 0.0
+0.575 1.41 0.25
+0.608 1.4 0.29
+0.642 1.18 0.19
+0.675 1.14 0.13
+0.72 1.32 0.21
+0.767 1.64 0.46
+0.82 2.57 0.67
+0.858 3.56 1.06
+0.872 3.76 1.12
+1.032 5.32 2.42
+1.044 6.06 2.1
+1.062 4.66 1.76
+1.082 6.47 1.89
+1.102 4.42 1.22
+1.124 3.8 2.39
+1.14 4.55 1.57
+1.174 4.46 2.05
+1.208 2.57 0.97
+1.238 2.16 1.27
+1.319 2.36 1.33
+1.349 3.42 2.39
+1.378 1.99 3.51
+1.444 3.39 4.88
+1.459 5.17 3.88
+1.484 4.42 6.33
+1.497 15.63 8.23
+1.521 20.42 7.89
+1.544 9.85 4.87
+1.567 5.82 4.8
+1.599 6.81 3.7
+1.628 12.66 5.16
+1.66 3.16 2.88
+1.682 3.59 3.11
+1.704 6.23 2.95
+1.746 3.75 2.02
+1.775 1.78 2.34
+2.0 0.0 0.0
+2.5 0.0 0.0
