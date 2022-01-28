@@ -1,0 +1,23 @@
+Version 1.1.2
+-------------
+
+ * support ESO science data products standard (SDP) format for
+   one-dimensional (1D) spectra
+   Note the use of units stored in this format is not yet supported,
+   wlgtomicron still needs to be set correctly in the parameter file.
+
+Version 1.1.1
+-------------
+
+ * fix regression from 1.1.0 forcing wavelength solution to constant shifts in
+   wavelengths below thermal IR
+
+Version 1.1.0
+-------------
+
+ * avoids runaway of wavelength solution in thermal IR
+
+Version 1.0.0
+-------------
+
+ * First public release

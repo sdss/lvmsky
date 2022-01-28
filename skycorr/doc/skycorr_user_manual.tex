@@ -1,0 +1,222 @@
+\documentclass[a4paper,twoside,11pt]{article}
+\usepackage{graphicx}
+\usepackage{txfonts}
+\usepackage{color}
+\usepackage{acronym}
+\usepackage{textcomp}
+\usepackage{url}
+\usepackage{upquote} % verbatim apostrophes display as '
+\usepackage[hidelinks,hyperfootnotes=false]{hyperref}
+\NeedsTeXFormat{LaTeX2e}
+\setcounter{tocdepth}{5}
+\setcounter{secnumdepth}{5}
+%% Include layout, additional commands and abbreviations
+\input{SC_UM_layout}
+\input{SC_UM_shortcut}
+
+\dmdTitle{SKYCORR sky correction: \\[0.2cm] User documentation and evaluation}
+\dmdDocId{VLT--MAN--ESO--19550--5896}
+\dmdIssue{4.4}
+\dmdDate{2014--04--01}
+
+\dmdPreparedBy{Innsbruck ESO In-Kind Team}
+\dmdPreparedOn{2014--04--01}
+\dmdApprovedBy{***TBD***}
+\dmdApprovedOn{}
+\dmdReleasedBy{***TBD***}
+\dmdReleasedOn{}
+
+\setlongtables
+\makeindex                              % but currently no indexed terms...
+
+\begin{document}
+\pagenumbering{arabic}
+\dmdmaketitle
+\emptypage{This page was intentionally left blank}
+
+\begin{center}
+  \textbf{Change record}
+
+  \tablehead{\hline
+    \multicolumn{1}{|c|}{Issue/Rev.}\tbspa &
+    \multicolumn{1}{|c|}{Date} &
+    \multicolumn{1}{|c|}{Section/Parag.\ affected} &
+    \multicolumn{1}{|c|}{Reason/Initiation/Documents/Remarks}\tbspb \\
+    \hline}
+  \tabletail{\hline}
+
+  \begin{supertabular}{|l|l|l|l|}
+    4.4\tbspa & 01/04/2014 & Sect. 3                                    &
+              Update installation instructions                          \\
+    4.3\tbspa & 20/09/2013 & All                                        &
+              RIXes for final review considered                         \\
+    4.2\tbspa & 30/07/2013 & All                                        &
+              Changes related to code-testing workshop                  \\
+    & & &     Sky model update                                          \\
+    4.1\tbspa & 13/05/2013 & Sect. 4 and 5.2                            &
+              Parameter description, routine extract1D, examples        \\
+    4.0\tbspa & 30/04/2013 & All                                        &
+              Focus on C code, extended I/O options                     \\
+    3.4\tbspa & 03/05/2012 & Sect. 4.2 and 5                            &
+              Description of conversion of FITS 1D images               \\
+    & & &     Update of the Reflex workflow description                 \\
+    3.3\tbspa & 16/03/2012 & Sect. 3, 4, 6                              &
+              Some rephrasing, Figs. 24-29 changed                      \\
+    3.2\tbspa & 09/03/2012 & Sect. 3.2, 4.6, 4.7                        &
+              Updating installation and running procedure               \\
+    3.1\tbspa & 18/11/2011 & Sect. 6.4 and 7                            &
+              Update related to line list change                        \\
+    3.0\tbspa & 08/09/2011 & All                                        &
+              General update                                            \\
+    2.0\tbspa & 31/07/2011 & All                                        &
+              General update                                            \\
+    1.0\tbspa & 01/06/2011 & All                                        &
+              First version                                             \\
+  \end{supertabular}
+\end{center}
+
+%Temporary list concerning already considered RIXes:
+%JLI: 20, 21, 22, [23], [24], 25
+%AMO: 1, 2, 3
+%?: needs check, (): partly done, []: no change required
+
+\begin{center}
+\textbf{Main authors (Austrian ESO In-Kind Team Innsbruck)}
+  \tablehead{
+    \hline}
+  \tabletail{\hline}
+
+  \begin{supertabular}{|c|}
+    \\
+    Wolfgang Kausch \\
+    Stefan Noll \\
+    Marco Barden \\
+    Cezary Szyszka \\
+    Amy M. Jones \\
+    Stefan Kimeswenger \\
+    \\
+    Institute for Astro- and Particle Physics,
+    University of Innsbruck \\
+    Technikerstr. 25/8 \\
+    A-6020 Innsbruck / Austria \\
+    \\
+  \end{supertabular}
+\end{center}
+
+\emptypage{This page was intentionally left blank}
+
+\tableofcontents
+\cleardoublepage
+\include{SC_UM_introduction}
+\cleardoublepage
+\include{SC_UM_installation}
+\cleardoublepage
+\include{SC_UM_running}
+\cleardoublepage
+\include{SC_UM_method}
+\cleardoublepage
+\include{SC_UM_evaluation}
+\cleardoublepage
+\include{SC_UM_acronyms}
+
+\begin{thebibliography}{99}
+
+\section*{{\hspace{-\leftmargin}}References}
+
+\bibitem[2005]{CLO05}
+Clough, S.A, Shephard, M.W., Mlawer. E.J., et al. 2005, J. Quant. Spectrosc.
+Radiat. Transfer, 91, 233
+
+\bibitem[2006]{COS06}
+Cosby, P.C., Sharpee, B.D., Slanger, T.G., Huestis, D.L., \& Hanuschik, R.W.
+2006, J. Geophys. Res., 111, A12307
+
+\bibitem[2007]{DAV07}
+Davies, R.I. 2007, MNRAS, 375, 1099
+
+\bibitem[1998]{GOL98}
+Goldman, A., Schoenfeld, W.G., Goorvitch, D., et al. 1998, J. Quant. Spectrosc.
+Radiat. Transfer, 59, 453
+
+\bibitem[2003]{HAN03}
+Hanuschik, R.W. 2003, A\&A, 407, 1157
+
+\bibitem[2008]{KHO08}
+Khomich, V.Y, Semenov, A.I., \& Shefov, N.N. 2008, Airglow as an Indicator of
+Upper Atmospheric Structure and Dynamics, Springer, Berlin
+
+\bibitem[1974]{MIE74}
+Mies, F.H. 1974, J. Molec. Spectrosc., 53, 150
+
+\bibitem[2007]{MOD07}
+Modigliani, A., Hummel, W., Abuter, R., et al. 2007, The SINFONI pipeline,
+arXiv:astro-ph/0701297
+
+\bibitem[2010]{MOD10}
+Modigliani. A., Goldoni, P., Royer, F., et al. 2010, Proc. SPIE, 7737, 773728
+
+\bibitem[1980]{MOR80}
+Mor\'e, J.J., Garbow, B.S., \& Hillstrom, K.E. 1980, User Guide for MINPACK-1,
+Argonne National Laboratory Report ANL-80-74, Argonne, Ill.
+
+\bibitem[2009]{NOL09}
+Noll, S., Burgarella, D., Giovannoli, E., et al. 2009, A\&A, 507, 1793
+
+\bibitem[2012]{NOL12}
+Noll, S., Kausch, W., Barden, M., et al. 2012, A\&A, 543, A92
+
+\bibitem[2008]{PAT08}
+Patat, F. 2008, A\&A, 481, 575
+
+\bibitem[2009]{ROT09}
+Rothman, L.S., Gordon, I.E., Barbe, A., et al. 2009, J. Quant. Spectrosc.
+Radiat. Transfer, 110, 533
+
+\bibitem[2000]{ROU00}
+Rousselot, P., Lidman, C., Cuby, J.-G., Moreels, G., \& Monnet, G. 2000, A\&A,
+354, 1134
+
+\bibitem[SM-01]{SM01}
+SM-01 User Manual, VLT-MAN-ESO-19550-5770\\[0.5cm]
+
+\bibitem[MOLECFIT]{MOLECFIT}
+MOLECFIT User Manual, VLT-MAN-ESO-19550-5772\\[0.5cm]
+
+\bibitem[SM-SoW]{SM-SoW}
+Statement of Work for SM projects, VLT-SOW-ESO-19550-5223\\[0.5cm]
+
+\bibitem[SM-03-SR]{SM03SR}
+SM-03 Science Report, VLT-TRE-ESO-19550-5775 \\[0.5cm]
+
+\bibitem[Reflex-UM]{reflex}
+Reflex User Manual, VLT-MAN-ESO-19000-5037 \\[0.5cm]
+
+\subsection*{{\hspace{-\leftmargin}}Links}
+
+\bibitem[1]{CMPFIT}
+\texttt{http://www.physics.wisc.edu/~craigm/idl/cmpfit.html}
+
+\bibitem[2]{AER}
+\texttt{http://www.aer.com/}
+
+\bibitem[3]{HITRAN}
+\texttt{http://www.cfa.harvard.edu/HITRAN/}
+
+\bibitem[4]{SINC}
+\texttt{http://www.astro.washington.edu/docs/idl/htmlhelp/slibrary30.html}
+
+\bibitem[5]{huber}
+AMC Technical Briefs - ISSN 1757-5958, No.6, Royal Society of Chemistry,
+2001, \texttt{http://www.rsc.org/images/brief6\_tcm18-25948.pdf}
+
+\bibitem[6]{LBLRTM}
+\texttt{http://rtweb.aer.com/lblrtm\_frame.html}
+
+\bibitem[7]{CPL}
+\texttt{http://www.eso.org/sci/software/cpl}
+
+\end{thebibliography}
+
+\centerline{--- End of document ---}            % only if that's an even page
+
+\end{document}

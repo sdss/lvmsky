@@ -1,0 +1,120 @@
+# Correction of listed airglow emission strengths (airglow_lines.dat)
+# for different solar activities, seasons, and time ranges
+# Solar activity: correction performed by
+# slope * solar radio flux [s.f.u.] + const
+# Season: 6 double months starting with Dec+Jan
+# Time: 3 periods (equal lengths; full range: alt_sun < -18)
+# Full correction: relative mean * solar activity corr. * season/time corr.
+# (18 combinations with uncertainties)
+# Additional corrections: airmass and extinction
+# *** Numbers for data set size ***
+# nfeat
+5
+# nseason ntime
+6 3
+# *** Airglow scaling data ***
+# *** 1: OI5577 ***
+# molmass [kg/mol]
+0.016
+# (typical temperature at emission layer height [K])
+190
+# height (typical altitude of emission [km])
+97
+# scale (global scale factor for tabulated fluxes)
+1.000
+# cons slope (solar activity correction; solar flux in s.f.u.)
+-1.245E-01 8.703E-03
+# mean (full year + 6 seasons, full night + 3 time ranges)
+1.003 0.857 1.134 1.436 0.857 0.741 0.99
+1.021 0.957 1.184 1.408 0.988 0.764 0.85
+0.895 0.715 1.16 1.316 0.569 0.589 1.027
+1.092 0.921 1.089 1.565 1.013 0.86 1.071
+# sig (full year + 6 seasons, full night + 3 time ranges)
+0.456 0.412 0.409 0.375 0.424 0.348 0.395
+0.484 0.609 0.52 0.335 0.477 0.332 0.339
+0.42 0.28 0.31 0.336 0.212 0.29 0.4
+0.44 0.255 0.394 0.411 0.389 0.37 0.395
+# *** 2: NaID ***
+# molmass [kg/mol]
+0.023
+# (typical temperature at emission layer height [K])
+190
+# height (typical altitude of emission [km])
+92
+# scale (global scale factor for tabulated fluxes)
+1.000
+# cons slope (solar activity correction; solar flux in s.f.u.)
+8.541E-01 1.130E-03
+# mean (full year + 6 seasons, full night + 3 time ranges)
+1.0 0.536 0.852 1.842 0.938 0.792 1.04
+1.05 0.522 0.911 1.777 1.111 0.932 1.038
+0.862 0.51 0.703 1.573 0.68 0.665 1.054
+1.087 0.576 0.947 2.204 1.035 0.78 1.031
+# sig (full year + 6 seasons, full night + 3 time ranges)
+0.594 0.116 0.41 0.687 0.489 0.337 0.351
+0.573 0.107 0.556 0.595 0.56 0.309 0.296
+0.471 0.131 0.158 0.542 0.228 0.238 0.35
+0.694 0.103 0.368 0.776 0.543 0.399 0.396
+# *** 3: OIred ***
+# molmass [kg/mol]
+0.016
+# (typical temperature at emission layer height [K])
+1000
+# height (typical altitude of emission [km])
+270
+# scale (global scale factor for tabulated fluxes)
+1.000
+# cons slope (solar activity correction; solar flux in s.f.u.)
+1.214E-01 6.799E-03
+# mean (full year + 6 seasons, full night + 3 time ranges)
+1.005 0.301 1.319 1.513 0.905 1.202 0.792
+1.23 0.189 1.013 2.241 1.552 1.825 0.545
+0.938 0.237 1.443 1.431 0.706 1.06 0.733
+0.849 0.453 1.544 0.828 0.465 0.706 1.037
+# sig (full year + 6 seasons, full night + 3 time ranges)
+0.987 0.31 1.178 1.023 0.863 0.99 0.816
+1.207 0.103 1.208 1.075 1.249 1.217 0.575
+0.849 0.154 1.214 0.762 0.419 0.664 0.816
+0.818 0.44 1.146 0.648 0.202 0.677 0.889
+# *** 4: OH ***
+# molmass [kg/mol]
+0.017
+# (typical temperature at emission layer height [K])
+200
+# height (typical altitude of emission [km])
+87
+# scale (global scale factor for tabulated fluxes)
+1.000
+# cons slope (solar activity correction; solar flux in s.f.u.)
+9.920E-01 6.191E-05
+# mean (full year + 6 seasons, full night + 3 time ranges)
+1.0 0.936 0.94 1.142 1.014 0.824 1.144
+1.128 0.934 0.978 1.378 1.127 1.051 1.299
+0.914 0.968 0.882 0.945 0.916 0.673 1.118
+0.958 0.908 0.97 1.112 1.02 0.758 1.022
+# sig (full year + 6 seasons, full night + 3 time ranges)
+0.313 0.178 0.178 0.327 0.391 0.324 0.289
+0.337 0.201 0.198 0.355 0.413 0.342 0.248
+0.267 0.131 0.135 0.221 0.361 0.255 0.24
+0.29 0.198 0.177 0.237 0.41 0.254 0.296
+# *** 5: O2_01 ***
+# molmass [kg/mol]
+0.032
+# (typical temperature at emission layer height [K])
+190
+# height (typical altitude of emission [km])
+94
+# scale (global scale factor for tabulated fluxes)
+1.000
+# cons slope (solar activity correction; solar flux in s.f.u.)
+1.904E-01 6.265E-03
+# mean (full year + 6 seasons, full night + 3 time ranges)
+1.001 0.978 0.952 1.334 1.0 0.708 1.033
+0.983 1.009 0.944 1.343 0.956 0.68 0.964
+0.904 0.828 0.986 1.099 0.814 0.578 1.121
+1.115 1.095 0.929 1.555 1.229 0.858 1.016
+# sig (full year + 6 seasons, full night + 3 time ranges)
+0.406 0.357 0.261 0.458 0.44 0.283 0.342
+0.411 0.416 0.298 0.482 0.507 0.227 0.274
+0.355 0.311 0.186 0.318 0.3 0.284 0.401
+0.422 0.307 0.293 0.448 0.459 0.265 0.325
