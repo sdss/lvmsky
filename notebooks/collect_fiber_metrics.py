@@ -30,6 +30,9 @@ WCONTS = [
     dict(name='Bcont', wave=4620, cont_regions=[[-20, 20]]),
     dict(name='Rcont', wave=6765, cont_regions=[[-15, 15]]),
     dict(name='Zcont', wave=9193, cont_regions=[[-15, 15]]),
+    dict(name='cont5800_full', wave=5800, cont_regions=[[-10, 10]]),
+    dict(name='cont5800_left', wave=5800-10, cont_regions=[[-10, 7]]),
+    dict(name='cont5800_right', wave=5800+10, cont_regions=[[-7, 10]]),
 ]
 
 
