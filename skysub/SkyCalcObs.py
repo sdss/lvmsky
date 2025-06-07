@@ -58,8 +58,8 @@ import json
 import subprocess
 from astropy.time import Time
 from datetime import datetime
-from lvm_ksl.SkyModelObs import convert_time
-from lvm_ksl.GetSolar import get_flux
+from SkyModelObs import convert_time
+from GetSolar import get_flux
 import time
 
 
