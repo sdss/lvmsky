@@ -662,7 +662,8 @@ def do_one(ra=296.242608,dec=-14.811007,obstime='2023-08-29T03:20:43.668',xdata=
 
     key,value=create_inputs(ra=ra,dec=dec,obstime=obstime)
 
-    result=subprocess.run(['/Users/long/SDSS/skymodel/sm-01_mod2/bin/calcskymodel'],capture_output=True,text=True)
+    eso_sky_dir = os.getenv('ESO_SKY_MODEL')
+    result=subprocess.run([f"{eso_sky_dir}/sm-01_mod2/bin/calcskymodel"], capture_output=True, text=True)
 
     # print("stdout:", result.stdout)
     if len(result.stderr):
@@ -681,7 +682,8 @@ def do_one(ra=296.242608,dec=-14.811007,obstime='2023-08-29T03:20:43.668',xdata=
         outname='%s.fits' % outroot
     else:
         outname=outroot
-    reformat_model(rfile='output/radspec.fits',tfile='output/transspec.fits',xkey=key,xval=value,outfile=outname)
+    reformat_model(rfile='output/radspec.fits', tfile='output/transspec.fits', xkey=key, xval=value, outfile=outname)
+
     return outroot
 
 

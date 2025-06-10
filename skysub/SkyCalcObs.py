@@ -133,28 +133,11 @@ xdefaults='''
     "wgrid_mode": "fixed_wavelength_step",
     "wdelta": 0.05,
     "lsf_type": "Gaussian",
-    "lsf_gauss_fwhm": 2.0,
-    "lsf_boxcar_fwhm": 2.0,
+    "lsf_gauss_fwhm": 1.5,
+    "lsf_boxcar_fwhm": 1.5,
     "observatory": "lasilla"
 }
 '''
-
-
-ydefaults='''
-{
-    "vacair": "air",
-    "wmin": 360.0,
-    "wmax": 980.0,
-    "wgrid_mode": "fixed_wavelength_step",
-    "wdelta": 0.05,
-    "lsf_type": "Gaussian",
-    "lsf_gauss_fwhm": 2.0,
-    "lsf_boxcar_fwhm": 2.0,
-    "observatory": "lasilla"
-}
-'''
-
-
 
 def just_run_SkyCalc_from_observation(xinput='test.json',almanac='',outroot='',msol=0,print_output=False):
     
