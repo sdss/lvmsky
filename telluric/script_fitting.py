@@ -61,6 +61,7 @@ for istar in range(N_STD):
         hdr = fits.getheader(file)
         flux = fits.getdata(file, 'FLUX')
         mask = fits.getdata(file, 'MASK')
+        ivar = fits.getdata(file, 'IVAR')
         wave_trace = fits.getdata(file, 'WAVE_TRACE')
         lsf_trace = fits.getdata(file, 'LSF_TRACE')
         exptime_sky = hdr['EXPTIME']
@@ -93,6 +94,7 @@ for istar in range(N_STD):
         wave = np.polyval(w_coef, np.arange(flux.shape[1]))
         lsf = np.polyval(lsf_coef, np.arange(flux.shape[1]))
         spec = flux[msk_spec][idx_stars_in_Spec[istar]] / exptime_std
+        espec = 1.0 / np.sqrt(ivar[msk_spec][idx_stars_in_Spec[istar]]) / exptime_std
         cur_mask = mask[msk_spec][idx_stars_in_Spec[istar]]
         bad = cur_mask != 0
         nearby_sky = get_nearby_sky(hdr, std_info[orig_ifulabel]['ra'], std_info[orig_ifulabel]['de'])
@@ -101,6 +103,7 @@ for istar in range(N_STD):
         current_data[suffix] = dict(
             wave=wave,
             spec=spec-spec_sky,
+            espec=espec,
             mask=cur_mask,
             lsf=lsf,
             sky=spec_sky,
@@ -112,6 +115,7 @@ for istar in range(N_STD):
         # plotting
         ax.plot(wave, spec)
         ax.plot(wave, spec_sky)
+        ax.plot(wave, espec)
         ax.plot(wave, spec - spec_sky)
 
         ax.set_ylabel("counts / s")
@@ -124,11 +128,14 @@ for istar in range(N_STD):
 
 
 # %%
+fits.info(file)
+
 
 # %% [markdown]
 # # Stellar fitting based on FBS
 # %%
 from time import process_time
+from time import perf_counter
 from astropy.io import fits
 import numpy as np
 from astropy.table import Table, vstack
@@ -405,15 +412,38 @@ plt.show()
 
 
 
+# %%
+# Sanity check of the convolve and rebin function
+step_h = 0.11
+step_l = 0.56
+w_high = np.arange(-50, 50, step_h)
+w_low = np.arange(-30, 30, step_l)
+s1 = 2.0
+lsf = 3.5
+s2 = np.sqrt(s1**2 + lsf**2)
+g = np.exp(-0.5*(w_high/s1)**2) / np.sqrt(2 * np.pi) / s1
+g_conv_true = np.exp(-0.5*(w_low/s2)**2) / np.sqrt(2 * np.pi) / s2
+g_conv_true_high = np.exp(-0.5*(w_high/s2)**2) / np.sqrt(2 * np.pi) / s2
+print(w_high.shape, g.shape, w_low.shape)
+g_conv = convolve_and_rebin(w_high, g, w_low, np.full_like(w_low, lsf*2.355), pad_pix=5)
+plt.close()
+plt.step(w_high, g, where='mid', label='orig')
+plt.step(w_low, g_conv_true, where='mid', label='true conv')
+plt.step(w_high, g_conv_true_high, where='mid', label='true conv high')
+plt.step(w_low, g_conv, where='mid', label='conv')
+
+plt.legend()
+plt.show()
+
+np.sum(g_conv_true*step_l), np.sum(g_conv_true_high*step_h), np.sum(g_conv*step_l)
+
 # %% [markdown]
 # # Telluric fitting
+
+
 # %%
 ###############################################################################
 ###############################################################################
-
-# %%
-[stack_stars]
-
 
 # %%
 import lmfit
@@ -421,7 +451,9 @@ from astropy.stats import sigma_clipped_stats
 from astropy.time import Time
 from astropy.coordinates import SkyCoord, EarthLocation, AltAz
 import astropy.units as u
-
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+import plotly.io as pio
 
 def vac2air(vac):
     """
@@ -446,17 +478,34 @@ def prepare_palace_data(palace_dir, wrange=[3500, 10000]):
     return palace_wave, palace_trans, palace_fH2O
 
 
-def calculate_mpoly(spec, model, mask, mdegree, method="legendre"):
+def calculate_mpoly(spec, espec, model, mask, mdegree, sigma_threshold=3.0, niter=0):
     xp = np.linspace(-1.0, 1.0, spec.size)
     xpoly = np.sin(xp * np.pi/2)
     ratio = spec / model
     good = np.isfinite(ratio) & mask
-    coef = np.polynomial.legendre.legfit(xpoly[good], ratio[good], mdegree)
-    mpoly = np.polynomial.legendre.legval(xpoly, coef)
-    return mpoly
+    weights = 1.0 / espec[good]
+
+    def fit_and_get_outliers(w):
+        coef = np.polynomial.legendre.legfit(xpoly[good], ratio[good], mdegree, w=w)
+        fitted = np.polynomial.legendre.legval(xpoly[good], coef)
+        resid = ratio[good] - fitted
+        w_resid = resid * w
+        mad = np.median(np.abs(w_resid - np.median(w_resid)))
+        return coef, np.abs(w_resid - np.median(w_resid)) > sigma_threshold * 1.4826 * mad
+    
+    # Apply sigma clipping if requested
+    if niter > 0:
+        for _ in range(niter):
+            coef, outliers = fit_and_get_outliers(weights)
+            if not np.any(outliers): break
+            weights[outliers] = 0.0
+    
+    final_coef, _ = fit_and_get_outliers(weights)
+    return np.polynomial.legendre.legval(xpoly, final_coef)
 
 
-def residual_3spectra(p, arr_wave, arr_spec, arr_lsf, arr_mask, arr_sky, data=None, mode="residual"):
+def residual_3spectra(p, arr_wave, arr_spec, arr_espec, arr_lsf, arr_mask, arr_sky,
+                      data=None, mode="residual"):
 
     # getting stellar template
     stellar_parameters = np.array([[np.log10(p['teff']), p['logg'], p['metal'], p['alpha']]])
@@ -481,6 +530,7 @@ def residual_3spectra(p, arr_wave, arr_spec, arr_lsf, arr_mask, arr_sky, data=No
         lsf_corr2 = p[f'lsf_{suffix}']
         wave = arr_wave[ich]
         spec = arr_spec[ich]
+        espec = arr_espec[ich]
         lsf = arr_lsf[ich]
         mask = arr_mask[ich]
         sky = arr_sky[ich]
@@ -493,11 +543,12 @@ def residual_3spectra(p, arr_wave, arr_spec, arr_lsf, arr_mask, arr_sky, data=No
         transmission_rebined = convolve_and_rebin(transmission_wave, transmission, wave, lsf_corrected)
 
         stellar_model_convolved *= transmission_rebined
-        mpoly = calculate_mpoly(spec, stellar_model_convolved, mask, data['mdegree'])
+        mpoly = calculate_mpoly(spec, espec, stellar_model_convolved, mask, data['mdegree'],
+                                sigma_threshold=3.0, niter=3)
         model = stellar_model_convolved * mpoly
 
         output_resid.append(spec - model)
-        output_resid_masked.append((spec - model)[mask])
+        output_resid_masked.append((spec - model)[mask] / espec[mask])
         output_model.append(model)
         output_trans.append(transmission_rebined)
         output_mpoly.append(mpoly)
@@ -516,10 +567,13 @@ def iter_cb(p, iter, resid, *args, **kws):
               f"logg={p['logg'].value:.3f} [M/H]={p['metal'].value:.3f} "
               f"[a/Fe]={p['alpha'].value:.3f} v={p['vel'].value:.2f} "
               f"PWV={p['pwv'].value:.3f} ZA={p['za'].value:.2f} "
-              f"lsf_corr={p['lsf_b'].value:.2f}, {p['lsf_r'].value:.2f}, {p['lsf_z'].value:.2f}")
+              f"lsf={p['lsf_b'].value:.2f}, {p['lsf_r'].value:.2f}, {p['lsf_z'].value:.2f}")
 
 
-def fit_star_3spectra(star_data, channels_to_fit=['b', 'r', 'z'], method="leastsq", mdegree=28):
+def fit_star_3spectra(star_data, channels_to_fit=['b', 'r', 'z'], method="leastsq",
+                      mdegree=28, verbose=False):
+    t_wall0 = perf_counter()
+    t_cpu0 = process_time()
     p = lmfit.Parameters()
     p.add("vel", value=0, min=-500, max=500, vary=True)
     p.add("teff", value=6666, min=5000, max=8500)
@@ -548,6 +602,7 @@ def fit_star_3spectra(star_data, channels_to_fit=['b', 'r', 'z'], method="leasts
     )
     arr_wave = [star_data[suffix]['wave'] for suffix in channels_to_fit]
     arr_spec = [star_data[suffix]['spec'] for suffix in channels_to_fit]
+    arr_espec = [star_data[suffix]['espec'] for suffix in channels_to_fit]
     arr_lsf = [star_data[suffix]['lsf'] for suffix in channels_to_fit]
     arr_sky = [star_data[suffix]['sky'] for suffix in channels_to_fit]
     arr_mask = [star_data[suffix]['mask'] for suffix in channels_to_fit]
@@ -557,12 +612,25 @@ def fit_star_3spectra(star_data, channels_to_fit=['b', 'r', 'z'], method="leasts
     arr_mask[2] &= (arr_wave[2] > 7520) & (arr_wave[2] < 9800)
 
 
-    args = (arr_wave, arr_spec, arr_lsf, arr_mask, arr_sky)
+    args = (arr_wave, arr_spec, arr_espec, arr_lsf, arr_mask, arr_sky)
     out = lmfit.minimize(residual_3spectra, p, args=args, kws={'data': extra_data}, nan_policy='omit',
-                         method=method, iter_cb=iter_cb)
+                         method=method, iter_cb=iter_cb if verbose else None)
     print(lmfit.fit_report(out))
 
     model, trans, mpoly, lsf = residual_3spectra(out.params, *args, data=extra_data, mode='model')
+
+    # Timing
+    runtime_wall_s = perf_counter() - t_wall0
+    runtime_cpu_s = process_time() - t_cpu0
+    extra_data['runtime_wall_s'] = runtime_wall_s
+    extra_data['runtime_cpu_s'] = runtime_cpu_s
+    extra_data['runtime_s'] = runtime_wall_s
+    # Record optimizer details
+    extra_data['method'] = method
+    try:
+        extra_data['nfev'] = int(getattr(out, 'nfev', None))
+    except Exception:
+        extra_data['nfev'] = None
 
     return out, model, trans, mpoly, lsf, args, extra_data
 
@@ -592,7 +660,7 @@ def get_zenith_angle(info):
     return (90*u.deg - altaz.alt).to(u.deg).value
 
 
-def plot_results(star_data, out, model, trans, mpoly, lsf, arr_wave, arr_spec, arr_lsf, arr_mask, arr_sky, data=None):
+def plot_results(star_data, out, model, trans, mpoly, lsf, arr_wave, arr_spec, arr_espec, arr_lsf, arr_mask, arr_sky, data=None):
     channels_to_fit = data['channels_to_fit']
     n_channels = len(channels_to_fit)
 
@@ -612,6 +680,8 @@ def plot_results(star_data, out, model, trans, mpoly, lsf, arr_wave, arr_spec, a
 
         arr_wave = [star_data[suffix]['wave'] for suffix in channels_to_fit]
         ax1.plot(arr_wave[ich], arr_spec[ich] - model[ich], color=colors[ich], lw=0.5)
+        ax1.plot(arr_wave[ich], arr_espec[ich], color=colors[ich], lw=0.3)
+        ax1.plot(arr_wave[ich], -arr_espec[ich], color=colors[ich], lw=0.3)
         ax2.plot(arr_wave[ich], trans[ich], color=colors[ich], alpha=0.7, lw=0.5, label='Transmission' if ich == 0 else None)
         ax2.plot(arr_wave[ich], mpoly[ich] / np.nanmax(mpoly), ls=':', color=colors[ich], label='P-Cont. normalizes' if ich == 0 else None)
         ax2.plot(arr_wave[ich], arr_lsf[ich], color=colors[ich])
@@ -620,6 +690,9 @@ def plot_results(star_data, out, model, trans, mpoly, lsf, arr_wave, arr_spec, a
             ax.set_ylabel("counts / s")
 
     obs_za = get_zenith_angle(star_data['b']['info'])
+    runtime_total = data.get('runtime_s', None)
+    method_used = data.get('method', None)
+
     msg = (f"V={out.params['vel'].value:.2f} km/s "
            f"Teff={out.params['teff'].value:.2f} K "
            f"logg={out.params['logg'].value:.3f} "
@@ -627,12 +700,16 @@ def plot_results(star_data, out, model, trans, mpoly, lsf, arr_wave, arr_spec, a
            f"[a/Fe]={out.params['alpha'].value:.3f} "
            f"PWV={out.params['pwv'].value:.3f} mm "
            f"ZA={out.params['za'].value:.1f}°, true={obs_za:.1f}° "
-           f"rchi2={out.redchi:.4f}"
+           f"chi2_red={out.redchi:.3f} "
+           f"Nfev={out.nfev} "
+           f"{method_used} "
+           f"Runtime={runtime_total:.2f}s"
            )
+
     # ax1.text(0.01, 0.99, msg, transform=ax1.transAxes, fontsize=10, ha='left', va='top')
-    fig.suptitle(f"{star_data['b']['info']['fib']} GAIA {star_data['b']['info']['id']} {star_data['b']['info']['ra']} {star_data['b']['info']['de']}")
-    ax1.set_title(msg, fontsize=11)
-    coord = SkyCoord(star_data['b']['info']['ra'], star_data['b']['info']['de'], unit=(u.deg, u.deg))
+    fig.suptitle(f"{star_data['b']['info']['fib']} GAIA {star_data['b']['info']['id']} "
+                 f"{star_data['b']['info']['ra']} {star_data['b']['info']['de']}")
+    ax1.set_title(msg, fontsize=10)
 
     _, _, rms = sigma_clipped_stats(np.concatenate(arr_spec) - np.concatenate(model))
     print(rms)
@@ -643,20 +720,169 @@ def plot_results(star_data, out, model, trans, mpoly, lsf, arr_wave, arr_spec, a
     plt.show()
 
 
+
+def plot_results_plotly(star_data, out, model, trans, mpoly, lsf, arr_wave,
+                        arr_spec, arr_espec, arr_lsf, arr_mask, arr_sky,
+                        data=None, output_html_path=None, odir="./"):
+    from plotly.subplots import make_subplots
+    import plotly.graph_objects as go
+    channels_to_fit = data['channels_to_fit']
+    n_channels = len(channels_to_fit)
+
+    hdr = stack_stars[7]['b']['hdr']
+
+    fig = make_subplots(rows=2, cols=1, shared_xaxes=False, vertical_spacing=0.08)
+
+    color_map = ['black', 'purple', 'darkblue']
+
+    # Upper panel: spectra and models
+    for ich, suffix in enumerate(channels_to_fit):
+        # Accept either per-channel arrays (expected) or a scalar; broadcast scalars
+        try:
+            lsf_corr_i = lsf[ich]
+        except Exception:
+            lsf_corr_i = lsf
+        if np.isscalar(lsf_corr_i) or (np.asarray(lsf_corr_i).ndim == 0):
+            lsf_corr_i = np.full_like(arr_wave[ich], float(lsf_corr_i))
+
+        for x0, x1 in masked_regions(arr_wave[ich], arr_mask[ich]):
+            fig.add_vrect(x0=float(x0), x1=float(x1), fillcolor=color_map[ich], opacity=0.1, line_width=0, row=1, col=1)
+
+        fig.add_trace(
+            go.Scatter(x=arr_wave[ich], y=arr_spec[ich], mode='lines', line=dict(color=color_map[ich]), 
+                      name=f'{suffix}: Obs. spectrum', showlegend=(ich == 0)), row=1, col=1)
+
+        fig.add_trace(
+            go.Scatter(x=arr_wave[ich], y=arr_sky[ich], mode='lines', line=dict(color='pink', width=1), 
+                      name='Sky spectrum', showlegend=(ich == 0)), row=1, col=1)
+
+        fig.add_trace(
+            go.Scatter(x=arr_wave[ich], y=model[ich], mode='lines', line=dict(color='orange'), 
+                      name='Model', showlegend=(ich == 0)), row=1, col=1)
+
+        fig.add_trace(
+            go.Scatter(x=arr_wave[ich], y=(model[ich] / np.where(trans[ich] == 0, np.nan, trans[ich])), mode='lines', 
+                      line=dict(color='red'), name='Model (no transmission)', showlegend=(ich == 0)), row=1, col=1)
+
+        scale = np.nanmedian(arr_spec[ich])
+        denom = np.nanmedian(mpoly[ich]) if np.isfinite(np.nanmedian(mpoly[ich])) and np.nanmedian(mpoly[ich]) != 0 else 1.0
+        fig.add_trace(
+            go.Scatter(x=arr_wave[ich], y=(mpoly[ich] / denom * scale), mode='lines', 
+                      line=dict(color='grey', width=1, dash='dot'), name='Normalization continuum', 
+                      showlegend=(ich == 0)), row=1, col=1)
+
+        fig.add_trace(
+            go.Scatter(x=arr_wave[ich], y=(arr_spec[ich] - model[ich]), mode='lines', 
+                      line=dict(color=color_map[ich], width=1), name=f'{suffix}: residual',
+                      showlegend=False), row=1, col=1)
+
+        fig.add_trace(
+            go.Scatter(x=arr_wave[ich], y=arr_espec[ich], mode='lines', 
+                      line=dict(color=color_map[ich], width=0.5), name=f'{suffix}: error',
+                      showlegend=False), row=1, col=1)
+        fig.add_trace(
+            go.Scatter(x=arr_wave[ich], y=-arr_espec[ich], mode='lines', 
+                      line=dict(color=color_map[ich], width=0.5), name=f'{suffix}: error',
+                      showlegend=False), row=1, col=1)
+
+        fig.add_trace(
+            go.Scatter(x=arr_wave[ich], y=trans[ich], mode='lines', 
+                      line=dict(color=color_map[ich], width=1), name='Bestfit transmission', 
+                      showlegend=(ich == 0), legend="legend2"), row=2, col=1)
+
+        norm_mpoly = np.nanmedian(mpoly[ich])
+        fig.add_trace(
+            go.Scatter(x=arr_wave[ich], y=(mpoly[ich] / norm_mpoly), mode='lines', 
+                      line=dict(color=color_map[ich], width=1, dash='dot'), name='Normalization continuum', 
+                      showlegend=(ich == 0), legend="legend2"), row=2, col=1
+        )
+
+        fig.add_trace(
+            go.Scatter(x=arr_wave[ich], y=arr_lsf[ich], mode='lines', 
+                      line=dict(color=color_map[ich], width=1, dash='longdashdot'), name='DRP LSF', 
+                      showlegend=(ich == 0), legend="legend2"), row=2, col=1
+        )
+
+        fig.add_trace(
+            go.Scatter(x=arr_wave[ich], y=lsf_corr_i, mode='lines', 
+                      line=dict(color=color_map[ich], width=1, dash='dash'), name='Bestfit LSF', 
+                      showlegend=(ich == 0), legend="legend2"), row=2, col=1
+        )
+    fig.update_layout(
+        title=None,
+        # First legend (for upper plot)
+        legend=dict(
+            orientation='h', yanchor='bottom', font=dict(size=11), xanchor='center',
+            y=0.99, x=0.5, bgcolor='rgba(255, 255, 255, 0)',
+        ),
+        # Second legend (for lower plot)
+        legend2=dict(
+            orientation='h', yanchor='top', font=dict(size=11), xanchor='center',
+            y=0.495, x=0.5, bgcolor='rgba(255, 255, 255, 0)',
+        )
+    )
+
+    # Y-limits for upper panel based on RMS and 99th percentile
+    _, _, rms = sigma_clipped_stats(np.concatenate(arr_spec) - np.concatenate(model))
+    y_top_min = -5 * rms
+    y_top_max = np.nanpercentile(np.concatenate(arr_spec), 99) + 5 * rms
+    if np.isfinite(y_top_min) and np.isfinite(y_top_max):
+        fig.update_yaxes(range=[y_top_min, y_top_max], row=1, col=1)
+
+    fig.update_yaxes(title_text="counts / s", row=1, col=1)
+    fig.update_xaxes(title_text="Wavelengths (A)", row=2, col=1)
+
+    fig.update_yaxes(range=[0, 2.5], row=2, col=1)
+
+    fig.update_layout(height=800, width=1200, margin=dict(l=60, r=20, t=50, b=100))
+
+    fig.add_annotation(
+        text=f"EXPNUM {hdr['EXPOSURE']} {star_data['b']['info']['fib']} GAIA {star_data['b']['info']['id']} {star_data['b']['info']['ra']} {star_data['b']['info']['de']}",
+        xref="paper", yref="paper", showarrow=False, font=dict(size=13, weight=600),
+        x=0.5, y=1.08, align="center"
+    )
+    obs_za = get_zenith_angle(star_data['b']['info'])
+    runtime_total = data.get('runtime_s', None)
+    method_used = data.get('method', None)
+    msg = (f"V={out.params['vel'].value:.2f} km/s "
+        f"Teff={out.params['teff'].value:.2f} K "
+        f"logg={out.params['logg'].value:.3f} "
+        f"[M/H]={out.params['metal'].value:.3f} "
+        f"[a/Fe]={out.params['alpha'].value:.3f} "
+        f"PWV={out.params['pwv'].value:.3f} mm "
+        f"ZA={out.params['za'].value:.1f}°, true={obs_za:.1f}° "
+        f"&#967;<sup>2</sup>={out.redchi:.3f} "
+        f"Nfev={out.nfev} "
+        f"{method_used} "
+        f"T={runtime_total:.2f}s"
+        )
+    fig.add_annotation(
+        text=msg,
+        xref="paper", yref="paper", showarrow=False, font=dict(size=12),
+        x=0.5, y=1.05, align="center"
+    )
+
+    # Save to HTML
+    if output_html_path is None:
+        output_html_path = f"{odir}/telluric_fit_{hdr['EXPOSURE']:08g}_{star_data['b']['info']['fib']}.html"
+    pio.write_html(fig, file=output_html_path, auto_open=False, include_plotlyjs='cdn')
+
+    return output_html_path
+
 # %%
 # run one spectrum
 istar = 7
-out, model, trans, mpoly, lsf, args, extra_data = fit_star_3spectra(stack_stars[istar], method="powell", mdegree=28)
+out, model, trans, mpoly, lsf, args, extra_data = \
+    fit_star_3spectra(stack_stars[istar], method="least_squares", mdegree=38, verbose=True)
 
 
 # %%
 # plot one spectrum
-plot_results(stack_stars[istar],out, model, trans, mpoly, lsf, *args, data=extra_data)
-
+plot_results_plotly(stack_stars[istar], out, model, trans, mpoly, lsf, *args, data=extra_data, odir="./figs")
 
 # %%
 # run all spectra
 for istar in range(N_STD):
-    out, model, trans, mpoly, lsf, args, extra_data = fit_star_3spectra(stack_stars[istar], method="powell", mdegree=28)
-    plot_results(stack_stars[istar],out, model, trans, mpoly, lsf, *args, data=extra_data)
-
+    out, model, trans, mpoly, lsf, args, extra_data = \
+        fit_star_3spectra(stack_stars[istar], method="powell", mdegree=28, verbose=True)
+    plot_results_plotly(stack_stars[istar], out, model, trans, mpoly, lsf, *args, data=extra_data, odir="./figs")
