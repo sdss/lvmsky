@@ -544,7 +544,7 @@ def residual_3spectra(p, arr_wave, arr_spec, arr_espec, arr_lsf, arr_mask, arr_s
 
         stellar_model_convolved *= transmission_rebined
         mpoly = calculate_mpoly(spec, espec, stellar_model_convolved, mask, data['mdegree'],
-                                sigma_threshold=3.0, niter=3)
+                                sigma_threshold=data['threshold'], niter=data['nit'])
         model = stellar_model_convolved * mpoly
 
         output_resid.append(spec - model)
@@ -595,6 +595,8 @@ def fit_star_3spectra(star_data, channels_to_fit=['b', 'r', 'z'], method="leasts
         stellar_templates=stellar_templates / 1.2e4,
         stellar_tri=stellar_tri,
         mdegree=mdegree,
+        threshold=3.0,
+        nit=3,
         palace_wave=palace_wave,
         palace_trans=palace_trans,
         palace_fH2O=palace_fH2O,
@@ -864,16 +866,16 @@ def plot_results_plotly(star_data, out, model, trans, mpoly, lsf, arr_wave,
 
     # Save to HTML
     if output_html_path is None:
-        output_html_path = f"{odir}/telluric_fit_{hdr['EXPOSURE']:08g}_{star_data['b']['info']['fib']}.html"
+        output_html_path = f"{odir}/telluric_fit_{hdr['EXPOSURE']:08g}_{star_data['b']['info']['fib']}_{method_used}.html"
     pio.write_html(fig, file=output_html_path, auto_open=False, include_plotlyjs='cdn')
 
     return output_html_path
 
 # %%
 # run one spectrum
-istar = 7
+istar = 0
 out, model, trans, mpoly, lsf, args, extra_data = \
-    fit_star_3spectra(stack_stars[istar], method="least_squares", mdegree=38, verbose=True)
+    fit_star_3spectra(stack_stars[istar], method="powell", mdegree=28, verbose=True)
 
 
 # %%
@@ -882,7 +884,8 @@ plot_results_plotly(stack_stars[istar], out, model, trans, mpoly, lsf, *args, da
 
 # %%
 # run all spectra
-for istar in range(N_STD):
+# for istar in range(N_STD):
+for istar in range(1, N_STD):
     out, model, trans, mpoly, lsf, args, extra_data = \
         fit_star_3spectra(stack_stars[istar], method="powell", mdegree=28, verbose=True)
     plot_results_plotly(stack_stars[istar], out, model, trans, mpoly, lsf, *args, data=extra_data, odir="./figs")
