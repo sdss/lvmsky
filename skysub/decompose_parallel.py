@@ -2,10 +2,10 @@
 Run sky spectral decomposition on a median-stacked LVM frame.
 
 Usage:
-    python run_sky_decomp.py <data_file> <palace_dir> [--n-workers N] [--lsf-sigma S] [--factor F] [--output-dir DIR]
+    python decompose_parallel.py <data_file> <palace_dir> [--n-workers N] [--lsf-sigma S] [--factor F] [--output-dir DIR]
 
 Example:
-    python run_sky_decomp.py lvmsframe_median_stack.fits ../ --n-workers 8
+    python decompose_parallel.py lvmsframe_median_stack.fits ../ --n-workers 8
 """
 
 import argparse
@@ -118,15 +118,20 @@ def run(data_file, palace_dir, n_workers, lsf_sigma, factor, output_dir):
     result_sky2 = [None] * len(idxs)
 
     t0 = time.perf_counter()
+    pbar = tqdm(total=len(idxs), desc="Spectra fitted")
+    
     with ProcessPoolExecutor(max_workers=n_workers) as executor:
         futures = {executor.submit(fit_chunk_worker, args): tid
                    for tid, args in enumerate(worker_args)}
-        for future in tqdm(as_completed(futures), total=n_workers, desc="Chunks done"):
+        for future in as_completed(futures):
             chunk_idxs, sci, sky1, sky2 = future.result()
             for i, idx in enumerate(chunk_idxs):
                 result_sci[idx]  = sci[i]
                 result_sky1[idx] = sky1[i]
                 result_sky2[idx] = sky2[i]
+            pbar.update(len(chunk_idxs))
+    
+    pbar.close()
 
     elapsed = time.perf_counter() - t0
     print(f"Fitting done in {elapsed:.1f}s ({elapsed/len(idxs):.2f}s per spectrum)")
