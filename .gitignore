@@ -56,3 +56,7 @@ Mkfile.old
 dkms.conf
 
 */SkyM_*.fits
+palace/
+Spectre_HR_LATMOS_Meftah_V1_350_1000nm.txt
+sky_decomp_results_*.fits
+lvmsframe_*
