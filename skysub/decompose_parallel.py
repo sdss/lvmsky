@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+
 """
 Run sky spectral decomposition on a median-stacked LVM frame.
 
@@ -9,9 +11,12 @@ Example:
 """
 
 import argparse
+import platform
+import sys
 import time
 from pathlib import Path
 from concurrent.futures import ProcessPoolExecutor, as_completed
+import multiprocessing as mp
 
 import numpy as np
 from astropy.io import fits
@@ -19,20 +24,54 @@ from astropy.table import Table
 from tqdm import tqdm
 
 
-def fit_chunk_worker(args):
-    """Worker function: builds its own SkyDecomp and fits a chunk of spectra."""
-    chunk_idxs, flx_sci_chunk, flx_sky1_chunk, flx_sky2_chunk, flx_ivar_chunk, wave, lsf_sigma, base_dir = args
+_WORKER_DECOMPOSER = None
+
+
+def init_worker(wave, lsf_sigma, base_dir):
+    """Initialise one SkyDecomp instance per worker process."""
+    global _WORKER_DECOMPOSER
+
+    # pid = mp.current_process().pid
+    # print(f"[worker {pid}] initializing SkyDecomp", file=sys.stderr, flush=True)
 
     from sky_decomp.fit import SkyDecomp
-    local_decomposer = SkyDecomp(wave, lsf_sigma=lsf_sigma, base_dir=base_dir)
+    _WORKER_DECOMPOSER = SkyDecomp(wave, lsf_sigma=lsf_sigma, base_dir=base_dir)
+    # print(f"[worker {pid}] SkyDecomp ready", file=sys.stderr, flush=True)
 
-    local_sci, local_sky1, local_sky2 = [], [], []
-    for i in range(len(chunk_idxs)):
-        local_sci.append(local_decomposer.fit(flx_sci_chunk[i],  flx_ivar_chunk[i], verbose=False, n_lsf_refits=3))
-        local_sky1.append(local_decomposer.fit(flx_sky1_chunk[i], flx_ivar_chunk[i], verbose=False, n_lsf_refits=3))
-        local_sky2.append(local_decomposer.fit(flx_sky2_chunk[i], flx_ivar_chunk[i], verbose=False, n_lsf_refits=3))
 
-    return chunk_idxs, local_sci, local_sky1, local_sky2
+def fit_single_worker(args):
+    """Fit one spectrum using the worker-local SkyDecomp instance."""
+    global _WORKER_DECOMPOSER
+    if _WORKER_DECOMPOSER is None:
+        raise RuntimeError("Worker SkyDecomp has not been initialised.")
+
+    kind, idx, flux_row, ivar_row = args
+    # if idx == 0:
+    #     pid = mp.current_process().pid
+    #     print(f"[worker {pid}] starting first fit: {kind}[{idx}]", file=sys.stderr, flush=True)
+    result = _WORKER_DECOMPOSER.fit(flux_row, ivar_row, verbose=False, n_lsf_refits=3)
+    return kind, idx, result
+
+
+def _get_mp_context():
+    if platform.system() == "Darwin":
+        return mp.get_context("spawn")
+    return mp.get_context()
+
+
+def resolve_base_dir(path_arg):
+    """Accept either the project base dir or the palace dir and return SkyDecomp base_dir."""
+    path = Path(path_arg).expanduser().resolve()
+
+    if (path / "palace" / "PMD").exists():
+        return path
+    if path.name == "palace" and (path / "PMD").exists():
+        return path.parent
+
+    raise FileNotFoundError(
+        "Could not resolve a valid SkyDecomp base directory from "
+        f"{path}. Expected either a base dir containing palace/PMD or the palace directory itself."
+    )
 
 
 def results_to_fits(results, filename):
@@ -59,10 +98,13 @@ def results_to_fits(results, filename):
         return np.vstack([getattr(r, attr) for r in results])
 
     coef_arr = stack("coef")
-    coef_hdu = fits.ImageHDU(coef_arr, name="COEF")
     design_names = results[0].design_names
-    for i, name in enumerate(design_names):
-        coef_hdu.header[f"COEF{i:04d}"] = name
+    if coef_arr.shape[1] != len(design_names):
+        raise ValueError(
+            f"Coefficient count ({coef_arr.shape[1]}) does not match number of design names ({len(design_names)})."
+        )
+    coef_table = Table({name: coef_arr[:, i] for i, name in enumerate(design_names)})
+    coef_hdu = fits.BinTableHDU(coef_table, name="COEF")
 
     hdul = fits.HDUList([
         fits.PrimaryHDU(),
@@ -83,6 +125,7 @@ def results_to_fits(results, filename):
 
 
 def run(data_file, palace_dir, n_workers, lsf_sigma, factor, output_dir):
+    base_dir = resolve_base_dir(palace_dir)
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -95,41 +138,43 @@ def run(data_file, palace_dir, n_workers, lsf_sigma, factor, output_dir):
 
     print(f"  {len(flx_sci)} spectra, {len(wave)} wavelength pixels")
     print(f"  n_workers={n_workers}, lsf_sigma={lsf_sigma}, factor={factor}")
+    print(f"  base_dir={base_dir}")
 
-    idxs   = list(range(len(flx_sci)))
-    chunks = np.array_split(idxs, n_workers)
-
-    worker_args = [
-        (
-            list(chunk),
-            flx_sci[chunk],
-            flx_sky1[chunk],
-            flx_sky2[chunk],
-            flx_ivar[chunk],
-            wave,
-            lsf_sigma,
-            palace_dir,
-        )
-        for chunk in chunks
-    ]
+    idxs = list(range(len(flx_sci)))
+    worker_args = []
+    for idx in idxs:
+        worker_args.append(("sci", idx, flx_sci[idx], flx_ivar[idx]))
+        worker_args.append(("sky1", idx, flx_sky1[idx], flx_ivar[idx]))
+        worker_args.append(("sky2", idx, flx_sky2[idx], flx_ivar[idx]))
 
     result_sci  = [None] * len(idxs)
     result_sky1 = [None] * len(idxs)
     result_sky2 = [None] * len(idxs)
+    completed = 0
 
     t0 = time.perf_counter()
-    pbar = tqdm(total=len(idxs), desc="Spectra fitted")
-    
-    with ProcessPoolExecutor(max_workers=n_workers) as executor:
-        futures = {executor.submit(fit_chunk_worker, args): tid
-                   for tid, args in enumerate(worker_args)}
+    pbar = tqdm(total=len(worker_args), desc="Fits completed", mininterval=0.5)
+
+    mp_context = _get_mp_context()
+    with ProcessPoolExecutor(
+        max_workers=n_workers,
+        mp_context=mp_context,
+        initializer=init_worker,
+        initargs=(wave, lsf_sigma, str(base_dir)),
+    ) as executor:
+        futures = [executor.submit(fit_single_worker, args) for args in worker_args]
         for future in as_completed(futures):
-            chunk_idxs, sci, sky1, sky2 = future.result()
-            for i, idx in enumerate(chunk_idxs):
-                result_sci[idx]  = sci[i]
-                result_sky1[idx] = sky1[i]
-                result_sky2[idx] = sky2[i]
-            pbar.update(len(chunk_idxs))
+            kind, idx, result = future.result()
+            if kind == "sci":
+                result_sci[idx] = result
+            elif kind == "sky1":
+                result_sky1[idx] = result
+            else:
+                result_sky2[idx] = result
+            completed += 1
+            pbar.update(1)
+            # if completed == 1 or completed % 10 == 0:
+            #     print(f"Completed {completed}/{len(worker_args)} fits", flush=True)
     
     pbar.close()
 
@@ -145,7 +190,7 @@ def run(data_file, palace_dir, n_workers, lsf_sigma, factor, output_dir):
 def main():
     parser = argparse.ArgumentParser(description="LVM sky spectral decomposition")
     parser.add_argument("data_file",    help="Input FITS file (median stacked LVM frame)")
-    parser.add_argument("palace_dir",   help="Path to PALACE data directory")
+    parser.add_argument("palace_dir",   help="Path to the project base directory or directly to the palace directory")
     parser.add_argument("--n-workers",  type=int,   default=4,    help="Number of parallel worker processes (default: 4)")
     parser.add_argument("--lsf-sigma",  type=float, default=0.5,  help="LSF Gaussian sigma in Å (default: 0.5)")
     parser.add_argument("--factor",     type=float, default=1e14, help="Flux scaling factor (default: 1e14)")
