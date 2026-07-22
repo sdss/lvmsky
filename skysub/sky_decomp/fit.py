@@ -139,6 +139,8 @@ class SkyDecompResult:
     lsf_kernels: dict[str, np.ndarray]
     lsf_metrics: dict[str, dict[str, object]]
     bestfit_lsf: np.ndarray
+    moon_knots: np.ndarray
+    moon_boosted_pixels: np.ndarray
 
 
 class SkyDecomp:
@@ -151,12 +153,20 @@ class SkyDecomp:
         base_dir: str | Path | None = None,
         o2_min_valid_frac: float = O2_MIN_VALID_FRAC,
         moon_smooth_lambda: float = 1e-3,
+        moon_interline_boost: float = 0.0,
+        moon_interline_red_min: float = 7454.0,
+        moon_interline_exclusion_a: float = 3.0,
+        moon_interline_line_flux_threshold: float = 0.0,
     ) -> None:
         self.wave = np.asarray(wave, float)
         self.lsf_sigma = np.asarray(lsf_sigma, float)
         self.n_spline_knots = int(n_spline_knots)
         self.o2_min_valid_frac = float(np.clip(o2_min_valid_frac, 0.0, 1.0))
         self.moon_smooth_lambda = max(float(moon_smooth_lambda), 0.0)
+        self.moon_interline_boost = max(float(moon_interline_boost), 0.0)
+        self.moon_interline_red_min = float(moon_interline_red_min)
+        self.moon_interline_exclusion_a = max(float(moon_interline_exclusion_a), 0.0)
+        self.moon_interline_line_flux_threshold = float(np.clip(moon_interline_line_flux_threshold, 0.0, 1.0))
         self.base_dir = (
             Path(base_dir).resolve() if base_dir is not None else Path(__file__).resolve().parent.parent
         )
@@ -184,6 +194,8 @@ class SkyDecomp:
         self.lsf_kernels: dict[str, np.ndarray] = {}
         self.lsf_metrics: dict[str, dict[str, object]] = {}
         self.bestfit_lsf = np.zeros_like(self.wave)
+        self.moon_knots_used = np.array([], float)
+        self.moon_boosted_pixels_used = np.array([], float)
 
         self._build_static_basis()
 
@@ -217,7 +229,13 @@ class SkyDecomp:
                 self.matrix_o2,
             )
         )
-        first = self._fit_design(self.design_matrix, flux, ivar, moon_slice=comp_slices["moon"])
+        first = self._fit_design(
+            self.design_matrix,
+            flux,
+            ivar,
+            moon_slice=comp_slices["moon"],
+            diffuse_slice=comp_slices["diffuse"],
+        )
         self.bestfit = first["bestfit"]
         refined = first
         final_matrices = self._matrix_bundle(
@@ -237,7 +255,13 @@ class SkyDecomp:
             self._fit_lsf_channels(flux, ivar, source_lsf, fixed_background)
             final_matrices = self._assemble_refined_matrices()
             refined_design = np.vstack([final_matrices[name] for name in ("oh", "moon", "diffuse", "atom", "orc", "o2")])
-            refined = self._fit_design(refined_design, flux, ivar, moon_slice=comp_slices["moon"])
+            refined = self._fit_design(
+                refined_design,
+                flux,
+                ivar,
+                moon_slice=comp_slices["moon"],
+                diffuse_slice=comp_slices["diffuse"],
+            )
             iter_logs.append(
                 {
                     "iter": i_refit,
@@ -275,6 +299,8 @@ class SkyDecomp:
             f"status={refined['status']} | npar={refined['n_par']} | ngood={refined['n_good']} | "
             f"chi2_red={refined['reduced_chi2']:.4g} | R2={refined['r2']:.5f} | "
             f"qp_dt={refined['qp_elapsed_sec']:.2f}s | moon_smooth_lambda={self.moon_smooth_lambda:.3g} | "
+            f"moon_interline_boost={self.moon_interline_boost:.3g} | "
+            f"moon_interline_line_flux_threshold={self.moon_interline_line_flux_threshold:.3g} | "
             f"n_lsf_refits={n_lsf_refits} | dt={fit_elapsed_sec:.2f}s"
         )
         self.r2 = refined["r2"]
@@ -341,6 +367,8 @@ class SkyDecomp:
             lsf_kernels=self.lsf_kernels,
             lsf_metrics=self.lsf_metrics,
             bestfit_lsf=self.bestfit_lsf,
+            moon_knots=self.moon_knots_used.copy(),
+            moon_boosted_pixels=self.moon_boosted_pixels_used.copy(),
         )
 
     @staticmethod
@@ -368,56 +396,115 @@ class SkyDecomp:
         ivar: np.ndarray,
         *,
         moon_slice: slice | None = None,
+        diffuse_slice: slice | None = None,
     ) -> dict[str, object]:
         good = np.isfinite(flux) & np.isfinite(ivar) & (ivar > 0)
         y = flux[good]
-        w = np.sqrt(ivar[good])
+        base_w = np.sqrt(ivar[good])
+        self.moon_boosted_pixels_used = np.array([], float)
+        boosted_w = None
+        if self.moon_interline_boost > 0.0:
+            interline_weight = self._moon_interline_weights()
+            boosted_mask = good & (interline_weight > (1.0 + 1e-12))
+            self.moon_boosted_pixels_used = self.wave[boosted_mask]
+            boosted_w = base_w * np.sqrt(interline_weight[good])
         n_good = int(np.sum(good))
 
         a = design_matrix[:, good].T
-        aw = a * w[:, None]
-        yw = y * w
-        data_scale = max(float(np.sqrt(np.nanmean(yw**2))) if yw.size else 1.0, 1.0)
-        aw = aw / data_scale
-        yw = yw / data_scale
-        col_scale = np.sqrt(np.sum(aw**2, axis=0))
-        col_scale = np.where(np.isfinite(col_scale) & (col_scale > 0), col_scale, 1.0)
-        aw = aw / col_scale[None, :]
 
-        p_dense = aw.T @ aw
-        q = -(aw.T @ yw)
-        n_par = int(p_dense.shape[0])
+        def _solve_nonnegative_weighted(
+            a_mat: np.ndarray,
+            y_vec: np.ndarray,
+            w_vec: np.ndarray,
+            moon_slice_local: slice | None,
+        ) -> tuple[np.ndarray, str, float]:
+            aw = a_mat * w_vec[:, None]
+            yw = y_vec * w_vec
+            data_scale = max(float(np.sqrt(np.nanmean(yw**2))) if yw.size else 1.0, 1.0)
+            aw = aw / data_scale
+            yw = yw / data_scale
+            col_scale = np.sqrt(np.sum(aw**2, axis=0))
+            col_scale = np.where(np.isfinite(col_scale) & (col_scale > 0), col_scale, 1.0)
+            aw = aw / col_scale[None, :]
 
-        # Penalize curvature of moon-spline coefficients to suppress oscillations.
-        if self.moon_smooth_lambda > 0.0 and moon_slice is not None:
-            i0 = moon_slice.start or 0
-            i1 = moon_slice.stop or i0
-            n_moon = i1 - i0
-            if n_moon >= 3:
-                d2 = np.zeros((n_moon - 2, n_moon), dtype=float)
-                idx = np.arange(n_moon - 2)
-                d2[idx, idx] = 1.0
-                d2[idx, idx + 1] = -2.0
-                d2[idx, idx + 2] = 1.0
+            p_dense_local = aw.T @ aw
 
-                cscale_moon = 1.0 / col_scale[i0:i1]
-                d2_scaled = d2 * cscale_moon[None, :]
-                reg = d2_scaled.T @ d2_scaled
-                p_dense[i0:i1, i0:i1] += 2.0 * self.moon_smooth_lambda * reg
+            # Penalize curvature of moon-spline coefficients to suppress oscillations.
+            if self.moon_smooth_lambda > 0.0 and moon_slice_local is not None:
+                i0 = moon_slice_local.start or 0
+                i1 = moon_slice_local.stop or i0
+                n_moon = i1 - i0
+                if n_moon >= 3:
+                    d2 = np.zeros((n_moon - 2, n_moon), dtype=float)
+                    idx = np.arange(n_moon - 2)
+                    d2[idx, idx] = 1.0
+                    d2[idx, idx + 1] = -2.0
+                    d2[idx, idx + 2] = 1.0
 
-        p = sp.csc_matrix((p_dense + p_dense.T) / 2.0)
-        p = sp.triu(p).tocsc()
-        a_con = -sp.eye(n_par, format="csc")
-        b_con = np.zeros(n_par, dtype=np.float64)
-        cones = [clarabel.NonnegativeConeT(n_par)]
-        settings = clarabel.DefaultSettings()
-        settings.verbose = False
+                    cscale_moon = 1.0 / col_scale[i0:i1]
+                    d2_scaled = d2 * cscale_moon[None, :]
+                    reg = d2_scaled.T @ d2_scaled
+                    p_dense_local[i0:i1, i0:i1] += 2.0 * self.moon_smooth_lambda * reg
 
-        t_qp = time.perf_counter()
-        solver = clarabel.DefaultSolver(p, np.asarray(q, dtype=np.float64), a_con, b_con, cones, settings)
-        qp_result = solver.solve()
-        qp_elapsed_sec = time.perf_counter() - t_qp
-        coef = np.asarray(qp_result.x, float) / col_scale
+            q_local = -(aw.T @ yw)
+            n_par_local = int(p_dense_local.shape[0])
+            p_local = sp.csc_matrix((p_dense_local + p_dense_local.T) / 2.0)
+            p_local = sp.triu(p_local).tocsc()
+            a_con = -sp.eye(n_par_local, format="csc")
+            b_con = np.zeros(n_par_local, dtype=np.float64)
+            cones = [clarabel.NonnegativeConeT(n_par_local)]
+            settings = clarabel.DefaultSettings()
+            settings.verbose = False
+
+            t_qp_local = time.perf_counter()
+            solver = clarabel.DefaultSolver(p_local, np.asarray(q_local, dtype=np.float64), a_con, b_con, cones, settings)
+            qp_result_local = solver.solve()
+            qp_dt_local = time.perf_counter() - t_qp_local
+            coef_local = np.asarray(qp_result_local.x, float) / col_scale
+            return coef_local, str(qp_result_local.status), qp_dt_local
+
+        n_par = int(a.shape[1])
+        coef, status, qp_elapsed_sec = _solve_nonnegative_weighted(a, y, base_w, moon_slice)
+
+        target_cols = []
+        for comp_slice in (moon_slice, diffuse_slice):
+            if comp_slice is None:
+                continue
+            i0 = comp_slice.start or 0
+            i1 = comp_slice.stop or i0
+            if i1 > i0:
+                target_cols.extend(range(i0, i1))
+        target_cols = sorted(set(target_cols))
+
+        if boosted_w is not None and target_cols:
+            target_cols_arr = np.asarray(target_cols, dtype=int)
+            fixed_cols_arr = np.setdiff1d(np.arange(a.shape[1], dtype=int), target_cols_arr, assume_unique=True)
+            y_target = y.copy()
+            if fixed_cols_arr.size > 0:
+                y_target = y_target - a[:, fixed_cols_arr] @ coef[fixed_cols_arr]
+
+            a_target = a[:, target_cols_arr]
+            moon_slice_local = None
+            if moon_slice is not None:
+                m0 = moon_slice.start or 0
+                m1 = moon_slice.stop or m0
+                if m1 > m0:
+                    moon_global = np.arange(m0, m1, dtype=int)
+                    local_pos = np.searchsorted(target_cols_arr, moon_global)
+                    in_bounds = (local_pos >= 0) & (local_pos < target_cols_arr.size)
+                    local_pos = local_pos[in_bounds]
+                    local_pos = local_pos[target_cols_arr[local_pos] == moon_global[in_bounds]]
+                    if local_pos.size > 0:
+                        moon_slice_local = slice(int(local_pos.min()), int(local_pos.max()) + 1)
+            coef_target, status_target, qp_dt_target = _solve_nonnegative_weighted(
+                a_target,
+                y_target,
+                boosted_w,
+                moon_slice_local,
+            )
+            coef[target_cols_arr] = coef_target
+            status = f"{status} | md_refit={status_target}"
+            qp_elapsed_sec += qp_dt_target
 
         bestfit = design_matrix.T @ coef
         resid = flux - bestfit
@@ -431,7 +518,7 @@ class SkyDecomp:
         r2 = 1.0 - chi2 / sst if np.isfinite(sst) and sst > 0 else np.nan
         return {
             "coef": coef,
-            "status": str(qp_result.status),
+            "status": status,
             "bestfit": bestfit,
             "resid": resid,
             "resid_level": resid_level,
@@ -510,12 +597,12 @@ class SkyDecomp:
 
     def _build_static_basis(self) -> None:
         self.matrix_oh = self._build_oh()
-        self.matrix_moon, self.moon_names = self._build_moon()
-        self.matrix_diffuse, self.diffuse_names = self._build_diffuse()
         self.matrix_atom, self.atom_names = self._build_atom()
         self.matrix_orc, self.orc_names = self._build_orc()
         self.o2_names = ["O2_b01"]
         self._load_o2_model()
+        self.matrix_moon, self.moon_names = self._build_moon()
+        self.matrix_diffuse, self.diffuse_names = self._build_diffuse()
         self.design_names = (
             [f"OH_{i:03d}" for i in range(self.matrix_oh.shape[0])]
             + self.moon_names
@@ -571,13 +658,60 @@ class SkyDecomp:
         self.vector_moon = solar_rb
 
         w0, w1 = self.wave[0], self.wave[-1]
-        interior = np.linspace(w0, w1, self.n_spline_knots + 2)[1:-1]
+        interior = self._uniform_moon_knots(w0, w1, self.n_spline_knots)
+
+        self.moon_knots_used = interior.copy()
+
         t_knots = np.r_[(w0,) * 4, interior, (w1,) * 4]
         matrix_bspl = BSpline.design_matrix(self.wave, t_knots, 3).toarray()
         matrix_moon = (solar_rb[:, None] * matrix_bspl).T
         self.matrix_moon_hr = (solar_hr[:, None] * matrix_bspl).T
         moon_names = [f"Moon_bs{i:02d}" for i in range(matrix_moon.shape[0])]
         return matrix_moon, moon_names
+
+    @staticmethod
+    def _uniform_moon_knots(w0: float, w1: float, n_knots: int) -> np.ndarray:
+        n_knots = max(int(n_knots), 0)
+        if n_knots == 0:
+            return np.array([], float)
+        return np.linspace(float(w0), float(w1), n_knots + 2)[1:-1]
+
+    def _moon_interline_weights(self) -> np.ndarray:
+        line_signal = self._line_density_vector()
+        finite = np.isfinite(line_signal)
+        positive = finite & (line_signal > 0)
+        line_signal_norm = np.zeros_like(line_signal, dtype=float)
+        if np.any(positive):
+            sig_max = float(np.nanmax(line_signal[positive]))
+            if np.isfinite(sig_max) and sig_max > 0:
+                line_signal_norm[positive] = line_signal[positive] / sig_max
+        # Use a strict binary mask around detected lines; this enforces that
+        # only genuinely line-free pixels receive boosted weight.
+        raw_line_mask = finite & (line_signal_norm > self.moon_interline_line_flux_threshold)
+        line_mask = raw_line_mask.copy()
+        if self.moon_interline_exclusion_a > 0 and self.wave.size > 2:
+            dw = np.gradient(self.wave)
+            dw_med = max(float(np.nanmedian(np.abs(dw))), 1e-6)
+            n_pix = int(np.ceil(self.moon_interline_exclusion_a / dw_med))
+            if n_pix > 0:
+                ker = np.ones(2 * n_pix + 1, dtype=int)
+                line_mask = np.convolve(raw_line_mask.astype(int), ker, mode="same") > 0
+
+        between = (~line_mask).astype(float)
+        red_mask = self.wave >= self.moon_interline_red_min
+        return 1.0 + self.moon_interline_boost * between * red_mask.astype(float)
+
+    def _line_density_vector(self) -> np.ndarray:
+        out = np.zeros_like(self.wave, dtype=float)
+        for name in ("matrix_oh_stick", "matrix_atom_stick", "matrix_orc_stick"):
+            mat = getattr(self, name, None)
+            if mat is not None and np.size(mat) > 0:
+                out += np.nansum(np.abs(np.asarray(mat, float)), axis=0)
+
+        o2_stick = getattr(self, "vector_o2_stick", None)
+        if o2_stick is not None and np.size(o2_stick) > 0:
+            out += np.abs(np.asarray(o2_stick, float))
+        return out
 
     def _build_diffuse(self) -> tuple[np.ndarray, list[str]]:
         ref = Table.read(self._pmd_path("pmd_refcont.dat"), format="ascii")
@@ -971,6 +1105,10 @@ def reconstruct_component_spectra(
     n_spline_knots: int = 25,
     base_dir: str | Path | None = None,
     o2_vector: np.ndarray | None = None,
+    moon_interline_boost: float = 0.0,
+    moon_interline_red_min: float = 7454.0,
+    moon_interline_exclusion_a: float = 3.0,
+    moon_interline_line_flux_threshold: float = 0.0,
 ) -> dict[str, np.ndarray]:
     """Reconstruct component spectra from decomposition coefficients.
 
@@ -988,6 +1126,18 @@ def reconstruct_component_spectra(
         Root path containing PALACE/PMD and solar reference files.
     o2_vector
         Optional precomputed O2 template on `wave`. If omitted, O2 is set to zero.
+    moon_interline_boost
+        Extra weighting amplitude for line-free red pixels in the moon-spline fit.
+        Weight map is `1 + moon_interline_boost * between_lines` in the red region.
+    moon_interline_red_min
+        Wavelength threshold (Angstrom) above which inter-line weighting is applied.
+    moon_interline_exclusion_a
+        Characteristic half-width (Angstrom) used to broaden line influence when
+        defining between-line pixels.
+    moon_interline_line_flux_threshold
+        Normalized threshold in [0, 1] applied to line-signal strength before
+        building exclusion windows. Only pixels above this threshold are treated
+        as line centers for exclusion.
 
     Returns
     -------
@@ -1000,6 +1150,10 @@ def reconstruct_component_spectra(
         lsf_sigma=lsf_sigma,
         n_spline_knots=n_spline_knots,
         base_dir=base_dir,
+        moon_interline_boost=moon_interline_boost,
+        moon_interline_red_min=moon_interline_red_min,
+        moon_interline_exclusion_a=moon_interline_exclusion_a,
+        moon_interline_line_flux_threshold=moon_interline_line_flux_threshold,
     )
 
     coef_arr = np.asarray(coef, float).ravel()
