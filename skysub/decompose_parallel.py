@@ -35,7 +35,7 @@ def init_worker(wave, lsf_sigma, base_dir):
     # print(f"[worker {pid}] initializing SkyDecomp", file=sys.stderr, flush=True)
 
     from sky_decomp.fit import SkyDecomp
-    _WORKER_DECOMPOSER = SkyDecomp(wave, lsf_sigma=lsf_sigma, base_dir=base_dir)
+    _WORKER_DECOMPOSER = SkyDecomp(wave, lsf_sigma=lsf_sigma, base_dir=base_dir, moon_smooth_lambda=0.5)
     # print(f"[worker {pid}] SkyDecomp ready", file=sys.stderr, flush=True)
 
 

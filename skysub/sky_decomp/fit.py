@@ -150,11 +150,13 @@ class SkyDecomp:
         n_spline_knots: int = 25,
         base_dir: str | Path | None = None,
         o2_min_valid_frac: float = O2_MIN_VALID_FRAC,
+        moon_smooth_lambda: float = 1e-3,
     ) -> None:
         self.wave = np.asarray(wave, float)
         self.lsf_sigma = np.asarray(lsf_sigma, float)
         self.n_spline_knots = int(n_spline_knots)
         self.o2_min_valid_frac = float(np.clip(o2_min_valid_frac, 0.0, 1.0))
+        self.moon_smooth_lambda = max(float(moon_smooth_lambda), 0.0)
         self.base_dir = (
             Path(base_dir).resolve() if base_dir is not None else Path(__file__).resolve().parent.parent
         )
@@ -205,7 +207,17 @@ class SkyDecomp:
 
         self._prefit_o2(flux, ivar)
         self.design_matrix = self._assemble_design_matrix()
-        first = self._fit_design(self.design_matrix, flux, ivar)
+        comp_slices = self._component_slices(
+            self._matrix_bundle(
+                self.matrix_oh,
+                self.matrix_moon,
+                self.matrix_diffuse,
+                self.matrix_atom,
+                self.matrix_orc,
+                self.matrix_o2,
+            )
+        )
+        first = self._fit_design(self.design_matrix, flux, ivar, moon_slice=comp_slices["moon"])
         self.bestfit = first["bestfit"]
         refined = first
         final_matrices = self._matrix_bundle(
@@ -225,7 +237,7 @@ class SkyDecomp:
             self._fit_lsf_channels(flux, ivar, source_lsf, fixed_background)
             final_matrices = self._assemble_refined_matrices()
             refined_design = np.vstack([final_matrices[name] for name in ("oh", "moon", "diffuse", "atom", "orc", "o2")])
-            refined = self._fit_design(refined_design, flux, ivar)
+            refined = self._fit_design(refined_design, flux, ivar, moon_slice=comp_slices["moon"])
             iter_logs.append(
                 {
                     "iter": i_refit,
@@ -262,7 +274,8 @@ class SkyDecomp:
         self.fit_summary = (
             f"status={refined['status']} | npar={refined['n_par']} | ngood={refined['n_good']} | "
             f"chi2_red={refined['reduced_chi2']:.4g} | R2={refined['r2']:.5f} | "
-            f"qp_dt={refined['qp_elapsed_sec']:.2f}s | n_lsf_refits={n_lsf_refits} | dt={fit_elapsed_sec:.2f}s"
+            f"qp_dt={refined['qp_elapsed_sec']:.2f}s | moon_smooth_lambda={self.moon_smooth_lambda:.3g} | "
+            f"n_lsf_refits={n_lsf_refits} | dt={fit_elapsed_sec:.2f}s"
         )
         self.r2 = refined["r2"]
         self.rms_resid = refined["rms_resid"]
@@ -348,7 +361,14 @@ class SkyDecomp:
             "o2": matrix_o2,
         }
 
-    def _fit_design(self, design_matrix: np.ndarray, flux: np.ndarray, ivar: np.ndarray) -> dict[str, object]:
+    def _fit_design(
+        self,
+        design_matrix: np.ndarray,
+        flux: np.ndarray,
+        ivar: np.ndarray,
+        *,
+        moon_slice: slice | None = None,
+    ) -> dict[str, object]:
         good = np.isfinite(flux) & np.isfinite(ivar) & (ivar > 0)
         y = flux[good]
         w = np.sqrt(ivar[good])
@@ -367,6 +387,23 @@ class SkyDecomp:
         p_dense = aw.T @ aw
         q = -(aw.T @ yw)
         n_par = int(p_dense.shape[0])
+
+        # Penalize curvature of moon-spline coefficients to suppress oscillations.
+        if self.moon_smooth_lambda > 0.0 and moon_slice is not None:
+            i0 = moon_slice.start or 0
+            i1 = moon_slice.stop or i0
+            n_moon = i1 - i0
+            if n_moon >= 3:
+                d2 = np.zeros((n_moon - 2, n_moon), dtype=float)
+                idx = np.arange(n_moon - 2)
+                d2[idx, idx] = 1.0
+                d2[idx, idx + 1] = -2.0
+                d2[idx, idx + 2] = 1.0
+
+                cscale_moon = 1.0 / col_scale[i0:i1]
+                d2_scaled = d2 * cscale_moon[None, :]
+                reg = d2_scaled.T @ d2_scaled
+                p_dense[i0:i1, i0:i1] += 2.0 * self.moon_smooth_lambda * reg
 
         p = sp.csc_matrix((p_dense + p_dense.T) / 2.0)
         p = sp.triu(p).tocsc()
@@ -926,4 +963,89 @@ class SkyDecomp:
         return path
 
 
-__all__ = ["SkyDecomp", "SkyDecompResult", "vac_to_air", "decode_hitran_id", "grp2vector"]
+def reconstruct_component_spectra(
+    wave: np.ndarray,
+    coef: np.ndarray,
+    lsf_sigma: np.ndarray | float,
+    *,
+    n_spline_knots: int = 25,
+    base_dir: str | Path | None = None,
+    o2_vector: np.ndarray | None = None,
+) -> dict[str, np.ndarray]:
+    """Reconstruct component spectra from decomposition coefficients.
+
+    Parameters
+    ----------
+    wave
+        Wavelength grid in Angstrom.
+    coef
+        Coefficient vector matching the internal design-matrix order.
+    lsf_sigma
+        Gaussian LSF sigma (scalar or per-pixel vector) used to build line bases.
+    n_spline_knots
+        Number of interior moon B-spline knots.
+    base_dir
+        Root path containing PALACE/PMD and solar reference files.
+    o2_vector
+        Optional precomputed O2 template on `wave`. If omitted, O2 is set to zero.
+
+    Returns
+    -------
+    dict[str, np.ndarray]
+        Component spectra with keys: `oh`, `moon`, `ho2`, `feo`, `o2ac`,
+        `diffuse`, `atom`, `orc`, `o2`, and `total`.
+    """
+    model = SkyDecomp(
+        wave,
+        lsf_sigma=lsf_sigma,
+        n_spline_knots=n_spline_knots,
+        base_dir=base_dir,
+    )
+
+    coef_arr = np.asarray(coef, float).ravel()
+
+    if o2_vector is not None:
+        o2_vec = np.asarray(o2_vector, float).ravel()
+        if o2_vec.shape != model.wave.shape:
+            raise ValueError(
+                f"o2_vector shape mismatch: expected {model.wave.shape}, got {o2_vec.shape}"
+            )
+        model.vector_o2 = o2_vec
+        model.matrix_o2 = o2_vec[None, :]
+        model.vector_o2_stick = o2_vec.copy()
+        model.matrix_o2_stick = o2_vec[None, :]
+
+    mats = model._matrix_bundle(
+        model.matrix_oh,
+        model.matrix_moon,
+        model.matrix_diffuse,
+        model.matrix_atom,
+        model.matrix_orc,
+        model.matrix_o2,
+    )
+    n_expected = sum(m.shape[0] for m in mats.values())
+    if coef_arr.size != n_expected:
+        raise ValueError(
+            f"Coefficient length mismatch: expected {n_expected}, got {coef_arr.size}"
+        )
+
+    comps = model._components_from_coef(coef_arr, mats)
+    comps["total"] = (
+        comps["oh"]
+        + comps["moon"]
+        + comps["diffuse"]
+        + comps["atom"]
+        + comps["orc"]
+        + comps["o2"]
+    )
+    return comps
+
+
+__all__ = [
+    "SkyDecomp",
+    "SkyDecompResult",
+    "vac_to_air",
+    "decode_hitran_id",
+    "grp2vector",
+    "reconstruct_component_spectra",
+]
