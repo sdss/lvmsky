@@ -299,7 +299,7 @@ class SkyDecomp:
             f"status={refined['status']} | npar={refined['n_par']} | ngood={refined['n_good']} | "
             f"chi2_red={refined['reduced_chi2']:.4g} | R2={refined['r2']:.5f} | "
             f"qp_dt={refined['qp_elapsed_sec']:.2f}s | moon_smooth_lambda={self.moon_smooth_lambda:.3g} | "
-            f"moon_interline_boost={self.moon_interline_boost:.3g} | "
+            f"moon_mask_downweight_boost={self.moon_interline_boost:.3g} | "
             f"moon_interline_line_flux_threshold={self.moon_interline_line_flux_threshold:.3g} | "
             f"n_lsf_refits={n_lsf_refits} | dt={fit_elapsed_sec:.2f}s"
         )
@@ -405,8 +405,8 @@ class SkyDecomp:
         boosted_w = None
         if self.moon_interline_boost > 0.0:
             interline_weight = self._moon_interline_weights()
-            boosted_mask = good & (interline_weight > (1.0 + 1e-12))
-            self.moon_boosted_pixels_used = self.wave[boosted_mask]
+            masked_mask = good & (interline_weight < (1.0 - 1e-12))
+            self.moon_boosted_pixels_used = self.wave[masked_mask]
             boosted_w = base_w * np.sqrt(interline_weight[good])
         n_good = int(np.sum(good))
 
@@ -685,8 +685,8 @@ class SkyDecomp:
             sig_max = float(np.nanmax(line_signal[positive]))
             if np.isfinite(sig_max) and sig_max > 0:
                 line_signal_norm[positive] = line_signal[positive] / sig_max
-        # Use a strict binary mask around detected lines; this enforces that
-        # only genuinely line-free pixels receive boosted weight.
+        # Use a strict binary mask around detected lines; masked pixels are
+        # down-weighted while unmasked pixels keep nominal weight.
         raw_line_mask = finite & (line_signal_norm > self.moon_interline_line_flux_threshold)
         line_mask = raw_line_mask.copy()
         if self.moon_interline_exclusion_a > 0 and self.wave.size > 2:
@@ -697,9 +697,15 @@ class SkyDecomp:
                 ker = np.ones(2 * n_pix + 1, dtype=int)
                 line_mask = np.convolve(raw_line_mask.astype(int), ker, mode="same") > 0
 
-        between = (~line_mask).astype(float)
         red_mask = self.wave >= self.moon_interline_red_min
-        return 1.0 + self.moon_interline_boost * between * red_mask.astype(float)
+        masked = line_mask & red_mask
+
+        # Reuse the existing knob: larger values mean stronger suppression of
+        # masked pixels, with floor weight 1 / (1 + boost).
+        w = np.ones_like(self.wave, dtype=float)
+        if self.moon_interline_boost > 0.0:
+            w[masked] = 1.0 / (1.0 + self.moon_interline_boost)
+        return w
 
     def _line_density_vector(self) -> np.ndarray:
         out = np.zeros_like(self.wave, dtype=float)
@@ -1127,13 +1133,13 @@ def reconstruct_component_spectra(
     o2_vector
         Optional precomputed O2 template on `wave`. If omitted, O2 is set to zero.
     moon_interline_boost
-        Extra weighting amplitude for line-free red pixels in the moon-spline fit.
-        Weight map is `1 + moon_interline_boost * between_lines` in the red region.
+        Strength of down-weighting for masked red pixels in the moon-spline fit.
+        Masked-pixel weight is `1 / (1 + moon_interline_boost)`.
     moon_interline_red_min
-        Wavelength threshold (Angstrom) above which inter-line weighting is applied.
+        Wavelength threshold (Angstrom) above which masking/down-weighting is applied.
     moon_interline_exclusion_a
         Characteristic half-width (Angstrom) used to broaden line influence when
-        defining between-line pixels.
+        defining masked line neighborhoods.
     moon_interline_line_flux_threshold
         Normalized threshold in [0, 1] applied to line-signal strength before
         building exclusion windows. Only pixels above this threshold are treated
