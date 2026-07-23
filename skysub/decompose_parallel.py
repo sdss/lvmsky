@@ -4,7 +4,7 @@
 Run sky spectral decomposition on a median-stacked LVM frame.
 
 Usage:
-    python decompose_parallel.py <data_file> <palace_dir> [--n-workers N] [--lsf-sigma S] [--factor F] [--output-dir DIR]
+    python decompose_parallel.py <data_file> <palace_dir> [--n-workers N] [--lsf-sigma S] [--factor F] [--chunk-size N] [--output-dir DIR]
 
 Example:
     python decompose_parallel.py lvmsframe_median_stack.fits ../ --n-workers 8
@@ -15,7 +15,7 @@ import platform
 import sys
 import time
 from pathlib import Path
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, wait, FIRST_COMPLETED
 import multiprocessing as mp
 
 import numpy as np
@@ -25,16 +25,18 @@ from tqdm import tqdm
 
 
 _WORKER_DECOMPOSER = None
+_WORKER_FACTOR = 1.0
 
 
-def init_worker(wave, lsf_sigma, base_dir):
+def init_worker(wave, lsf_sigma, base_dir, factor):
     """Initialise one SkyDecomp instance per worker process."""
-    global _WORKER_DECOMPOSER
+    global _WORKER_DECOMPOSER, _WORKER_FACTOR
 
     # pid = mp.current_process().pid
     # print(f"[worker {pid}] initializing SkyDecomp", file=sys.stderr, flush=True)
 
     from sky_decomp.fit import SkyDecomp
+    _WORKER_FACTOR = float(factor)
     _WORKER_DECOMPOSER = SkyDecomp(wave, lsf_sigma=lsf_sigma, base_dir=base_dir,\
                                     moon_smooth_lambda=0.1,\
                                     moon_interline_boost=10000.0,\
@@ -44,18 +46,22 @@ def init_worker(wave, lsf_sigma, base_dir):
     # print(f"[worker {pid}] SkyDecomp ready", file=sys.stderr, flush=True)
 
 
-def fit_single_worker(args):
-    """Fit one spectrum using the worker-local SkyDecomp instance."""
-    global _WORKER_DECOMPOSER
+def fit_chunk_worker(args):
+    """Fit one chunk of spectra using the worker-local SkyDecomp instance."""
+    global _WORKER_DECOMPOSER, _WORKER_FACTOR
     if _WORKER_DECOMPOSER is None:
         raise RuntimeError("Worker SkyDecomp has not been initialised.")
 
-    kind, idx, flux_row, ivar_row = args
-    # if idx == 0:
-    #     pid = mp.current_process().pid
-    #     print(f"[worker {pid}] starting first fit: {kind}[{idx}]", file=sys.stderr, flush=True)
-    result = _WORKER_DECOMPOSER.fit(flux_row, ivar_row, verbose=False, n_lsf_refits=3)
-    return kind, idx, result
+    kind, idx0, flux_chunk = args
+    flux_chunk = np.asarray(flux_chunk, dtype=np.float64)
+    out = []
+    for j in range(flux_chunk.shape[0]):
+        idx = idx0 + j
+        flux_row = flux_chunk[j] * _WORKER_FACTOR
+        ivar_row = np.ones_like(flux_row)
+        result = _WORKER_DECOMPOSER.fit(flux_row, ivar_row, verbose=False, n_lsf_refits=3)
+        out.append((idx, result))
+    return kind, out
 
 
 def _get_mp_context():
@@ -129,28 +135,35 @@ def results_to_fits(results, filename):
     print(f"Wrote {len(results)} results, {coef_arr.shape[1]} coefs, {len(comp_keys)} components → {filename}")
 
 
-def run(data_file, palace_dir, n_workers, lsf_sigma, factor, output_dir):
+def _iter_chunk_tasks(flx_sci, flx_sky1, flx_sky2, chunk_size):
+    n_rows = int(flx_sci.shape[0])
+    for kind, arr in (("sci", flx_sci), ("sky1", flx_sky1), ("sky2", flx_sky2)):
+        for i0 in range(0, n_rows, chunk_size):
+            i1 = min(i0 + chunk_size, n_rows)
+            # Sending chunk slices avoids building a huge per-row task list.
+            yield (kind, i0, np.asarray(arr[i0:i1], dtype=np.float64))
+
+
+def run(data_file, palace_dir, n_workers, lsf_sigma, factor, output_dir, chunk_size, max_in_flight):
     base_dir = resolve_base_dir(palace_dir)
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"Loading data from {data_file} ...")
     wave     = fits.getdata(data_file, "WAVE").astype(np.float64)
-    flx_sky1 = fits.getdata(data_file, "FLUX_SKY_NEAR").astype(np.float64) * factor
-    flx_sky2 = fits.getdata(data_file, "FLUX_SKY_FAR").astype(np.float64) * factor
-    flx_sci  = fits.getdata(data_file, "FLUX_SCI").astype(np.float64) * factor
-    flx_ivar = np.ones_like(flx_sci)
+    # Keep full flux arrays unscaled and without ivar allocation in the parent
+    # process to reduce peak memory. Scaling and ivar are applied per chunk in workers.
+    flx_sky1 = fits.getdata(data_file, "FLUX_SKY_NEAR")
+    flx_sky2 = fits.getdata(data_file, "FLUX_SKY_FAR")
+    flx_sci  = fits.getdata(data_file, "FLUX_SCI")
 
     print(f"  {len(flx_sci)} spectra, {len(wave)} wavelength pixels")
     print(f"  n_workers={n_workers}, lsf_sigma={lsf_sigma}, factor={factor}")
+    print(f"  chunk_size={chunk_size}, max_in_flight={max_in_flight}")
     print(f"  base_dir={base_dir}")
 
     idxs = list(range(len(flx_sci)))
-    worker_args = []
-    for idx in idxs:
-        worker_args.append(("sci", idx, flx_sci[idx], flx_ivar[idx]))
-        worker_args.append(("sky1", idx, flx_sky1[idx], flx_ivar[idx]))
-        worker_args.append(("sky2", idx, flx_sky2[idx], flx_ivar[idx]))
+    n_tasks = int(np.ceil(len(idxs) / chunk_size)) * 3
 
     result_sci  = [None] * len(idxs)
     result_sky1 = [None] * len(idxs)
@@ -158,28 +171,41 @@ def run(data_file, palace_dir, n_workers, lsf_sigma, factor, output_dir):
     completed = 0
 
     t0 = time.perf_counter()
-    pbar = tqdm(total=len(worker_args), desc="Fits completed", mininterval=0.5)
+    pbar = tqdm(total=n_tasks, desc="Chunks completed", mininterval=0.5)
 
     mp_context = _get_mp_context()
     with ProcessPoolExecutor(
         max_workers=n_workers,
         mp_context=mp_context,
         initializer=init_worker,
-        initargs=(wave, lsf_sigma, str(base_dir)),
+        initargs=(wave, lsf_sigma, str(base_dir), float(factor)),
     ) as executor:
-        futures = [executor.submit(fit_single_worker, args) for args in worker_args]
-        for future in as_completed(futures):
-            kind, idx, result = future.result()
-            if kind == "sci":
-                result_sci[idx] = result
-            elif kind == "sky1":
-                result_sky1[idx] = result
-            else:
-                result_sky2[idx] = result
-            completed += 1
-            pbar.update(1)
-            # if completed == 1 or completed % 10 == 0:
-            #     print(f"Completed {completed}/{len(worker_args)} fits", flush=True)
+        task_iter = iter(_iter_chunk_tasks(flx_sci, flx_sky1, flx_sky2, chunk_size))
+        pending = set()
+
+        def _submit_until_full():
+            while len(pending) < max_in_flight:
+                try:
+                    task = next(task_iter)
+                except StopIteration:
+                    return
+                pending.add(executor.submit(fit_chunk_worker, task))
+
+        _submit_until_full()
+        while pending:
+            done, pending = wait(pending, return_when=FIRST_COMPLETED)
+            for future in done:
+                kind, chunk_results = future.result()
+                for idx, result in chunk_results:
+                    if kind == "sci":
+                        result_sci[idx] = result
+                    elif kind == "sky1":
+                        result_sky1[idx] = result
+                    else:
+                        result_sky2[idx] = result
+                completed += 1
+                pbar.update(1)
+            _submit_until_full()
     
     pbar.close()
 
@@ -272,8 +298,15 @@ def main():
     parser.add_argument("--n-workers",  type=int,   default=4,    help="Number of parallel worker processes (default: 4)")
     parser.add_argument("--lsf-sigma",  type=float, default=0.5,  help="LSF Gaussian sigma in Å (default: 0.5)")
     parser.add_argument("--factor",     type=float, default=1e14, help="Flux scaling factor (default: 1e14)")
+    parser.add_argument("--chunk-size", type=int,   default=64,   help="Rows per worker task chunk (default: 64)")
+    parser.add_argument("--max-in-flight", type=int, default=8,   help="Max submitted chunks waiting/running at once (default: 8)")
     parser.add_argument("--output-dir", default=".",              help="Output directory for result FITS files (default: .)")
     args = parser.parse_args()
+
+    if args.chunk_size < 1:
+        raise ValueError("--chunk-size must be >= 1")
+    if args.max_in_flight < 1:
+        raise ValueError("--max-in-flight must be >= 1")
 
     run(
         data_file  = args.data_file,
@@ -282,6 +315,8 @@ def main():
         lsf_sigma  = args.lsf_sigma,
         factor     = args.factor,
         output_dir = args.output_dir,
+        chunk_size = args.chunk_size,
+        max_in_flight = args.max_in_flight,
     )
 
     extract_meta_and_coef_products(
