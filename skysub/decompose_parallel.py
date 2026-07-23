@@ -192,6 +192,79 @@ def run(data_file, palace_dir, n_workers, lsf_sigma, factor, output_dir):
     results_to_fits(result_sky2, output_dir / f"{stem}_decomp_sky2.fits")
 
 
+def _copy_hdu_with_name(hdu, extname):
+    """Return a copy of an HDU with a new extension name."""
+    header = hdu.header.copy()
+    header["EXTNAME"] = extname
+    return type(hdu)(data=hdu.data, header=header, name=extname)
+
+
+def _infer_decomp_label(path, index):
+    """Infer a stable label for a decomposition file from its filename."""
+    from pathlib import Path
+
+    name = Path(path).name.lower()
+    for label in ("sky1", "sky2", "sci"):
+        if label in name:
+            return label.upper()
+    return f"DEC{index}"
+
+
+def extract_meta_and_coef_products(
+    input_fits_path,
+    decomp_fits_path_1,
+    decomp_fits_path_2,
+    decomp_fits_path_3,
+    meta_output_path=None,
+    sky1_output_path=None,
+    sky2_output_path=None,
+    sci_output_path=None,
+):
+    """Write compact FITS products containing only selected extensions.
+
+    The first output contains only the META extension from `input_fits_path`.
+    Each decomposition input gets its own output FITS containing just META and
+    COEF. Default output paths are written in the current working directory.
+    """
+    from pathlib import Path
+
+    input_path = Path(input_fits_path)
+    cwd = Path.cwd()
+    if meta_output_path is None:
+        meta_output_path = str(cwd / f"{input_path.stem}_meta_only{input_path.suffix}")
+
+    decomp_files = [decomp_fits_path_1, decomp_fits_path_2, decomp_fits_path_3]
+    decomp_outputs = [sky1_output_path, sky2_output_path, sci_output_path]
+
+    with fits.open(input_fits_path) as hdul_in:
+        if "META" not in hdul_in:
+            raise KeyError(f"Missing META extension in {input_fits_path}")
+        fits.HDUList([
+            fits.PrimaryHDU(),
+            _copy_hdu_with_name(hdul_in["META"], "META"),
+        ]).writeto(meta_output_path, overwrite=True)
+
+    resolved_outputs = []
+    for index, decomp_path in enumerate(decomp_files, start=1):
+        label = _infer_decomp_label(decomp_path, index)
+        out_path = decomp_outputs[index - 1]
+        if out_path is None:
+            out_path = str(cwd / f"{input_path.stem}_{label.lower()}_meta_coef{input_path.suffix}")
+        with fits.open(decomp_path) as hdul_dec:
+            for extname in ("META", "COEF"):
+                if extname not in hdul_dec:
+                    raise KeyError(f"Missing {extname} extension in {decomp_path}")
+            fits.HDUList([
+                fits.PrimaryHDU(),
+                _copy_hdu_with_name(hdul_dec["META"], "META"),
+                _copy_hdu_with_name(hdul_dec["COEF"], "COEF"),
+            ]).writeto(out_path, overwrite=True)
+        print(f"Wrote {label} META/COEF file -> {out_path}")
+        resolved_outputs.append(out_path)
+
+    print(f"Wrote META-only file -> {meta_output_path}")
+    return (meta_output_path, *resolved_outputs)
+
 def main():
     parser = argparse.ArgumentParser(description="LVM sky spectral decomposition")
     parser.add_argument("data_file",    help="Input FITS file (median stacked LVM frame)")
@@ -211,6 +284,12 @@ def main():
         output_dir = args.output_dir,
     )
 
+    extract_meta_and_coef_products(
+        input_fits_path=args.data_file,
+        decomp_fits_path_1=Path(args.output_dir) / f"{Path(args.data_file).stem}_decomp_sky1.fits",
+        decomp_fits_path_2=Path(args.output_dir) / f"{Path(args.data_file).stem}_decomp_sky2.fits",
+        decomp_fits_path_3=Path(args.output_dir) / f"{Path(args.data_file).stem}_decomp_sci.fits",
+    )
 
 if __name__ == "__main__":
     main()
