@@ -345,12 +345,14 @@ def main():
     parser.add_argument("--lsf-sigma",  type=float, default=0.5,  help="LSF Gaussian sigma in Å (default: 0.5)")
     parser.add_argument("--factor",     type=float, default=1e14, help="Flux scaling factor (default: 1e14)")
     parser.add_argument("--chunk-size", type=int,   default=64,   help="Rows per worker task chunk (default: 64)")
-    parser.add_argument("--max-in-flight", type=int, default=8,   help="Max submitted chunks waiting/running at once (default: 8)")
+    parser.add_argument("--max-in-flight", type=int, default=None, help="Max submitted chunks waiting/running at once (default: n-workers)")
     parser.add_argument("--output-dir", default=".",              help="Output directory for result FITS files (default: .)")
     args = parser.parse_args()
 
     if args.chunk_size < 1:
         raise ValueError("--chunk-size must be >= 1")
+    if args.max_in_flight is None:
+        args.max_in_flight = args.n_workers
     if args.max_in_flight < 1:
         raise ValueError("--max-in-flight must be >= 1")
 
