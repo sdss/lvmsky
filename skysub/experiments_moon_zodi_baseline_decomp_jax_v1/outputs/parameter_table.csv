@@ -1,0 +1,13 @@
+name,value,lower_bound,upper_bound,role
+log_rayleigh_scale,0.5986984904587809,-1.0986122886681098,1.0986122886681098,shared fitted parameter
+log_aerosol_scale,-1.0986122886681098,-1.0986122886681098,1.0986122886681098,shared fitted parameter
+amplitude_log_target_airmass,0.057705340046601064,-1.0,1.0,shared fitted parameter
+amplitude_log_moon_airmass,-0.027580133725971845,-1.0,1.0,shared fitted parameter
+amplitude_abs_phase,0.18464334116449563,-1.0,1.0,shared fitted parameter
+amplitude_cos_separation,0.16107371420333935,-1.0,1.0,shared fitted parameter
+color_log_wave,0.5040644054807548,-1.5,1.5,shared fitted parameter
+color_log_wave_squared,1.2724086109849422,-5.0,5.0,shared fitted parameter
+color_target_airmass,0.2162148990180973,-1.5,1.5,shared fitted parameter
+color_moon_airmass,-0.1551718185876934,-1.5,1.5,shared fitted parameter
+color_signed_phase,-0.0364004747089851,-1.5,1.5,shared fitted parameter
+color_cos_separation,-0.39550653608396086,-1.5,1.5,shared fitted parameter

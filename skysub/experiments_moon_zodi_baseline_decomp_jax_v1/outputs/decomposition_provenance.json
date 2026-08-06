@@ -1,0 +1,29 @@
+{
+  "experiment": "experiments_moon_zodi_baseline_decomp_jax_v1",
+  "source_stack": "/Users/ik52/obs/sas/sdsswork/users/u6058164/lvmsframe_median_stack_1.2.1.fits",
+  "source_stack_size": 6018243840,
+  "source_stack_mtime_ns": 1782394185957589257,
+  "selection": "/Users/ik52/sci/work/nyuad-galaxies/sdss5/sky_subtract/lvmsky/skysub/experiments_positive_sky_decomposition_v1/outputs/full_stack_qc_v1/selection.fits",
+  "n_spectra": 356,
+  "n_nights": 52,
+  "grid": {
+    "n_pixels": 12401,
+    "minimum_angstrom": 3600.0,
+    "maximum_angstrom": 9799.9990234375,
+    "sampling_angstrom": 0.5,
+    "dtype": "float64"
+  },
+  "target": "FLUX_SKY_FAR minus baseline OH+atomic+Orc+O2 line model",
+  "decomposition": {
+    "implementation": "SkyDecompLSFSurfaceIterative",
+    "flux_factor": 100000000000000.0,
+    "line_weight": 0.0005,
+    "skyline_cumulative_fraction": 0.99,
+    "skyline_half_width_angstrom": 2.0,
+    "huber_transition_sigma": 3.0,
+    "n_refinement_cycles": 4
+  },
+  "cache": "/Users/ik52/sci/work/nyuad-galaxies/sdss5/sky_subtract/lvmsky/skysub/experiments_moon_zodi_baseline_decomp_jax_v1/outputs/baseline_decomposition.npz",
+  "cache_sha256": "8d1525039f3a5f2ea261658df531fe14a25e47eb3f5aa95af02b1af7f6e227ba",
+  "elapsed_seconds": 508.53315612499136
+}
