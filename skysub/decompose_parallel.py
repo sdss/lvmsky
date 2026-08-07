@@ -412,13 +412,13 @@ def run(
     ) as executor:
         pbar = tqdm(
             total=3 * n_rows,
-            desc="Arm-fits completed",
-            unit=" arm-fits",
+            desc="decomp",
+            unit=" decomp",
             mininterval=0.2,
             position=0,
             leave=True,
         )
-        pbar.set_postfix(chunks_done=f"0/{n_tasks}")
+        pbar.set_postfix(chunks=f"0/{n_tasks}")
         pbar.refresh()
 
         task_iter = iter(_iter_chunk_tasks(n_rows, chunk_size))
@@ -441,7 +441,7 @@ def run(
                 for idx, result in chunk_results:
                     results[kind][idx] = result
                 completed += 1
-                pbar.set_postfix(chunks_done=f"{completed}/{n_tasks}")
+                pbar.set_postfix(chunks=f"{completed}/{n_tasks}")
             _submit_until_full()
         _drain_progress_queue()
         pbar.close()
