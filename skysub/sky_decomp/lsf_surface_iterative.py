@@ -394,6 +394,25 @@ def _sum_constraints(kernel_size: int, n_basis: int) -> sp.csc_matrix:
     ).tocsc()
 
 
+_CURVATURE_GRAM_CACHE: dict[tuple[int, int], np.ndarray] = {}
+
+
+def _curvature_gram_cached(kernel_size: int, n_basis: int) -> np.ndarray:
+    """Return ``(I_K ⊗ D²)ᵀ (I_K ⊗ D²)`` as a dense ``(K·n_basis, K·n_basis)`` matrix.
+
+    Depends only on ``(kernel_size, n_basis)``; computed once per configuration.
+    """
+    key = (int(kernel_size), int(n_basis))
+    cached = _CURVATURE_GRAM_CACHE.get(key)
+    if cached is not None:
+        return cached
+    d2 = np.diff(np.eye(n_basis), n=2, axis=0)
+    curvature = sp.kron(sp.eye(kernel_size), d2, format="csc")
+    gram = (curvature.T @ curvature).toarray()
+    _CURVATURE_GRAM_CACHE[key] = gram
+    return gram
+
+
 def _monotonicity_constraints(
     kernel_size: int,
     n_basis: int,
@@ -610,11 +629,8 @@ def fit_bspline_channel(
     hessian = weighted_design.T @ weighted_design
     hessian_scale = max(float(np.trace(hessian)) / n_parameter, 1.0e-12)
     if n_basis >= 3 and roughness_fraction > 0.0:
-        d2 = np.diff(np.eye(n_basis), n=2, axis=0)
-        curvature = sp.kron(sp.eye(fallback.size), d2, format="csc")
-        hessian[:n_kernel, :n_kernel] += (
-            roughness_fraction * hessian_scale * (curvature.T @ curvature).toarray()
-        )
+        curvature_gram = _curvature_gram_cached(fallback.size, n_basis)
+        hessian[:n_kernel, :n_kernel] += roughness_fraction * hessian_scale * curvature_gram
 
     basis_information = np.divide(
         basis.T @ information,
@@ -812,25 +828,22 @@ def fit_lsf_surface(
     )
 
 
-def apply_lsf_surface(
+def build_lsf_operator(
     wave: np.ndarray,
-    values: np.ndarray,
     kernel_surface: np.ndarray,
     *,
     channel_bounds: dict[str, tuple[float | None, float | None]] | None = None,
     tap_offsets: np.ndarray | None = None,
-) -> np.ndarray:
-    """Apply a target-wavelength-dependent kernel without crossing channels."""
+) -> sp.csr_matrix:
+    """Build a sparse channelwise LSF convolution operator ``L`` with ``output = source @ L.T``.
+
+    ``L[i, j] = kernel_surface[i, tap]`` when ``tap_offsets[tap] == i - j`` and
+    both ``i`` and ``j`` fall in the same channel; zero elsewhere.
+    """
     wave = np.asarray(wave, dtype=float)
-    source = np.asarray(values, dtype=float)
     kernel_surface = np.asarray(kernel_surface, dtype=float)
     if wave.ndim != 1 or wave.size == 0 or np.any(np.diff(wave) <= 0.0):
         raise ValueError("wave must be nonempty and strictly increasing")
-    one_dimensional = source.ndim == 1
-    if one_dimensional:
-        source = source[None, :]
-    if source.ndim != 2 or source.shape[1] != wave.size:
-        raise ValueError("values must end with the wavelength dimension")
     if (
         kernel_surface.ndim != 2
         or kernel_surface.shape[0] != wave.size
@@ -861,24 +874,62 @@ def apply_lsf_surface(
         if channel_bounds is None
         else channel_bounds
     )
-    output = np.zeros_like(source)
-    for channel in CHANNEL_NAMES:
-        lower, upper = bounds[channel]
-        start = 0 if lower is None else int(np.searchsorted(wave, lower, side="left"))
-        stop = wave.size if upper is None else int(np.searchsorted(wave, upper, side="left"))
-        if stop <= start:
-            continue
-        for tap, offset in enumerate(offsets):
-            if offset >= 0:
-                target_slice = slice(start + offset, stop)
-                source_slice = slice(start, stop - offset)
-            else:
-                target_slice = slice(start, stop + offset)
-                source_slice = slice(start - offset, stop)
-            if target_slice.start < target_slice.stop:
-                output[:, target_slice] += (
-                    source[:, source_slice] * kernel_surface[target_slice, tap][None, :]
-                )
+
+    n = wave.size
+    rows_all: list[np.ndarray] = []
+    cols_all: list[np.ndarray] = []
+    data_all: list[np.ndarray] = []
+    for tap, offset in enumerate(offsets):
+        o = int(offset)
+        for channel in CHANNEL_NAMES:
+            if channel not in bounds:
+                continue
+            lower, upper = bounds[channel]
+            start = 0 if lower is None else int(np.searchsorted(wave, lower, side="left"))
+            stop = n if upper is None else int(np.searchsorted(wave, upper, side="left"))
+            if stop <= start:
+                continue
+            i_lo = start + max(0, o)
+            i_hi = stop + min(0, o)
+            if i_hi <= i_lo:
+                continue
+            i_idx = np.arange(i_lo, i_hi)
+            rows_all.append(i_idx)
+            cols_all.append(i_idx - o)
+            data_all.append(kernel_surface[i_idx, tap])
+    if not data_all:
+        return sp.csr_matrix((n, n), dtype=float)
+    return sp.csr_matrix(
+        (
+            np.concatenate(data_all),
+            (np.concatenate(rows_all), np.concatenate(cols_all)),
+        ),
+        shape=(n, n),
+    )
+
+
+def apply_lsf_surface(
+    wave: np.ndarray,
+    values: np.ndarray,
+    kernel_surface: np.ndarray,
+    *,
+    channel_bounds: dict[str, tuple[float | None, float | None]] | None = None,
+    tap_offsets: np.ndarray | None = None,
+) -> np.ndarray:
+    """Apply a target-wavelength-dependent kernel without crossing channels."""
+    source = np.asarray(values, dtype=float)
+    one_dimensional = source.ndim == 1
+    if one_dimensional:
+        source = source[None, :]
+    if source.ndim != 2 or source.shape[1] != np.asarray(wave).size:
+        raise ValueError("values must end with the wavelength dimension")
+    operator = build_lsf_operator(
+        wave,
+        kernel_surface,
+        channel_bounds=channel_bounds,
+        tap_offsets=tap_offsets,
+    )
+    output = (operator @ source.T).T
     return output[0] if one_dimensional else output
 
 
@@ -1161,6 +1212,7 @@ class SkyDecompLSFSurfaceIterative(SkyDecomp):
         self.config = config or LSFSurfaceIterativeConfig()
         self.lsf_surface_state: LSFSurfaceState | None = None
         self._lsf_surface: np.ndarray | None = None
+        self._lsf_operator: sp.csr_matrix | None = None
         self.stage_metrics: tuple[dict[str, object], ...] = ()
         self.skyline_mask = np.array([], dtype=bool)
         self.continuum_weights = np.array([], dtype=float)
@@ -1192,11 +1244,19 @@ class SkyDecompLSFSurfaceIterative(SkyDecomp):
         self.lsf_surface_state = state
         if state is None:
             self._lsf_surface = None
+            self._lsf_operator = None
             self.lsf_metrics = {}
             self.lsf_kernels = {}
             return
         # The compact state is authoritative; the dense surface is a runtime cache.
         self._lsf_surface = evaluate_lsf_surface(state, self.wave)
+        # Prebuild the sparse channelwise convolution operator once per surface update.
+        self._lsf_operator = build_lsf_operator(
+            self.wave,
+            self._lsf_surface,
+            channel_bounds=state.channel_bounds,
+            tap_offsets=state.tap_offsets,
+        )
         self.lsf_metrics = {
             channel: {
                 **metric,
@@ -1246,13 +1306,11 @@ class SkyDecompLSFSurfaceIterative(SkyDecomp):
         return state
 
     def _convolve_matrix_channelwise(self, matrix: np.ndarray) -> np.ndarray:
-        if self._lsf_surface is None:
+        if self._lsf_operator is None:
             return super()._convolve_matrix_channelwise(matrix)
-        return apply_lsf_surface(
-            self.wave,
-            matrix,
-            self._lsf_surface,
-        )
+        if matrix.size == 0:
+            return matrix.copy()
+        return (self._lsf_operator @ np.asarray(matrix, dtype=float).T).T
 
     def _combine_coefficients(
         self,
@@ -1774,6 +1832,7 @@ __all__ = [
     "apply_lsf_channelwise",
     "apply_lsf_surface",
     "build_bspline_basis",
+    "build_lsf_operator",
     "build_skyline_mask",
     "continuum_fit_weights",
     "evaluate_bspline_basis",

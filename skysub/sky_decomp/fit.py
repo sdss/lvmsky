@@ -1083,14 +1083,31 @@ class SkyDecomp:
 
     @staticmethod
     def _convolve_rows(matrix: np.ndarray, kernel: np.ndarray, offsets: np.ndarray) -> np.ndarray:
+        matrix = np.asarray(matrix, dtype=float)
+        if matrix.size == 0:
+            return matrix.copy()
+        kernel = np.asarray(kernel, dtype=float)
+        offsets = np.asarray(offsets)
+        k_size = kernel.size
+        half = k_size // 2
+        # Fast path when offsets are the canonical symmetric arange used everywhere internally.
+        if (
+            k_size > 0
+            and offsets.size == k_size
+            and np.array_equal(offsets.astype(int), np.arange(-half, half + 1))
+        ):
+            padded = np.pad(matrix, ((0, 0), (half, half)))
+            windows = np.lib.stride_tricks.sliding_window_view(padded, k_size, axis=1)
+            return np.einsum("riw,w->ri", windows, kernel[::-1])
         out = np.zeros_like(matrix, dtype=float)
         for weight, offset in zip(kernel, offsets):
-            if offset == 0:
+            o = int(offset)
+            if o == 0:
                 out += weight * matrix
-            elif offset > 0:
-                out[:, offset:] += weight * matrix[:, :-offset]
+            elif o > 0:
+                out[:, o:] += weight * matrix[:, :-o]
             else:
-                out[:, :offset] += weight * matrix[:, -offset:]
+                out[:, :o] += weight * matrix[:, -o:]
         return out
 
     def _pmd_path(self, name: str) -> Path:
