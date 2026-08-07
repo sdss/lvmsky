@@ -411,7 +411,12 @@ def run(
         ),
     ) as executor:
         pbar = tqdm(
-            total=3 * n_rows, desc="Fits completed", mininterval=0.2, position=0, leave=True
+            total=3 * n_rows,
+            desc="Arm-fits completed",
+            unit=" arm-fits",
+            mininterval=0.2,
+            position=0,
+            leave=True,
         )
         pbar.set_postfix(chunks_done=f"0/{n_tasks}")
         pbar.refresh()
