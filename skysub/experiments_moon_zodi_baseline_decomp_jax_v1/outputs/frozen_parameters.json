@@ -1,0 +1,98 @@
+{
+  "experiment": "experiments_moon_zodi_baseline_decomp_jax_v1",
+  "family": "A3",
+  "parameter_names": [
+    "log_rayleigh_scale",
+    "log_aerosol_scale",
+    "amplitude_log_target_airmass",
+    "amplitude_log_moon_airmass",
+    "amplitude_abs_phase",
+    "amplitude_cos_separation",
+    "color_log_wave",
+    "color_log_wave_squared",
+    "color_target_airmass",
+    "color_moon_airmass",
+    "color_signed_phase",
+    "color_cos_separation"
+  ],
+  "values": [
+    0.5986984904587809,
+    -1.0986122886681098,
+    0.057705340046601064,
+    -0.027580133725971845,
+    0.18464334116449563,
+    0.16107371420333935,
+    0.5040644054807548,
+    1.2724086109849422,
+    0.2162148990180973,
+    -0.1551718185876934,
+    -0.0364004747089851,
+    -0.39550653608396086
+  ],
+  "bounds": [
+    [
+      -1.0986122886681098,
+      1.0986122886681098
+    ],
+    [
+      -1.0986122886681098,
+      1.0986122886681098
+    ],
+    [
+      -1.0,
+      1.0
+    ],
+    [
+      -1.0,
+      1.0
+    ],
+    [
+      -1.0,
+      1.0
+    ],
+    [
+      -1.0,
+      1.0
+    ],
+    [
+      -1.5,
+      1.5
+    ],
+    [
+      -5.0,
+      5.0
+    ],
+    [
+      -1.5,
+      1.5
+    ],
+    [
+      -1.5,
+      1.5
+    ],
+    [
+      -1.5,
+      1.5
+    ],
+    [
+      -1.5,
+      1.5
+    ]
+  ],
+  "fit": {
+    "loss": 0.004490158016555548,
+    "success": true,
+    "message": "CONVERGENCE: RELATIVE REDUCTION OF F <= FACTR*EPSMCH",
+    "iterations": 80,
+    "start_index": 2
+  },
+  "fixed_physical_parameters": {
+    "aod500": 0.0336,
+    "aerosol_alpha": 1.38,
+    "aerosol_single_scattering_albedo": 0.97,
+    "aerosol_hg_g": 0.8,
+    "zodi_scale": 1.0,
+    "zodi_gamma": 0.26,
+    "kappa_blue": 3.5
+  }
+}

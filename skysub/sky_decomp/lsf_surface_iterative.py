@@ -19,6 +19,7 @@ import numpy as np
 import scipy.sparse as sp
 from scipy.interpolate import BSpline
 
+from ._lsf_surface_fits import CHANNEL_NAMES, METRIC_COLUMNS, STATE_CONFIG_COLUMNS
 from .fit import LSF_CHANNELS, LSF_KERNEL_SIZE, SkyDecomp, SkyDecompResult
 
 
@@ -28,15 +29,24 @@ LSF_TAP_OFFSETS = np.arange(-(LSF_KERNEL_SIZE // 2), LSF_KERNEL_SIZE // 2 + 1)
 
 @dataclass(frozen=True, slots=True)
 class LSFSurfaceIterativeConfig:
-    """Configuration for the complete iterative decomposition method."""
+    """Scientific controls for continuum, LSF, and line refinement.
 
+    Fields are grouped below by stage. Wavelength values are in Angstrom;
+    Huber thresholds are in robust-noise units; fractions are dimensionless.
+    """
+
+    # Continuum reweighting around sky lines and residual outliers.
     line_weight: float = 5.0e-4
     skyline_cumulative_fraction: float = 0.99
     skyline_half_width_angstrom: float = 2.0
     huber_transition_sigma: float = 3.0
-    n_refinement_cycles: int = 4
+
+    # Refinement count and smooth wavelength-dependent kernel representation.
+    n_refinement_cycles: int = 5
     n_basis: int = 6
     degree: int = 3
+
+    # Kernel priors and the low-order nuisance background used by each channel fit.
     roughness_fraction: float = 0.01
     fallback_prior_fraction: float = 1.0e-4
     information_prior_max_boost: float = 50.0
@@ -44,33 +54,23 @@ class LSFSurfaceIterativeConfig:
     blue_fit_lower: float = 5500.0
 
     def __post_init__(self) -> None:
-        if isinstance(self.n_refinement_cycles, (bool, np.bool_)) or not isinstance(
-            self.n_refinement_cycles,
-            (int, np.integer),
-        ):
-            raise TypeError("n_refinement_cycles must be an integer")
+        for name in ("n_refinement_cycles", "n_basis", "degree", "background_degree"):
+            value = getattr(self, name)
+            if isinstance(value, (bool, np.bool_)) or not isinstance(
+                value,
+                (int, np.integer),
+            ):
+                raise TypeError(f"{name} must be an integer")
         if not 0.0 <= self.line_weight <= 1.0:
             raise ValueError("line_weight must lie in [0, 1]")
         if not 0.0 < self.skyline_cumulative_fraction <= 1.0:
-            raise ValueError(
-                "skyline_cumulative_fraction must lie in (0, 1]"
-            )
+            raise ValueError("skyline_cumulative_fraction must lie in (0, 1]")
         if self.skyline_half_width_angstrom <= 0.0:
             raise ValueError("skyline_half_width_angstrom must be positive")
         if self.huber_transition_sigma <= 0.0:
             raise ValueError("huber_transition_sigma must be positive")
         if self.n_refinement_cycles < 1:
             raise ValueError("n_refinement_cycles must be positive")
-        if isinstance(self.n_basis, (bool, np.bool_)) or not isinstance(
-            self.n_basis,
-            (int, np.integer),
-        ):
-            raise TypeError("n_basis must be an integer")
-        if isinstance(self.degree, (bool, np.bool_)) or not isinstance(
-            self.degree,
-            (int, np.integer),
-        ):
-            raise TypeError("degree must be an integer")
         if self.degree < 0:
             raise ValueError("degree must be nonnegative")
         if self.n_basis < self.degree + 1:
@@ -81,11 +81,6 @@ class LSFSurfaceIterativeConfig:
             raise ValueError("fallback_prior_fraction must be nonnegative")
         if self.information_prior_max_boost < 1.0:
             raise ValueError("information_prior_max_boost must be at least one")
-        if isinstance(self.background_degree, (bool, np.bool_)) or not isinstance(
-            self.background_degree,
-            (int, np.integer),
-        ):
-            raise TypeError("background_degree must be an integer")
         if self.background_degree < 0:
             raise ValueError("background_degree must be nonnegative")
         if not np.isfinite(self.blue_fit_lower):
@@ -123,6 +118,24 @@ class LSFSurfaceIterativeResult(SkyDecompResult):
     """Baseline-compatible decomposition result with one additive LSF field."""
 
     lsf_state: LSFSurfaceState
+
+
+@dataclass(slots=True)
+class _FitRun:
+    """Mutable model state and diagnostics for one iterative fit."""
+
+    matrices: dict[str, np.ndarray]
+    continuum_coefficient: np.ndarray
+    line_coefficient: np.ndarray
+    continuum: np.ndarray
+    line_model: np.ndarray
+    weights: np.ndarray
+    channel_noise: dict[str, float]
+    metrics: list[dict[str, object]]
+    failure: str | None
+    solver_status: str
+    continuum_status: str = "not_run"
+    line_status: str = "not_run"
 
 
 def _wave_fingerprint(wave: np.ndarray) -> tuple[int, float, float, str]:
@@ -230,21 +243,14 @@ def continuum_fit_weights(
     residual = np.asarray(residual, dtype=float)
     ivar = np.asarray(ivar, dtype=float)
     skyline_mask = np.asarray(skyline_mask, dtype=bool)
-    if not (
-        wave.shape == residual.shape == ivar.shape == skyline_mask.shape
-    ):
+    if not (wave.shape == residual.shape == ivar.shape == skyline_mask.shape):
         raise ValueError("wave, residual, ivar, and skyline_mask must match")
     if not 0.0 <= line_weight <= 1.0:
         raise ValueError("line_weight must lie in [0, 1]")
     if huber_transition_sigma <= 0.0:
         raise ValueError("huber_transition_sigma must be positive")
 
-    valid = (
-        np.isfinite(residual)
-        & np.isfinite(ivar)
-        & (ivar > 0.0)
-        & ~skyline_mask
-    )
+    valid = np.isfinite(residual) & np.isfinite(ivar) & (ivar > 0.0) & ~skyline_mask
     global_sigma = _robust_mad(residual[valid])
     if not np.isfinite(global_sigma) or global_sigma <= 0.0:
         global_sigma = 1.0
@@ -268,11 +274,7 @@ def continuum_fit_weights(
 
     weights = ivar * multiplier
     for _, lower, upper in LSF_CHANNELS:
-        channel_use = (
-            np.isfinite(weights)
-            & (weights > 0.0)
-            & _channel_mask(wave, lower, upper)
-        )
+        channel_use = np.isfinite(weights) & (weights > 0.0) & _channel_mask(wave, lower, upper)
         if np.any(channel_use):
             weights[channel_use] /= float(np.mean(weights[channel_use]))
     weights[~np.isfinite(weights) | (weights < 0.0)] = 0.0
@@ -443,35 +445,82 @@ def kernel_moments(kernel_surface: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     return center, np.sqrt(np.maximum(variance, 0.0))
 
 
-def _fallback_solution(
+def _kernel_metric_summary(
+    surface: np.ndarray,
+    *,
+    include_legacy_aliases: bool = True,
+) -> dict[str, float]:
+    center, sigma = kernel_moments(surface)
+    summary = {
+        "center_pix_min": float(np.min(center)),
+        "center_pix_median": float(np.median(center)),
+        "center_pix_max": float(np.max(center)),
+        "sigma_pix_min": float(np.min(sigma)),
+        "sigma_pix_median": float(np.median(sigma)),
+        "sigma_pix_max": float(np.max(sigma)),
+    }
+    if include_legacy_aliases:
+        summary["center_pix"] = summary["center_pix_median"]
+        summary["sigma_pix"] = summary["sigma_pix_median"]
+    return summary
+
+
+def _channel_fallback(
     basis: np.ndarray,
     fallback_kernel: np.ndarray,
+    knots: np.ndarray,
     reason: str,
-) -> tuple[np.ndarray, np.ndarray, dict[str, float | str]]:
+    runtime: float = 0.0,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict[str, float | str]]:
     coefficient = np.repeat(
         fallback_kernel[:, None],
         basis.shape[1],
         axis=1,
     )
     surface = basis @ coefficient.T
-    center, sigma = kernel_moments(surface)
     metrics: dict[str, float | str] = {
         "status": "fallback",
         "reason": reason,
         "n_basis": float(basis.shape[1]),
         "chi2_red": np.nan,
         "rms_resid": np.nan,
-        "center_pix_min": float(np.min(center)),
-        "center_pix_median": float(np.median(center)),
-        "center_pix_max": float(np.max(center)),
-        "center_pix": float(np.median(center)),
-        "sigma_pix_min": float(np.min(sigma)),
-        "sigma_pix_median": float(np.median(sigma)),
-        "sigma_pix_max": float(np.max(sigma)),
-        "sigma_pix": float(np.median(sigma)),
-        "runtime_sec": 0.0,
+        **_kernel_metric_summary(surface),
+        "runtime_sec": runtime,
     }
-    return surface, coefficient, metrics
+    return surface, coefficient, knots, metrics
+
+
+def _kernel_constraint_system(
+    kernel_size: int,
+    n_basis: int,
+    n_nuisance: int,
+    free_amplitude: bool,
+) -> tuple[sp.csc_matrix, np.ndarray, list[object]]:
+    n_kernel = kernel_size * n_basis
+    nonnegative = sp.hstack(
+        [-sp.eye(n_kernel), sp.csc_matrix((n_kernel, n_nuisance))],
+        format="csc",
+    )
+    monotonicity_kernel = _monotonicity_constraints(kernel_size, n_basis)
+    monotonicity = sp.hstack(
+        [monotonicity_kernel, sp.csc_matrix((monotonicity_kernel.shape[0], n_nuisance))],
+        format="csc",
+    )
+    constraints = [nonnegative, monotonicity]
+    rhs = [np.zeros(n_kernel), np.zeros(monotonicity.shape[0])]
+    cones = [
+        clarabel.NonnegativeConeT(n_kernel),
+        clarabel.NonnegativeConeT(monotonicity.shape[0]),
+    ]
+    if not free_amplitude:
+        equality = sp.hstack(
+            [_sum_constraints(kernel_size, n_basis), sp.csc_matrix((n_basis, n_nuisance))],
+            format="csc",
+        )
+        constraints.insert(0, equality)
+        rhs.insert(0, np.ones(n_basis))
+        cones.insert(0, clarabel.ZeroConeT(n_basis))
+    return sp.vstack(constraints, format="csc"), np.concatenate(rhs), cones
 
 
 def fit_bspline_channel(
@@ -490,7 +539,18 @@ def fit_bspline_channel(
     free_amplitude: bool = False,
     knot_vector: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict[str, float | str]]:
-    """Fit one normalized, central-peak B-spline kernel surface."""
+    """Fit one normalized, central-peak B-spline kernel surface.
+
+    The fitted kernel is nonnegative and unimodal at every wavelength. A
+    normalized projected ``fallback_kernel`` is returned when the channel has
+    insufficient information or the constrained solve fails.
+
+    Returns
+    -------
+    surface, coefficients, knots, metrics
+        Native-grid kernel rows, compact per-tap B-spline coefficients, the
+        knot vector, and solver diagnostics.
+    """
     wave = np.asarray(wave, dtype=float)
     source = np.asarray(source, dtype=float)
     target = np.asarray(target, dtype=float)
@@ -508,9 +568,7 @@ def fit_bspline_channel(
         knots = np.asarray(knot_vector, dtype=float).copy()
         persisted_n_basis = knots.size - degree - 1
         if persisted_n_basis != n_basis:
-            raise ValueError(
-                "persisted knot vector does not match n_basis and degree"
-            )
+            raise ValueError("persisted knot vector does not match n_basis and degree")
         basis = evaluate_bspline_basis(wave, knots, degree)
     kernel_design = (shifted[:, :, None] * basis[:, None, :]).reshape(
         wave.size,
@@ -536,16 +594,11 @@ def fit_bspline_channel(
     n_kernel = fallback.size * n_basis
     n_nuisance = background.shape[1]
     n_parameter = n_kernel + n_nuisance
-    if (
-        np.count_nonzero(valid) <= n_parameter
-        or not np.any(np.abs(kernel_design[valid]) > 0.0)
-    ):
-        surface, coefficient, metrics = _fallback_solution(
-            basis,
-            fallback,
-            "insufficient_active_pixels",
-        )
-        return surface, coefficient, knots, metrics
+    insufficient_information = np.count_nonzero(valid) <= n_parameter or not np.any(
+        np.abs(kernel_design[valid]) > 0.0
+    )
+    if insufficient_information:
+        return _channel_fallback(basis, fallback, knots, "insufficient_active_pixels")
 
     root_weight = np.sqrt(ivar[valid])
     weighted_design = design[valid] * root_weight[:, None]
@@ -560,9 +613,7 @@ def fit_bspline_channel(
         d2 = np.diff(np.eye(n_basis), n=2, axis=0)
         curvature = sp.kron(sp.eye(fallback.size), d2, format="csc")
         hessian[:n_kernel, :n_kernel] += (
-            roughness_fraction
-            * hessian_scale
-            * (curvature.T @ curvature).toarray()
+            roughness_fraction * hessian_scale * (curvature.T @ curvature).toarray()
         )
 
     basis_information = np.divide(
@@ -575,9 +626,11 @@ def fit_bspline_channel(
         float(np.max(basis_information)),
         1.0e-30,
     )
-    prior_boost = 1.0 + (information_prior_max_boost - 1.0) * (
-        1.0 - np.clip(relative_information, 0.0, 1.0)
-    ) ** 2
+    prior_boost = (
+        1.0
+        + (information_prior_max_boost - 1.0)
+        * (1.0 - np.clip(relative_information, 0.0, 1.0)) ** 2
+    )
     prior_weight = np.tile(prior_boost, fallback.size)
     prior_scale = fallback_prior_fraction * hessian_scale
     hessian[:n_kernel, :n_kernel] += prior_scale * np.diag(prior_weight)
@@ -587,37 +640,11 @@ def fit_bspline_channel(
     linear = -(weighted_design.T @ weighted_target)
     linear[:n_kernel] -= prior_scale * prior_weight * fallback_vector
 
-    monotonicity_kernel = _monotonicity_constraints(fallback.size, n_basis)
-    nonnegative = sp.hstack(
-        [-sp.eye(n_kernel), sp.csc_matrix((n_kernel, n_nuisance))],
-        format="csc",
-    )
-    monotonicity = sp.hstack(
-        [
-            monotonicity_kernel,
-            sp.csc_matrix((monotonicity_kernel.shape[0], n_nuisance)),
-        ],
-        format="csc",
-    )
-    constraints = []
-    rhs = []
-    cones = []
-    if not free_amplitude:
-        equality_kernel = _sum_constraints(fallback.size, n_basis)
-        equality = sp.hstack(
-            [equality_kernel, sp.csc_matrix((n_basis, n_nuisance))],
-            format="csc",
-        )
-        constraints.append(equality)
-        rhs.append(np.ones(n_basis))
-        cones.append(clarabel.ZeroConeT(n_basis))
-    constraints.extend([nonnegative, monotonicity])
-    rhs.extend([np.zeros(n_kernel), np.zeros(monotonicity.shape[0])])
-    cones.extend(
-        [
-            clarabel.NonnegativeConeT(n_kernel),
-            clarabel.NonnegativeConeT(monotonicity.shape[0]),
-        ]
+    constraints, rhs, cones = _kernel_constraint_system(
+        fallback.size,
+        n_basis,
+        n_nuisance,
+        free_amplitude,
     )
 
     settings = clarabel.DefaultSettings()
@@ -626,8 +653,8 @@ def fit_bspline_channel(
     solver = clarabel.DefaultSolver(
         sp.triu(sp.csc_matrix((hessian + hessian.T) * 0.5)).tocsc(),
         np.asarray(linear, dtype=np.float64),
-        sp.vstack(constraints, format="csc"),
-        np.concatenate(rhs),
+        constraints,
+        rhs,
         cones,
         settings,
     )
@@ -636,26 +663,14 @@ def fit_bspline_channel(
     status = str(solution.status)
     vector = np.asarray(solution.x, dtype=float)
     if status not in {"Solved", "AlmostSolved"} or not np.all(np.isfinite(vector)):
-        surface, coefficient, metrics = _fallback_solution(
-            basis,
-            fallback,
-            "solver_failed",
-        )
-        metrics["runtime_sec"] = runtime
-        return surface, coefficient, knots, metrics
+        return _channel_fallback(basis, fallback, knots, "solver_failed", runtime)
 
     raw_coefficient = vector[:n_kernel].reshape(fallback.size, n_basis)
     raw_coefficient[np.abs(raw_coefficient) < 1.0e-12] = 0.0
     coefficient = np.maximum(raw_coefficient, 0.0)
     amplitude_scale = np.sum(coefficient, axis=0)
     if np.any(amplitude_scale <= 0.0):
-        surface, coefficient, metrics = _fallback_solution(
-            basis,
-            fallback,
-            "empty_kernel",
-        )
-        metrics["runtime_sec"] = runtime
-        return surface, coefficient, knots, metrics
+        return _channel_fallback(basis, fallback, knots, "empty_kernel", runtime)
     coefficient /= amplitude_scale[None, :]
     surface = basis @ coefficient.T
     surface /= np.sum(surface, axis=1, keepdims=True)
@@ -663,7 +678,6 @@ def fit_bspline_channel(
     model = design @ vector
     residual = target[valid] - model[valid]
     chi2 = float(np.sum(residual**2 * ivar[valid]))
-    center, sigma = kernel_moments(surface)
     metrics = {
         "status": status,
         "reason": "",
@@ -673,14 +687,7 @@ def fit_bspline_channel(
         "degree": float(degree),
         "chi2_red": chi2 / max(np.count_nonzero(valid) - n_parameter, 1),
         "rms_resid": float(np.sqrt(np.mean(residual**2))),
-        "center_pix_min": float(np.min(center)),
-        "center_pix_median": float(np.median(center)),
-        "center_pix_max": float(np.max(center)),
-        "center_pix": float(np.median(center)),
-        "sigma_pix_min": float(np.min(sigma)),
-        "sigma_pix_median": float(np.median(sigma)),
-        "sigma_pix_max": float(np.max(sigma)),
-        "sigma_pix": float(np.median(sigma)),
+        **_kernel_metric_summary(surface),
         "fitted_amplitude_scale": float(np.median(amplitude_scale)),
         "runtime_sec": runtime,
     }
@@ -698,7 +705,17 @@ def fit_lsf_surface(
     *,
     previous_state: LSFSurfaceState | None = None,
 ) -> LSFSurfaceState:
-    """Fit the hybrid LSF, reusing the first fit's knots on later cycles."""
+    """Fit the three-channel wavelength-dependent LSF.
+
+    The blue channel uses one constant constrained kernel; red channels use
+    smooth B-spline coefficients. When ``previous_state`` is supplied, its
+    knots are fixed and any failed channel reuses the previous accepted surface.
+
+    Returns
+    -------
+    LSFSurfaceState
+        Compact coefficients, knots, channel diagnostics, and grid provenance.
+    """
     wave = np.asarray(wave, dtype=float)
     target = np.asarray(flux, dtype=float) - np.asarray(
         fixed_background,
@@ -706,9 +723,7 @@ def fit_lsf_surface(
     )
     surface = np.zeros((wave.size, LSF_KERNEL_SIZE), dtype=float)
     previous_surface = (
-        None
-        if previous_state is None
-        else evaluate_lsf_surface(previous_state, wave)
+        None if previous_state is None else evaluate_lsf_surface(previous_state, wave)
     )
     coefficients: dict[str, np.ndarray] = {}
     knots: dict[str, np.ndarray] = {}
@@ -725,11 +740,13 @@ def fit_lsf_surface(
         degree = config.degree
         free_amplitude = False
         if channel == "B":
+            # The blue arm has too little isolated-line information for a smooth surface.
             fit_mask &= wave >= config.blue_fit_lower
             n_basis = 1
             degree = 0
             free_amplitude = True
 
+        # Freeze the first accepted knots so later cycles change only coefficients.
         previous_knots = None
         if previous_state is not None:
             previous_knots = previous_state.knot_vectors.get(channel)
@@ -742,9 +759,7 @@ def fit_lsf_surface(
             fallback_kernels[channel],
             n_basis=n_basis,
             degree=degree,
-            roughness_fraction=(
-                0.0 if channel == "B" else config.roughness_fraction
-            ),
+            roughness_fraction=(0.0 if channel == "B" else config.roughness_fraction),
             fallback_prior_fraction=config.fallback_prior_fraction,
             information_prior_max_boost=(
                 1.0 if channel == "B" else config.information_prior_max_boost
@@ -754,17 +769,12 @@ def fit_lsf_surface(
             knot_vector=previous_knots,
         )
 
-        restored_previous = (
-            previous_state is not None
-            and channel_metrics["status"] == "fallback"
-        )
+        restored_previous = previous_state is not None and channel_metrics["status"] == "fallback"
         if restored_previous:
             local_surface = previous_surface[mask].copy()
             coefficient = previous_state.coefficients[channel].copy()
             knot_vector = previous_state.knot_vectors[channel].copy()
-            channel_metrics["reason"] = (
-                f"previous_surface:{channel_metrics['reason']}"
-            )
+            channel_metrics["reason"] = f"previous_surface:{channel_metrics['reason']}"
         if channel == "B":
             surface[mask] = local_surface if restored_previous else local_surface[0]
             channel_metrics["model"] = "constant_blue_kernel"
@@ -852,22 +862,22 @@ def apply_lsf_surface(
         else channel_bounds
     )
     output = np.zeros_like(source)
-    for channel in ("B", "R", "Z"):
+    for channel in CHANNEL_NAMES:
         lower, upper = bounds[channel]
-        indices = np.flatnonzero(_channel_mask(wave, lower, upper))
-        if indices.size == 0:
+        start = 0 if lower is None else int(np.searchsorted(wave, lower, side="left"))
+        stop = wave.size if upper is None else int(np.searchsorted(wave, upper, side="left"))
+        if stop <= start:
             continue
         for tap, offset in enumerate(offsets):
             if offset >= 0:
-                target_index = indices[offset:]
-                source_index = indices[: indices.size - offset]
+                target_slice = slice(start + offset, stop)
+                source_slice = slice(start, stop - offset)
             else:
-                target_index = indices[:offset]
-                source_index = indices[-offset:]
-            if target_index.size:
-                output[:, target_index] += (
-                    source[:, source_index]
-                    * kernel_surface[target_index, tap][None, :]
+                target_slice = slice(start, stop + offset)
+                source_slice = slice(start - offset, stop)
+            if target_slice.start < target_slice.stop:
+                output[:, target_slice] += (
+                    source[:, source_slice] * kernel_surface[target_slice, tap][None, :]
                 )
     return output[0] if one_dimensional else output
 
@@ -878,9 +888,7 @@ def evaluate_lsf_surface(
 ) -> np.ndarray:
     """Reconstruct a fitted LSF surface from persisted knots and coefficients."""
     if state.schema_version != LSF_STATE_SCHEMA_VERSION:
-        raise ValueError(
-            f"Unsupported LSF state schema version: {state.schema_version}"
-        )
+        raise ValueError(f"Unsupported LSF state schema version: {state.schema_version}")
     evaluation_wave = np.asarray(wave, dtype=float)
     if (
         evaluation_wave.ndim != 1
@@ -891,7 +899,7 @@ def evaluate_lsf_surface(
 
     surface = np.zeros((evaluation_wave.size, state.tap_offsets.size), dtype=float)
     covered = np.zeros(evaluation_wave.size, dtype=bool)
-    for channel in ("B", "R", "Z"):
+    for channel in CHANNEL_NAMES:
         if channel not in state.channel_bounds:
             continue
         lower, upper = state.channel_bounds[channel]
@@ -919,9 +927,7 @@ def evaluate_lsf_surface(
             degree,
         )
         if basis.shape[1] != coefficient.shape[1]:
-            raise ValueError(
-                f"LSF coefficient and knot dimensions disagree for channel {channel}"
-            )
+            raise ValueError(f"LSF coefficient and knot dimensions disagree for channel {channel}")
         surface[mask] = basis @ coefficient.T
         covered[mask] = True
 
@@ -1008,7 +1014,7 @@ def load_lsf_surface_state(
     if spectrum_index < 0 or spectrum_index >= coefficient_cube.shape[0]:
         raise IndexError("spectrum_index is outside the stored LSF array")
     rows = meta[meta["spectrum_index"] == spectrum_index]
-    if len(rows) != len(LSF_CHANNELS):
+    if len(rows) != len(CHANNEL_NAMES):
         raise ValueError("LSF_META does not contain exactly one row per channel")
     if not np.all(np.asarray(rows["available"], dtype=bool)):
         raise ValueError("No fitted LSF state is available for this spectrum")
@@ -1018,15 +1024,18 @@ def load_lsf_surface_state(
     degrees: dict[str, int] = {}
     bounds: dict[str, tuple[float | None, float | None]] = {}
     metrics: dict[str, dict[str, object]] = {}
-    config: dict[str, float | int] | None = None
     first_row = rows[0]
+    config = {
+        name: converter(first_row[column])
+        for name, column, converter in STATE_CONFIG_COLUMNS
+    }
     tap_offsets = np.asarray(first_row["tap_offsets"], dtype=int)
     if tap_offsets.ndim != 1 or tap_offsets.size != coefficient_cube.shape[2]:
         raise ValueError("Stored tap offsets do not match LSF_COEF")
     schema_version = int(first_row["schema_version"])
     if schema_version != LSF_STATE_SCHEMA_VERSION:
         raise ValueError(f"Unsupported LSF state schema version: {schema_version}")
-    channel_to_index = {name: index for index, (name, _, _) in enumerate(LSF_CHANNELS)}
+    channel_to_index = {name: index for index, name in enumerate(CHANNEL_NAMES)}
     for row in rows:
         channel = _text_value(row["channel"])
         if channel not in channel_to_index or channel in coefficients:
@@ -1038,12 +1047,8 @@ def load_lsf_surface_state(
         n_knots = int(row["n_knots"])
         if n_basis < 1 or n_knots < 2:
             raise ValueError(f"Invalid stored LSF dimensions for channel {channel}")
-        coefficients[channel] = coefficient_cube[
-            spectrum_index, channel_index, :, :n_basis
-        ].copy()
-        knots[channel] = knot_cube[
-            spectrum_index, channel_index, :n_knots
-        ].copy()
+        coefficients[channel] = coefficient_cube[spectrum_index, channel_index, :, :n_basis].copy()
+        knots[channel] = knot_cube[spectrum_index, channel_index, :n_knots].copy()
         degrees[channel] = int(row["degree"])
         lower_value = float(row["lower"])
         upper_value = float(row["upper"])
@@ -1052,51 +1057,16 @@ def load_lsf_surface_state(
             None if np.isnan(upper_value) else upper_value,
         )
         metrics[channel] = {
-            "status": _text_value(row["status"]),
-            "reason": _text_value(row["reason"]),
-            "n_pixels": int(row["n_pixels"]),
-            "n_valid_pixels": int(row["n_valid_pixels"]),
-            "chi2_red": float(row["chi2_red"]),
-            "rms_resid": float(row["rms_resid"]),
-            "center_pix_min": float(row["center_pix_min"]),
-            "center_pix_median": float(row["center_pix_median"]),
-            "center_pix_max": float(row["center_pix_max"]),
-            "sigma_pix_min": float(row["sigma_pix_min"]),
-            "sigma_pix_median": float(row["sigma_pix_median"]),
-            "sigma_pix_max": float(row["sigma_pix_max"]),
-            "runtime_sec": float(row["runtime_sec"]),
-            "fit_lower": float(row["fit_lower"]),
-            "fit_upper": float(row["fit_upper"]),
-            "knots_fixed": bool(row["knots_fixed"]),
-            "model": _text_value(row["model"]),
+            name: _text_value(row[name]) if converter is str else converter(row[name])
+            for name, _, converter in METRIC_COLUMNS
         }
-        if config is None:
-            config = {
-                "line_weight": float(row["line_weight"]),
-                "skyline_cumulative_fraction": float(
-                    row["skyline_cumulative_fraction"]
-                ),
-                "skyline_half_width_angstrom": float(
-                    row["skyline_half_width_angstrom"]
-                ),
-                "huber_transition_sigma": float(row["huber_transition_sigma"]),
-                "n_refinement_cycles": int(row["requested_cycles"]),
-                "n_basis": int(row["config_n_basis"]),
-                "degree": int(row["config_degree"]),
-                "roughness_fraction": float(row["roughness_fraction"]),
-                "fallback_prior_fraction": float(row["fallback_prior_fraction"]),
-                "information_prior_max_boost": float(row["information_prior_max_boost"]),
-                "background_degree": int(row["background_degree"]),
-                "blue_fit_lower": float(row["blue_fit_lower"]),
-            }
-
     return LSFSurfaceState(
         coefficients=coefficients,
         knot_vectors=knots,
         degrees=degrees,
         channel_bounds=bounds,
         tap_offsets=tap_offsets,
-        config={} if config is None else config,
+        config=config,
         metrics=metrics,
         requested_cycles=int(first_row["requested_cycles"]),
         completed_cycles=int(first_row["completed_cycles"]),
@@ -1109,9 +1079,7 @@ def load_lsf_surface_state(
         final_continuum_status=_text_value(first_row["final_continuum_status"]),
         final_line_status=_text_value(first_row["final_line_status"]),
         knot_strategy=_text_value(first_row["knot_strategy"]),
-        legacy_kernel_representation=_text_value(
-            first_row["legacy_kernel_representation"]
-        ),
+        legacy_kernel_representation=_text_value(first_row["legacy_kernel_representation"]),
         schema_version=schema_version,
     )
 
@@ -1136,7 +1104,6 @@ def _nominal_lsf_state(
         knots[channel] = np.array([wave[mask][0], wave[mask][-1]], dtype=float)
         degrees[channel] = 0
         bounds[channel] = (lower, upper)
-        center, sigma = kernel_moments(kernel[None, :])
         metrics[channel] = {
             "status": "fallback",
             "reason": reason,
@@ -1144,12 +1111,10 @@ def _nominal_lsf_state(
             "n_valid_pixels": 0,
             "chi2_red": np.nan,
             "rms_resid": np.nan,
-            "center_pix_min": float(center[0]),
-            "center_pix_median": float(center[0]),
-            "center_pix_max": float(center[0]),
-            "sigma_pix_min": float(sigma[0]),
-            "sigma_pix_median": float(sigma[0]),
-            "sigma_pix_max": float(sigma[0]),
+            **_kernel_metric_summary(
+                kernel[None, :],
+                include_legacy_aliases=False,
+            ),
             "runtime_sec": 0.0,
             "fit_lower": float(wave[mask][0]),
             "fit_upper": float(wave[mask][-1]),
@@ -1191,9 +1156,7 @@ class SkyDecompLSFSurfaceIterative(SkyDecomp):
         **kwargs,
     ) -> None:
         if float(kwargs.get("moon_interline_boost", 0.0)) != 0.0:
-            raise ValueError(
-                "SkyDecompLSFSurfaceIterative requires moon_interline_boost=0"
-            )
+            raise ValueError("SkyDecompLSFSurfaceIterative requires moon_interline_boost=0")
         kwargs["moon_interline_boost"] = 0.0
         self.config = config or LSFSurfaceIterativeConfig()
         self.lsf_surface_state: LSFSurfaceState | None = None
@@ -1232,6 +1195,7 @@ class SkyDecompLSFSurfaceIterative(SkyDecomp):
             self.lsf_metrics = {}
             self.lsf_kernels = {}
             return
+        # The compact state is authoritative; the dense surface is a runtime cache.
         self._lsf_surface = evaluate_lsf_surface(state, self.wave)
         self.lsf_metrics = {
             channel: {
@@ -1340,8 +1304,7 @@ class SkyDecompLSFSurfaceIterative(SkyDecomp):
             "stage": stage,
             "solver_status": status,
             "chi2_per_valid_pixel": float(
-                np.sum(residual[valid] ** 2 * ivar[valid])
-                / max(int(np.sum(valid)), 1)
+                np.sum(residual[valid] ** 2 * ivar[valid]) / max(int(np.sum(valid)), 1)
             ),
             "rms": rms(valid),
             "line_free_rms": rms(line_free),
@@ -1352,28 +1315,49 @@ class SkyDecompLSFSurfaceIterative(SkyDecomp):
         metric.update(extra)
         return metric
 
-    def fit(
+    def _fit_continuum_stage(
+        self,
+        run: _FitRun,
+        flux: np.ndarray,
+        ivar: np.ndarray,
+        skyline_mask: np.ndarray,
+    ) -> tuple[
+        dict[str, object],
+        np.ndarray | None,
+        np.ndarray | None,
+        np.ndarray,
+        dict[str, float],
+    ]:
+        weights, channel_noise = continuum_fit_weights(
+            self.wave,
+            flux - run.continuum - run.line_model,
+            ivar,
+            skyline_mask,
+            line_weight=self.config.line_weight,
+            huber_transition_sigma=self.config.huber_transition_sigma,
+        )
+        design = self._stack_matrices(run.matrices, self._CONTINUUM_KEYS)
+        n_moon = run.matrices["moon"].shape[0]
+        fit = self._fit_design(
+            design,
+            flux - run.line_model,
+            weights,
+            moon_slice=slice(0, n_moon),
+            diffuse_slice=slice(n_moon, design.shape[0]),
+        )
+        if str(fit["status"]) not in self._SOLVED:
+            return fit, None, None, weights, channel_noise
+        coefficient = np.asarray(fit["coef"], dtype=float)
+        continuum = design.T @ coefficient
+        return fit, coefficient, continuum, weights, channel_noise
+
+    def _run_iterations(
         self,
         flux: np.ndarray,
         ivar: np.ndarray,
-        *,
-        verbose: bool = False,
-    ) -> LSFSurfaceIterativeResult:
-        """Run the approved continuum -> LSF -> lines refinement sequence."""
-        flux = np.asarray(flux, dtype=float)
-        ivar = np.asarray(ivar, dtype=float)
-        if flux.shape != self.wave.shape or ivar.shape != self.wave.shape:
-            raise ValueError("flux and ivar must match wave")
-
-        trace_started = False
-        if not tracemalloc.is_tracing():
-            tracemalloc.start()
-            trace_started = True
-        tracemalloc.reset_peak()
-        started = time.perf_counter()
-        config = self.config
-        self._set_lsf_state(None)
-        self._prefit_o2(flux, ivar)
+    ) -> tuple[dict[str, object], np.ndarray, _FitRun]:
+        """Run the nominal seed, refinement transactions, and final closure."""
+        # Nominal joint seed.
         matrices = self._matrix_bundle(
             self.matrix_oh,
             self.matrix_moon,
@@ -1405,100 +1389,82 @@ class SkyDecompLSFSurfaceIterative(SkyDecomp):
         line_design = self._stack_matrices(matrices, self._LINE_KEYS)
         continuum = continuum_design.T @ continuum_coefficient
         line_model = line_design.T @ line_coefficient
-
         skyline_mask = build_skyline_mask(
             self.wave,
             self._line_stick_matrices(),
-            cumulative_fraction=config.skyline_cumulative_fraction,
-            half_width_angstrom=config.skyline_half_width_angstrom,
+            cumulative_fraction=self.config.skyline_cumulative_fraction,
+            half_width_angstrom=self.config.skyline_half_width_angstrom,
         )
-        stage_metrics: list[dict[str, object]] = [
-            self._metric(
-                "00_nominal_joint_seed",
-                str(seed["status"]),
-                flux,
-                continuum + line_model,
-                ivar,
-                skyline_mask,
-            )
-        ]
-        continuum_weights = ivar.copy()
-        channel_noise = {channel: np.nan for channel, _, _ in LSF_CHANNELS}
-        failure: str | None = None
-        final_solver_status = str(seed["status"])
-        seed_solved = final_solver_status in self._SOLVED
-        final_continuum_status = "not_run"
-        final_line_status = "not_run"
+        seed_status = str(seed["status"])
+        seed_solved = seed_status in self._SOLVED
+        run = _FitRun(
+            matrices=matrices,
+            continuum_coefficient=continuum_coefficient,
+            line_coefficient=line_coefficient,
+            continuum=continuum,
+            line_model=line_model,
+            weights=ivar.copy(),
+            channel_noise={channel: np.nan for channel, _, _ in LSF_CHANNELS},
+            metrics=[
+                self._metric(
+                    "00_nominal_joint_seed",
+                    seed_status,
+                    flux,
+                    continuum + line_model,
+                    ivar,
+                    skyline_mask,
+                )
+            ],
+            failure=None if seed_solved else f"nominal_seed:{seed_status}",
+            solver_status=seed_status,
+        )
 
-        if not seed_solved:
-            failure = f"nominal_seed:{final_solver_status}"
-
-        for cycle in range(1, config.n_refinement_cycles + 1):
-            if failure is not None:
+        # Each cycle commits only after continuum, LSF, and line stages succeed.
+        for cycle in range(1, self.config.n_refinement_cycles + 1):
+            if run.failure is not None:
                 break
-            old_continuum = continuum.copy()
-            old_line_model = line_model.copy()
             previous_state = self.lsf_surface_state
             previous_surface = (
                 None if self._lsf_surface is None else self._lsf_surface.copy()
             )
-            previous_matrices = matrices
-            previous_continuum_coefficient = continuum_coefficient.copy()
-            previous_line_coefficient = line_coefficient.copy()
-
-            continuum_weights, channel_noise = continuum_fit_weights(
-                self.wave,
-                flux - continuum - line_model,
-                ivar,
-                skyline_mask,
-                line_weight=config.line_weight,
-                huber_transition_sigma=config.huber_transition_sigma,
+            continuum_fit, candidate_coefficient, candidate_continuum, weights, noise = (
+                self._fit_continuum_stage(run, flux, ivar, skyline_mask)
             )
-            continuum_design = self._stack_matrices(matrices, self._CONTINUUM_KEYS)
-            n_moon = matrices["moon"].shape[0]
-            continuum_fit = self._fit_design(
-                continuum_design,
-                flux - line_model,
-                continuum_weights,
-                moon_slice=slice(0, n_moon),
-                diffuse_slice=slice(n_moon, continuum_design.shape[0]),
-            )
+            run.weights = weights
+            run.channel_noise = noise
             continuum_status = str(continuum_fit["status"])
             if continuum_status not in self._SOLVED:
-                failure = f"cycle_{cycle}_continuum:{continuum_status}"
-                stage_metrics.append(
+                run.metrics.append(
                     self._metric(
                         f"{cycle:02d}_continuum_failed",
                         continuum_status,
                         flux,
-                        continuum + line_model,
+                        run.continuum + run.line_model,
                         ivar,
                         skyline_mask,
                     )
                 )
+                run.failure = f"cycle_{cycle}_continuum:{continuum_status}"
                 break
-            candidate_continuum_coefficient = np.asarray(
-                continuum_fit["coef"], dtype=float
-            )
-            candidate_continuum = continuum_design.T @ candidate_continuum_coefficient
-            stage_metrics.append(
+
+            run.metrics.append(
                 self._metric(
                     f"{cycle:02d}_continuum",
                     continuum_status,
                     flux,
-                    candidate_continuum + line_model,
+                    candidate_continuum + run.line_model,
                     ivar,
                     skyline_mask,
                     continuum_relative_change=self._relative_change(
-                        candidate_continuum, old_continuum
+                        candidate_continuum,
+                        run.continuum,
                     ),
                 )
             )
-
             state = self._fit_lsf_channels(
                 flux,
                 ivar,
-                self._line_source(line_coefficient),
+                self._line_source(run.line_coefficient),
                 candidate_continuum,
             )
             matrices = self._assemble_refined_matrices()
@@ -1511,48 +1477,38 @@ class SkyDecompLSFSurfaceIterative(SkyDecomp):
             line_status = str(line_fit["status"])
             if line_status not in self._SOLVED:
                 self._set_lsf_state(previous_state)
-                matrices = previous_matrices
-                continuum_coefficient = previous_continuum_coefficient
-                line_coefficient = previous_line_coefficient
-                continuum = old_continuum
-                line_model = old_line_model
-                failure = f"cycle_{cycle}_lines:{line_status}"
-                stage_metrics.append(
+                run.metrics.append(
                     self._metric(
                         f"{cycle:02d}_lines_failed",
                         line_status,
                         flux,
-                        continuum + line_model,
+                        run.continuum + run.line_model,
                         ivar,
                         skyline_mask,
                     )
                 )
+                run.failure = f"cycle_{cycle}_lines:{line_status}"
                 break
 
-            continuum_coefficient = candidate_continuum_coefficient
-            continuum = candidate_continuum
-            line_coefficient = np.asarray(line_fit["coef"], dtype=float)
-            line_model = line_design.T @ line_coefficient
+            candidate_line_coefficient = np.asarray(line_fit["coef"], dtype=float)
+            candidate_line_model = line_design.T @ candidate_line_coefficient
             state.completed_cycles = cycle
-            final_solver_status = line_status
             lsf_change = (
                 np.nan
                 if previous_state is None
-                else self._relative_change(
-                    self._lsf_surface,
-                    previous_surface,
-                )
+                else self._relative_change(self._lsf_surface, previous_surface)
             )
-            stage_metrics.append(
+            run.metrics.append(
                 self._metric(
                     f"{cycle:02d}_lsf_lines",
                     line_status,
                     flux,
-                    continuum + line_model,
+                    candidate_continuum + candidate_line_model,
                     ivar,
                     skyline_mask,
                     line_relative_change=self._relative_change(
-                        line_model, old_line_model
+                        candidate_line_model,
+                        run.line_model,
                     ),
                     lsf_relative_change=lsf_change,
                     lsf_status={
@@ -1561,101 +1517,103 @@ class SkyDecompLSFSurfaceIterative(SkyDecomp):
                     },
                 )
             )
+            run.matrices = matrices
+            run.continuum_coefficient = candidate_coefficient
+            run.line_coefficient = candidate_line_coefficient
+            run.continuum = candidate_continuum
+            run.line_model = candidate_line_model
+            run.solver_status = line_status
 
+        # Closure uses the last fully committed model, even after a failed cycle.
         if seed_solved:
-            saved_continuum = continuum.copy()
-            saved_line_model = line_model.copy()
-            saved_continuum_coefficient = continuum_coefficient.copy()
-            continuum_weights, channel_noise = continuum_fit_weights(
-                self.wave,
-                flux - continuum - line_model,
-                ivar,
-                skyline_mask,
-                line_weight=config.line_weight,
-                huber_transition_sigma=config.huber_transition_sigma,
+            continuum_fit, candidate_coefficient, candidate_continuum, weights, noise = (
+                self._fit_continuum_stage(run, flux, ivar, skyline_mask)
             )
-            continuum_design = self._stack_matrices(matrices, self._CONTINUUM_KEYS)
-            n_moon = matrices["moon"].shape[0]
-            continuum_fit = self._fit_design(
-                continuum_design,
-                flux - line_model,
-                continuum_weights,
-                moon_slice=slice(0, n_moon),
-                diffuse_slice=slice(n_moon, continuum_design.shape[0]),
-            )
-            continuum_status = str(continuum_fit["status"])
-            final_continuum_status = continuum_status
-            if continuum_status not in self._SOLVED:
-                final_failure = f"final_continuum:{continuum_status}"
-                failure = (
+            run.weights = weights
+            run.channel_noise = noise
+            run.continuum_status = str(continuum_fit["status"])
+            if run.continuum_status not in self._SOLVED:
+                final_failure = f"final_continuum:{run.continuum_status}"
+                run.failure = (
                     final_failure
-                    if failure is None
-                    else f"{failure};{final_failure}"
+                    if run.failure is None
+                    else f"{run.failure};{final_failure}"
                 )
             else:
-                candidate_continuum_coefficient = np.asarray(
-                    continuum_fit["coef"], dtype=float
-                )
-                candidate_continuum = (
-                    continuum_design.T @ candidate_continuum_coefficient
-                )
-                stage_metrics.append(
+                run.metrics.append(
                     self._metric(
                         "final_continuum",
-                        continuum_status,
+                        run.continuum_status,
                         flux,
-                        candidate_continuum + line_model,
+                        candidate_continuum + run.line_model,
                         ivar,
                         skyline_mask,
                         continuum_relative_change=self._relative_change(
-                            candidate_continuum, continuum
+                            candidate_continuum,
+                            run.continuum,
                         ),
                     )
                 )
-                line_design = self._stack_matrices(matrices, self._LINE_KEYS)
+                line_design = self._stack_matrices(run.matrices, self._LINE_KEYS)
                 line_fit = self._fit_design(
                     line_design,
                     flux - candidate_continuum,
                     ivar,
                 )
-                line_status = str(line_fit["status"])
-                final_line_status = line_status
-                if line_status not in self._SOLVED:
-                    continuum = saved_continuum
-                    line_model = saved_line_model
-                    continuum_coefficient = saved_continuum_coefficient
-                    final_failure = f"final_lines:{line_status}"
-                    failure = (
+                run.line_status = str(line_fit["status"])
+                if run.line_status not in self._SOLVED:
+                    final_failure = f"final_lines:{run.line_status}"
+                    run.failure = (
                         final_failure
-                        if failure is None
-                        else f"{failure};{final_failure}"
+                        if run.failure is None
+                        else f"{run.failure};{final_failure}"
                     )
                 else:
-                    continuum_coefficient = candidate_continuum_coefficient
-                    continuum = candidate_continuum
-                    line_coefficient = np.asarray(line_fit["coef"], dtype=float)
-                    line_model = line_design.T @ line_coefficient
-                    final_solver_status = line_status
-                    stage_metrics.append(
+                    candidate_line_coefficient = np.asarray(
+                        line_fit["coef"],
+                        dtype=float,
+                    )
+                    candidate_line_model = line_design.T @ candidate_line_coefficient
+                    run.metrics.append(
                         self._metric(
                             "final_lines",
-                            line_status,
+                            run.line_status,
                             flux,
-                            continuum + line_model,
+                            candidate_continuum + candidate_line_model,
                             ivar,
                             skyline_mask,
                             line_relative_change=self._relative_change(
-                                line_model, saved_line_model
+                                candidate_line_model,
+                                run.line_model,
                             ),
                         )
                     )
+                    run.continuum_coefficient = candidate_coefficient
+                    run.line_coefficient = candidate_line_coefficient
+                    run.continuum = candidate_continuum
+                    run.line_model = candidate_line_model
+                    run.solver_status = run.line_status
 
+        return seed, skyline_mask, run
+
+    def _finalize_result(
+        self,
+        run: _FitRun,
+        seed: dict[str, object],
+        flux: np.ndarray,
+        ivar: np.ndarray,
+        skyline_mask: np.ndarray,
+        started: float,
+        trace_started: bool,
+        verbose: bool,
+    ) -> LSFSurfaceIterativeResult:
+        """Build the public result and publish the final instance state."""
         coefficient = self._combine_coefficients(
-            matrices,
-            continuum_coefficient,
-            line_coefficient,
+            run.matrices,
+            run.continuum_coefficient,
+            run.line_coefficient,
         )
-        components = self._components_from_coef(coefficient, matrices)
+        components = self._components_from_coef(coefficient, run.matrices)
         continuum = components["moon"] + components["diffuse"]
         line_model = (
             components["oh"]
@@ -1664,24 +1622,21 @@ class SkyDecompLSFSurfaceIterative(SkyDecomp):
             + components["o2"]
         )
         bestfit_lsf = continuum + line_model
-        component_total = (
-            components["moon"]
-            + components["diffuse"]
-            + components["oh"]
-            + components["atom"]
-            + components["orc"]
-            + components["o2"]
-        )
-        if not np.allclose(bestfit_lsf, component_total, atol=1.0e-10, rtol=1.0e-10):
-            raise RuntimeError("Final component spectra do not close to bestfit_lsf")
+
         residual = flux - bestfit_lsf
         valid = np.isfinite(residual) & np.isfinite(ivar) & (ivar > 0.0)
         chi2 = float(np.sum(residual[valid] ** 2 * ivar[valid]))
         reduced_chi2 = chi2 / max(int(np.sum(valid)) - coefficient.size, 1)
         rms_resid = (
-            float(np.sqrt(np.mean(residual[valid] ** 2))) if np.any(valid) else np.nan
+            float(np.sqrt(np.mean(residual[valid] ** 2)))
+            if np.any(valid)
+            else np.nan
         )
-        y_mean = float(np.average(flux[valid], weights=ivar[valid])) if np.any(valid) else np.nan
+        y_mean = (
+            float(np.average(flux[valid], weights=ivar[valid]))
+            if np.any(valid)
+            else np.nan
+        )
         total_sum = (
             float(np.sum((flux[valid] - y_mean) ** 2 * ivar[valid]))
             if np.any(valid)
@@ -1698,18 +1653,17 @@ class SkyDecompLSFSurfaceIterative(SkyDecomp):
             tracemalloc.stop()
 
         self.coef = coefficient
+        # Keep the historical seed-valued fields; bestfit_lsf is the refined model.
         self.bestfit = np.asarray(seed["bestfit"], dtype=float)
         self.bestfit_lsf = bestfit_lsf
-        self.fit_status = (
-            final_solver_status if failure is None else f"failed:{failure}"
-        )
+        self.fit_status = run.solver_status if run.failure is None else f"failed:{run.failure}"
         self.r2 = r2
         self.rms_resid = rms_resid
         self.peak_memory_mb = peak_memory_mb
-        self.stage_metrics = tuple(stage_metrics)
+        self.stage_metrics = tuple(run.metrics)
         self.skyline_mask = skyline_mask
-        self.continuum_weights = continuum_weights
-        self.channel_noise = channel_noise
+        self.continuum_weights = run.weights
+        self.channel_noise = run.channel_noise
         self.final_continuum = continuum
         self.final_line_model = line_model
         if self.lsf_surface_state is None:
@@ -1723,26 +1677,26 @@ class SkyDecompLSFSurfaceIterative(SkyDecomp):
                 _nominal_lsf_state(
                     self.wave,
                     fallback,
-                    config,
-                    failure or "no_completed_lsf_cycle",
+                    self.config,
+                    run.failure or "no_completed_lsf_cycle",
                 )
             )
         completed_cycles = self.lsf_surface_state.completed_cycles
         self.lsf_surface_state.fit_status = self.fit_status
-        self.lsf_surface_state.failure_reason = failure or ""
-        self.lsf_surface_state.final_continuum_status = final_continuum_status
-        self.lsf_surface_state.final_line_status = final_line_status
+        self.lsf_surface_state.failure_reason = run.failure or ""
+        self.lsf_surface_state.final_continuum_status = run.continuum_status
+        self.lsf_surface_state.final_line_status = run.line_status
         self.fit_summary = (
             f"status={self.fit_status} | npar={coefficient.size} | "
             f"ngood={int(np.sum(valid))} | chi2_red={reduced_chi2:.4g} | "
-            f"R2={r2:.5f} | line_weight={config.line_weight:.3g} | "
+            f"R2={r2:.5f} | line_weight={self.config.line_weight:.3g} | "
             f"skyline_fraction={float(np.mean(skyline_mask)):.3f} | "
-            f"refinement_cycles={completed_cycles}/{config.n_refinement_cycles} | "
+            f"refinement_cycles={completed_cycles}/{self.config.n_refinement_cycles} | "
             f"fixed_lsf_knots=True | dt={elapsed:.2f}s"
         )
 
         if verbose:
-            for metric in stage_metrics:
+            for metric in run.metrics:
                 print(
                     f"{metric['stage']}: chi2/pix={metric['chi2_per_valid_pixel']:.5g}, "
                     f"line-free RMS={metric['line_free_rms']:.5g}, "
@@ -1775,6 +1729,40 @@ class SkyDecompLSFSurfaceIterative(SkyDecomp):
             moon_knots=self.moon_knots_used.copy(),
             moon_boosted_pixels=self.moon_boosted_pixels_used.copy(),
             lsf_state=self.lsf_surface_state,
+        )
+
+    def fit(
+        self,
+        flux: np.ndarray,
+        ivar: np.ndarray,
+        *,
+        verbose: bool = False,
+    ) -> LSFSurfaceIterativeResult:
+        """Run the approved continuum -> LSF -> lines refinement sequence."""
+        flux = np.asarray(flux, dtype=float)
+        ivar = np.asarray(ivar, dtype=float)
+        if flux.shape != self.wave.shape or ivar.shape != self.wave.shape:
+            raise ValueError("flux and ivar must match wave")
+
+        trace_started = False
+        if not tracemalloc.is_tracing():
+            tracemalloc.start()
+            trace_started = True
+        tracemalloc.reset_peak()
+        started = time.perf_counter()
+        self._set_lsf_state(None)
+        self._prefit_o2(flux, ivar)
+        seed, skyline_mask, run = self._run_iterations(flux, ivar)
+
+        return self._finalize_result(
+            run,
+            seed,
+            flux,
+            ivar,
+            skyline_mask,
+            started,
+            trace_started,
+            verbose,
         )
 
 

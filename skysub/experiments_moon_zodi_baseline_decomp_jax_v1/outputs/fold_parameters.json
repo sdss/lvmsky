@@ -1,0 +1,122 @@
+[
+  {
+    "fold": 0,
+    "n_train": 259,
+    "n_validation": 97,
+    "loss": 0.004714605884105852,
+    "success": true,
+    "message": "CONVERGENCE: RELATIVE REDUCTION OF F <= FACTR*EPSMCH",
+    "iterations": 55,
+    "start_index": 0,
+    "parameters": {
+      "log_rayleigh_scale": 0.61972062708029,
+      "log_aerosol_scale": -1.0986122886681098,
+      "amplitude_log_target_airmass": 0.04976656541715685,
+      "amplitude_log_moon_airmass": -0.023210318043136703,
+      "amplitude_abs_phase": 0.11801105208139039,
+      "amplitude_cos_separation": 0.14696630245471115,
+      "color_log_wave": 0.5585292458572976,
+      "color_log_wave_squared": 1.2833058416880954,
+      "color_target_airmass": 0.032642285749980536,
+      "color_moon_airmass": -0.31965277670027525,
+      "color_signed_phase": -0.052873447267839234,
+      "color_cos_separation": -0.35767013032835515
+    }
+  },
+  {
+    "fold": 1,
+    "n_train": 263,
+    "n_validation": 93,
+    "loss": 0.0035330732479641907,
+    "success": true,
+    "message": "CONVERGENCE: RELATIVE REDUCTION OF F <= FACTR*EPSMCH",
+    "iterations": 68,
+    "start_index": 7,
+    "parameters": {
+      "log_rayleigh_scale": 0.558181772019481,
+      "log_aerosol_scale": -1.0986122886681098,
+      "amplitude_log_target_airmass": 0.0941852047494524,
+      "amplitude_log_moon_airmass": -0.001955979754562034,
+      "amplitude_abs_phase": 0.29045035455782825,
+      "amplitude_cos_separation": 0.14737110853974475,
+      "color_log_wave": 0.5029997627972189,
+      "color_log_wave_squared": 1.226720984392986,
+      "color_target_airmass": 0.2955054046012024,
+      "color_moon_airmass": -0.11723287632691207,
+      "color_signed_phase": -0.01897606237612418,
+      "color_cos_separation": -0.5669758709802545
+    }
+  },
+  {
+    "fold": 2,
+    "n_train": 316,
+    "n_validation": 40,
+    "loss": 0.004590268155783203,
+    "success": true,
+    "message": "CONVERGENCE: RELATIVE REDUCTION OF F <= FACTR*EPSMCH",
+    "iterations": 78,
+    "start_index": 5,
+    "parameters": {
+      "log_rayleigh_scale": 0.5912245386931603,
+      "log_aerosol_scale": -1.0986122886681098,
+      "amplitude_log_target_airmass": 0.035177810736543864,
+      "amplitude_log_moon_airmass": -0.01078255261229845,
+      "amplitude_abs_phase": 0.17756399372866227,
+      "amplitude_cos_separation": 0.19140294192652954,
+      "color_log_wave": 0.4736646471284819,
+      "color_log_wave_squared": 1.3060986745425545,
+      "color_target_airmass": 0.2505701164249828,
+      "color_moon_airmass": -0.12717750105753106,
+      "color_signed_phase": -0.09502964411863825,
+      "color_cos_separation": -0.3476300406604089
+    }
+  },
+  {
+    "fold": 3,
+    "n_train": 305,
+    "n_validation": 51,
+    "loss": 0.004574936574594322,
+    "success": true,
+    "message": "CONVERGENCE: RELATIVE REDUCTION OF F <= FACTR*EPSMCH",
+    "iterations": 62,
+    "start_index": 2,
+    "parameters": {
+      "log_rayleigh_scale": 0.6622148863949728,
+      "log_aerosol_scale": -1.0986122886681098,
+      "amplitude_log_target_airmass": 0.09683004845551994,
+      "amplitude_log_moon_airmass": -0.044223995095713516,
+      "amplitude_abs_phase": -0.0750704135056064,
+      "amplitude_cos_separation": 0.14608529131859127,
+      "color_log_wave": 0.5172187483968551,
+      "color_log_wave_squared": 1.2683554867319513,
+      "color_target_airmass": 0.2262287863340194,
+      "color_moon_airmass": -0.14218794399204052,
+      "color_signed_phase": -0.0172804154454477,
+      "color_cos_separation": -0.4036208864072226
+    }
+  },
+  {
+    "fold": 4,
+    "n_train": 281,
+    "n_validation": 75,
+    "loss": 0.004890552587070468,
+    "success": true,
+    "message": "CONVERGENCE: RELATIVE REDUCTION OF F <= FACTR*EPSMCH",
+    "iterations": 62,
+    "start_index": 6,
+    "parameters": {
+      "log_rayleigh_scale": 0.5690707019700194,
+      "log_aerosol_scale": -1.0986122886681098,
+      "amplitude_log_target_airmass": 0.012793220539958952,
+      "amplitude_log_moon_airmass": -0.04863330359512971,
+      "amplitude_abs_phase": 0.3842289067235177,
+      "amplitude_cos_separation": 0.19996364077183393,
+      "color_log_wave": 0.48095814609837184,
+      "color_log_wave_squared": 1.2509323723738464,
+      "color_target_airmass": 0.26370335974089276,
+      "color_moon_airmass": -0.07102722274045853,
+      "color_signed_phase": 0.00392807660862328,
+      "color_cos_separation": -0.2520840203645116
+    }
+  }
+]

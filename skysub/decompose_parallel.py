@@ -4,7 +4,7 @@
 Run sky spectral decomposition on a median-stacked LVM frame.
 
 Usage:
-    python decompose_parallel.py <data_file> <palace_dir> [--fit-model MODEL] [--n-workers N] [--lsf-sigma S] [--factor F] [--chunk-size N] [--output-dir DIR]
+    python decompose_parallel.py <data_file> <palace_dir> [options]
 
 Example:
     python decompose_parallel.py lvmsframe_median_stack.fits ../ --n-workers 8
@@ -21,11 +21,10 @@ os.environ["NUMEXPR_NUM_THREADS"] = "1"
 
 import argparse
 import platform
-import sys
-import time
 import queue as queue_mod
+import time
 from pathlib import Path
-from concurrent.futures import ProcessPoolExecutor, as_completed, wait, FIRST_COMPLETED
+from concurrent.futures import ProcessPoolExecutor, wait, FIRST_COMPLETED
 import multiprocessing as mp
 
 import numpy as np
@@ -50,13 +49,16 @@ def init_worker(
     data_file,
     progress_queue=None,
     fit_model="baseline",
-    n_refinement_cycles=4,
+    n_refinement_cycles=5,
 ):
     """Initialise one SkyDecomp instance per worker process."""
-    global _WORKER_DECOMPOSER, _WORKER_FACTOR, _WORKER_HDU, _WORKER_FLUX, _WORKER_PROGRESS_QUEUE, _WORKER_FIT_MODEL
-
-    # pid = mp.current_process().pid
-    # print(f"[worker {pid}] initializing SkyDecomp", file=sys.stderr, flush=True)
+    global \
+        _WORKER_DECOMPOSER, \
+        _WORKER_FACTOR, \
+        _WORKER_HDU, \
+        _WORKER_FLUX, \
+        _WORKER_PROGRESS_QUEUE, \
+        _WORKER_FIT_MODEL
 
     _WORKER_FACTOR = float(factor)
     _WORKER_FIT_MODEL = fit_model
@@ -99,7 +101,6 @@ def init_worker(
         )
     else:
         raise ValueError(f"Unknown fit model: {fit_model}")
-    # print(f"[worker {pid}] SkyDecomp ready", file=sys.stderr, flush=True)
 
 
 def fit_chunk_worker(args):
@@ -134,19 +135,6 @@ def fit_chunk_worker(args):
     return kind, out
 
 
-def worker_ping(_=None):
-    """Return a worker pid once initialization has completed."""
-    if _WORKER_DECOMPOSER is None:
-        raise RuntimeError("Worker SkyDecomp has not been initialised.")
-    return mp.current_process().pid
-
-
-def _get_mp_context():
-    if platform.system() == "Darwin":
-        return mp.get_context("spawn")
-    return mp.get_context()
-
-
 def resolve_base_dir(path_arg):
     """Accept either the project base dir or the palace dir and return SkyDecomp base_dir."""
     path = Path(path_arg).expanduser().resolve()
@@ -167,20 +155,20 @@ def results_to_fits(results, filename):
     if not results:
         raise ValueError("results must contain at least one decomposition result")
     rows = {
-        "t_o2":               [r.t_o2 for r in results],
-        "t_o2_err":           [r.t_o2_err for r in results],
-        "reduced_chi2":       [r.reduced_chi2 for r in results],
-        "r2":                 [r.r2 for r in results],
-        "rms_resid":          [r.rms_resid for r in results],
-        "resid_level":        [r.resid_level for r in results],
-        "fit_status":         [r.fit_status for r in results],
-        "fit_summary":        [r.fit_summary for r in results],
-        "fit_elapsed_sec":    [r.fit_elapsed_sec for r in results],
-        "peak_memory_mb":     [r.peak_memory_mb for r in results],
-        "o2_fit_status":      [r.o2_fit_status for r in results],
-        "o2_fit_summary":     [r.o2_fit_summary for r in results],
+        "t_o2": [r.t_o2 for r in results],
+        "t_o2_err": [r.t_o2_err for r in results],
+        "reduced_chi2": [r.reduced_chi2 for r in results],
+        "r2": [r.r2 for r in results],
+        "rms_resid": [r.rms_resid for r in results],
+        "resid_level": [r.resid_level for r in results],
+        "fit_status": [r.fit_status for r in results],
+        "fit_summary": [r.fit_summary for r in results],
+        "fit_elapsed_sec": [r.fit_elapsed_sec for r in results],
+        "peak_memory_mb": [r.peak_memory_mb for r in results],
+        "o2_fit_status": [r.o2_fit_status for r in results],
+        "o2_fit_summary": [r.o2_fit_summary for r in results],
         "o2_fit_elapsed_sec": [r.o2_fit_elapsed_sec for r in results],
-        "o2_valid_frac":      [r.o2_valid_frac for r in results],
+        "o2_valid_frac": [r.o2_valid_frac for r in results],
     }
     t = Table(rows)
 
@@ -191,19 +179,22 @@ def results_to_fits(results, filename):
     design_names = results[0].design_names
     if coef_arr.shape[1] != len(design_names):
         raise ValueError(
-            f"Coefficient count ({coef_arr.shape[1]}) does not match number of design names ({len(design_names)})."
+            f"Coefficient count ({coef_arr.shape[1]}) does not match "
+            f"number of design names ({len(design_names)})."
         )
     coef_table = Table({name: coef_arr[:, i] for i, name in enumerate(design_names)})
     coef_hdu = fits.BinTableHDU(coef_table, name="COEF")
 
-    hdul = fits.HDUList([
-        fits.PrimaryHDU(),
-        fits.BinTableHDU(t, name="META"),
-        coef_hdu,
-        fits.ImageHDU(stack("bestfit"),     name="BESTFIT"),
-        fits.ImageHDU(stack("bestfit_lsf"), name="BESTFIT_LSF"),
-        fits.ImageHDU(stack("resid"),       name="RESID"),
-    ])
+    hdul = fits.HDUList(
+        [
+            fits.PrimaryHDU(),
+            fits.BinTableHDU(t, name="META"),
+            coef_hdu,
+            fits.ImageHDU(stack("bestfit"), name="BESTFIT"),
+            fits.ImageHDU(stack("bestfit_lsf"), name="BESTFIT_LSF"),
+            fits.ImageHDU(stack("resid"), name="RESID"),
+        ]
+    )
 
     comp_keys = list(results[0].components.keys())
     for key in comp_keys:
@@ -236,158 +227,18 @@ def results_to_fits(results, filename):
         states = [result.lsf_state for result in results]
         if any(state is None for state in states):
             raise ValueError("Every iterative result must contain a compact LSF state")
-        reference = states[0]
-        channels = ["B", "R", "Z"]
-        for state in states:
-            if state.schema_version != reference.schema_version:
-                raise ValueError("All LSF states must use the same schema version")
-            if not np.array_equal(state.tap_offsets, reference.tap_offsets):
-                raise ValueError("All LSF states must use the same tap offsets")
-            if (
-                state.wave_n != reference.wave_n
-                or state.wave_min != reference.wave_min
-                or state.wave_max != reference.wave_max
-                or state.wave_sha256 != reference.wave_sha256
-            ):
-                raise ValueError("All LSF states must describe the same wavelength grid")
-            if set(state.coefficients) != set(channels):
-                raise ValueError("Every LSF state must contain B, R, and Z channels")
+        try:
+            from sky_decomp._lsf_surface_fits import build_lsf_hdus
+        except ModuleNotFoundError:
+            from skysub.sky_decomp._lsf_surface_fits import build_lsf_hdus
 
-        max_basis = max(
-            state.coefficients[channel].shape[1]
-            for state in states
-            for channel in channels
-        )
-        max_knots = max(
-            state.knot_vectors[channel].size
-            for state in states
-            for channel in channels
-        )
-        coefficient_cube = np.full(
-            (len(results), len(channels), reference.tap_offsets.size, max_basis),
-            np.nan,
-            dtype=float,
-        )
-        knot_cube = np.full(
-            (len(results), len(channels), max_knots),
-            np.nan,
-            dtype=float,
-        )
-        meta_rows = []
-        for spectrum_index, state in enumerate(states):
-            for channel_index, channel in enumerate(channels):
-                coefficient = state.coefficients[channel]
-                knot_vector = state.knot_vectors[channel]
-                coefficient_cube[
-                    spectrum_index,
-                    channel_index,
-                    :,
-                    : coefficient.shape[1],
-                ] = coefficient
-                knot_cube[
-                    spectrum_index,
-                    channel_index,
-                    : knot_vector.size,
-                ] = knot_vector
-                metric = state.metrics[channel]
-                lower, upper = state.channel_bounds[channel]
-                state_config = state.config
-                meta_rows.append(
-                    {
-                        "spectrum_index": spectrum_index,
-                        "channel": channel,
-                        "available": True,
-                        "lower": np.nan if lower is None else lower,
-                        "upper": np.nan if upper is None else upper,
-                        "degree": state.degrees[channel],
-                        "n_basis": coefficient.shape[1],
-                        "n_knots": knot_vector.size,
-                        "tap_offsets": state.tap_offsets.copy(),
-                        "status": str(metric.get("status", "")),
-                        "reason": str(metric.get("reason", "")),
-                        "schema_version": state.schema_version,
-                        "requested_cycles": state.requested_cycles,
-                        "completed_cycles": state.completed_cycles,
-                        "fit_status": state.fit_status,
-                        "failure_reason": state.failure_reason,
-                        "final_continuum_status": state.final_continuum_status,
-                        "final_line_status": state.final_line_status,
-                        "knot_strategy": state.knot_strategy,
-                        "legacy_kernel_representation": (
-                            state.legacy_kernel_representation
-                        ),
-                        "wave_n": state.wave_n,
-                        "wave_min": state.wave_min,
-                        "wave_max": state.wave_max,
-                        "wave_sha256": state.wave_sha256,
-                        "line_weight": float(state_config["line_weight"]),
-                        "skyline_cumulative_fraction": float(
-                            state_config["skyline_cumulative_fraction"]
-                        ),
-                        "skyline_half_width_angstrom": float(
-                            state_config["skyline_half_width_angstrom"]
-                        ),
-                        "huber_transition_sigma": float(
-                            state_config["huber_transition_sigma"]
-                        ),
-                        "config_n_basis": int(state_config["n_basis"]),
-                        "config_degree": int(state_config["degree"]),
-                        "roughness_fraction": float(
-                            state_config["roughness_fraction"]
-                        ),
-                        "fallback_prior_fraction": float(
-                            state_config["fallback_prior_fraction"]
-                        ),
-                        "information_prior_max_boost": float(
-                            state_config["information_prior_max_boost"]
-                        ),
-                        "background_degree": int(
-                            state_config["background_degree"]
-                        ),
-                        "blue_fit_lower": float(state_config["blue_fit_lower"]),
-                        "n_pixels": int(metric.get("n_pixels", 0)),
-                        "n_valid_pixels": int(metric.get("n_valid_pixels", 0)),
-                        "chi2_red": float(metric.get("chi2_red", np.nan)),
-                        "rms_resid": float(metric.get("rms_resid", np.nan)),
-                        "center_pix_min": float(
-                            metric.get("center_pix_min", np.nan)
-                        ),
-                        "center_pix_median": float(
-                            metric.get("center_pix_median", np.nan)
-                        ),
-                        "center_pix_max": float(
-                            metric.get("center_pix_max", np.nan)
-                        ),
-                        "sigma_pix_min": float(
-                            metric.get("sigma_pix_min", np.nan)
-                        ),
-                        "sigma_pix_median": float(
-                            metric.get("sigma_pix_median", np.nan)
-                        ),
-                        "sigma_pix_max": float(
-                            metric.get("sigma_pix_max", np.nan)
-                        ),
-                        "runtime_sec": float(metric.get("runtime_sec", 0.0)),
-                        "fit_lower": float(metric.get("fit_lower", np.nan)),
-                        "fit_upper": float(metric.get("fit_upper", np.nan)),
-                        "knots_fixed": bool(metric.get("knots_fixed", False)),
-                        "model": str(metric.get("model", "")),
-                    }
-                )
-
-        coefficient_hdu = fits.ImageHDU(coefficient_cube, name="LSF_COEF")
-        coefficient_hdu.header["TAPMIN"] = int(reference.tap_offsets[0])
-        coefficient_hdu.header["TAPMAX"] = int(reference.tap_offsets[-1])
-        hdul.extend(
-            [
-                coefficient_hdu,
-                fits.ImageHDU(knot_cube, name="LSF_KNOTS"),
-                fits.BinTableHDU(Table(rows=meta_rows), name="LSF_META"),
-            ]
-        )
+        hdul.extend(build_lsf_hdus(states))
 
     hdul.writeto(filename, overwrite=True)
-    print(f"Wrote {len(results)} results, {coef_arr.shape[1]} coefs, {len(comp_keys)} components → {filename}")
+    print(
+        f"Wrote {len(results)} results, {coef_arr.shape[1]} coefs, "
+        f"{len(comp_keys)} components → {filename}"
+    )
 
 
 def _iter_chunk_tasks(n_rows, chunk_size):
@@ -408,14 +259,14 @@ def run(
     chunk_size,
     max_in_flight,
     fit_model="baseline",
-    n_refinement_cycles=3,
+    n_refinement_cycles=5,
 ):
     base_dir = resolve_base_dir(palace_dir)
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"Loading data from {data_file} ...")
-    wave     = fits.getdata(data_file, "WAVE").astype(np.float64)
+    wave = fits.getdata(data_file, "WAVE").astype(np.float64)
     with fits.open(data_file, memmap=True) as hdul:
         n_rows = int(hdul["FLUX_SCI"].data.shape[0])
 
@@ -425,28 +276,24 @@ def run(
     print(f"  fit_model={fit_model}, n_refinement_cycles={n_refinement_cycles}")
     print(f"  base_dir={base_dir}")
 
-    idxs = list(range(n_rows))
     n_tasks = int(np.ceil(n_rows / chunk_size)) * 3
-
-    result_sci  = [None] * len(idxs)
-    result_sky1 = [None] * len(idxs)
-    result_sky2 = [None] * len(idxs)
+    results = {kind: [None] * n_rows for kind in ("sci", "sky1", "sky2")}
     completed = 0
 
     t0 = time.perf_counter()
 
-    mp_context = _get_mp_context()
+    mp_context = mp.get_context("spawn") if platform.system() == "Darwin" else mp.get_context()
     progress_queue = mp_context.Queue()
 
     def _drain_progress_queue():
-        inc = 0
+        increment = 0
         while True:
             try:
-                inc += progress_queue.get_nowait()
+                increment += progress_queue.get_nowait()
             except queue_mod.Empty:
                 break
-        if inc:
-            pbar.update(inc)
+        if increment:
+            pbar.update(increment)
 
     with ProcessPoolExecutor(
         max_workers=n_workers,
@@ -463,17 +310,9 @@ def run(
             n_refinement_cycles,
         ),
     ) as executor:
-        warmup_pbar = tqdm(total=n_workers, desc="Worker pings", mininterval=0.1, position=0, leave=False)
-        seen_pids = set()
-        ping_futures = [executor.submit(worker_ping) for _ in range(n_workers)]
-        for future in as_completed(ping_futures):
-            pid = future.result()
-            seen_pids.add(pid)
-            warmup_pbar.update(1)
-            warmup_pbar.set_postfix(unique=f"{len(seen_pids)}/{n_workers}")
-        warmup_pbar.close()
-
-        pbar = tqdm(total=3 * n_rows, desc="Fits completed", mininterval=0.2, position=0, leave=True)
+        pbar = tqdm(
+            total=3 * n_rows, desc="Fits completed", mininterval=0.2, position=0, leave=True
+        )
         pbar.set_postfix(chunks_done=f"0/{n_tasks}")
         pbar.refresh()
 
@@ -495,12 +334,7 @@ def run(
             for future in done:
                 kind, chunk_results = future.result()
                 for idx, result in chunk_results:
-                    if kind == "sci":
-                        result_sci[idx] = result
-                    elif kind == "sky1":
-                        result_sky1[idx] = result
-                    else:
-                        result_sky2[idx] = result
+                    results[kind][idx] = result
                 completed += 1
                 pbar.set_postfix(chunks_done=f"{completed}/{n_tasks}")
             _submit_until_full()
@@ -511,13 +345,12 @@ def run(
     progress_queue.join_thread()
 
     elapsed = time.perf_counter() - t0
-    print(f"Fitting done in {elapsed:.1f}s ({elapsed/len(idxs):.2f}s per spectrum)")
+    print(f"Fitting done in {elapsed:.1f}s ({elapsed / n_rows:.2f}s per spectrum)")
 
     stem = Path(data_file).stem
     suffix = "" if fit_model == "baseline" else "_lsf_surface_iterative"
-    results_to_fits(result_sci, output_dir / f"{stem}_decomp_sci{suffix}.fits")
-    results_to_fits(result_sky1, output_dir / f"{stem}_decomp_sky1{suffix}.fits")
-    results_to_fits(result_sky2, output_dir / f"{stem}_decomp_sky2{suffix}.fits")
+    for kind in ("sci", "sky1", "sky2"):
+        results_to_fits(results[kind], output_dir / f"{stem}_decomp_{kind}{suffix}.fits")
 
 
 def _copy_hdu_with_name(hdu, extname):
@@ -529,8 +362,6 @@ def _copy_hdu_with_name(hdu, extname):
 
 def _infer_decomp_label(path, index):
     """Infer a stable label for a decomposition file from its filename."""
-    from pathlib import Path
-
     name = Path(path).name.lower()
     for label in ("sky1", "sky2", "sci"):
         if label in name:
@@ -555,8 +386,6 @@ def extract_meta_and_coef_products(
     Extended LSF-surface products are copied when present. Default output
     paths are written in the current working directory.
     """
-    from pathlib import Path
-
     input_path = Path(input_fits_path)
     cwd = Path.cwd()
     if meta_output_path is None:
@@ -568,10 +397,12 @@ def extract_meta_and_coef_products(
     with fits.open(input_fits_path) as hdul_in:
         if "META" not in hdul_in:
             raise KeyError(f"Missing META extension in {input_fits_path}")
-        fits.HDUList([
-            fits.PrimaryHDU(),
-            _copy_hdu_with_name(hdul_in["META"], "META"),
-        ]).writeto(meta_output_path, overwrite=True)
+        fits.HDUList(
+            [
+                fits.PrimaryHDU(),
+                _copy_hdu_with_name(hdul_in["META"], "META"),
+            ]
+        ).writeto(meta_output_path, overwrite=True)
 
     resolved_outputs = []
     for index, decomp_path in enumerate(decomp_files, start=1):
@@ -584,11 +415,7 @@ def extract_meta_and_coef_products(
                 else ""
             )
             out_path = str(
-                cwd
-                / (
-                    f"{input_path.stem}_{label.lower()}_meta_coef"
-                    f"{variant}{input_path.suffix}"
-                )
+                cwd / (f"{input_path.stem}_{label.lower()}_meta_coef{variant}{input_path.suffix}")
             )
         with fits.open(decomp_path) as hdul_dec:
             for extname in ("META", "COEF"):
@@ -602,13 +429,10 @@ def extract_meta_and_coef_products(
             lsf_extensions = ("LSF_COEF", "LSF_KNOTS", "LSF_META")
             present = [name in hdul_dec for name in lsf_extensions]
             if any(present) and not all(present):
-                raise KeyError(
-                    f"Incomplete LSF-surface extensions in {decomp_path}"
-                )
+                raise KeyError(f"Incomplete LSF-surface extensions in {decomp_path}")
             if all(present):
                 compact_hdus.extend(
-                    _copy_hdu_with_name(hdul_dec[name], name)
-                    for name in lsf_extensions
+                    _copy_hdu_with_name(hdul_dec[name], name) for name in lsf_extensions
                 )
             fits.HDUList(compact_hdus).writeto(out_path, overwrite=True)
         print(f"Wrote {label} META/COEF file -> {out_path}")
@@ -617,61 +441,34 @@ def extract_meta_and_coef_products(
     print(f"Wrote META-only file -> {meta_output_path}")
     return (meta_output_path, *resolved_outputs)
 
-def thin_fits_every_n(input_path, output_path, n, row_hdu_name="META"):
-    """Write a new FITS with every n-th row-like element kept.
-
-    The function preserves HDU structure and headers. It identifies the row
-    count from `row_hdu_name` (default: META), then slices any table HDU with
-    that row count and any image HDU whose first axis matches that row count.
-    """
-    if n < 1:
-        raise ValueError("n must be >= 1")
-
-    with fits.open(input_path) as hdul:
-        if row_hdu_name not in hdul:
-            raise KeyError(f"HDU '{row_hdu_name}' not found in {input_path}")
-
-        n_rows = len(hdul[row_hdu_name].data)
-        keep = slice(None, None, n)
-
-        out_hdus = []
-        for hdu in hdul:
-            header = hdu.header.copy()
-
-            if isinstance(hdu, fits.PrimaryHDU):
-                data = hdu.data
-                if data is not None and getattr(data, "ndim", 0) >= 1 and data.shape[0] == n_rows:
-                    data = data[keep, ...]
-                out_hdus.append(fits.PrimaryHDU(data=data, header=header))
-
-            elif isinstance(hdu, (fits.BinTableHDU, fits.TableHDU)):
-                data = hdu.data
-                if data is not None and len(data) == n_rows:
-                    data = data[keep]
-                out_hdus.append(type(hdu)(data=data, header=header, name=hdu.name))
-
-            elif isinstance(hdu, (fits.ImageHDU, fits.CompImageHDU)):
-                data = hdu.data
-                if data is not None and getattr(data, "ndim", 0) >= 1 and data.shape[0] == n_rows:
-                    data = data[keep, ...]
-                out_hdus.append(type(hdu)(data=data, header=header, name=hdu.name))
-
-            else:
-                out_hdus.append(hdu.copy())
-
-        fits.HDUList(out_hdus).writeto(output_path, overwrite=True)
-
 
 def main():
     parser = argparse.ArgumentParser(description="LVM sky spectral decomposition")
-    parser.add_argument("data_file",    help="Input FITS file (median stacked LVM frame)")
-    parser.add_argument("palace_dir",   help="Path to the project base directory or directly to the palace directory")
-    parser.add_argument("--n-workers",  type=int,   default=4,    help="Number of parallel worker processes (default: 4)")
-    parser.add_argument("--lsf-sigma",  type=float, default=0.5,  help="LSF Gaussian sigma in Å (default: 0.5)")
-    parser.add_argument("--factor",     type=float, default=1e14, help="Flux scaling factor (default: 1e14)")
-    parser.add_argument("--chunk-size", type=int,   default=64,   help="Rows per worker task chunk (default: 64)")
-    parser.add_argument("--max-in-flight", type=int, default=None, help="Max submitted chunks waiting/running at once (default: n-workers)")
-    parser.add_argument("--output-dir", default=".",              help="Output directory for result FITS files (default: .)")
+    parser.add_argument("data_file", help="Input FITS file (median stacked LVM frame)")
+    parser.add_argument(
+        "palace_dir", help="Path to the project base directory or directly to the palace directory"
+    )
+    parser.add_argument(
+        "--n-workers", type=int, default=4, help="Number of parallel worker processes (default: 4)"
+    )
+    parser.add_argument(
+        "--lsf-sigma", type=float, default=0.5, help="LSF Gaussian sigma in Å (default: 0.5)"
+    )
+    parser.add_argument(
+        "--factor", type=float, default=1e14, help="Flux scaling factor (default: 1e14)"
+    )
+    parser.add_argument(
+        "--chunk-size", type=int, default=64, help="Rows per worker task chunk (default: 64)"
+    )
+    parser.add_argument(
+        "--max-in-flight",
+        type=int,
+        default=None,
+        help="Max submitted chunks waiting/running at once (default: n-workers)",
+    )
+    parser.add_argument(
+        "--output-dir", default=".", help="Output directory for result FITS files (default: .)"
+    )
     parser.add_argument(
         "--fit-model",
         choices=("baseline", "lsf-surface-iterative"),
@@ -681,8 +478,8 @@ def main():
     parser.add_argument(
         "--n-refinement-cycles",
         type=int,
-        default=4,
-        help="Continuum/LSF/line cycles for lsf-surface-iterative (default: 4)",
+        default=5,
+        help="Continuum/LSF/line cycles for lsf-surface-iterative (default: 5)",
     )
     args = parser.parse_args()
 
@@ -696,30 +493,29 @@ def main():
         raise ValueError("--n-refinement-cycles must be >= 1")
 
     run(
-        data_file  = args.data_file,
-        palace_dir = args.palace_dir,
-        n_workers  = args.n_workers,
-        lsf_sigma  = args.lsf_sigma,
-        factor     = args.factor,
-        output_dir = args.output_dir,
-        chunk_size = args.chunk_size,
-        max_in_flight = args.max_in_flight,
-        fit_model = args.fit_model,
-        n_refinement_cycles = args.n_refinement_cycles,
+        data_file=args.data_file,
+        palace_dir=args.palace_dir,
+        n_workers=args.n_workers,
+        lsf_sigma=args.lsf_sigma,
+        factor=args.factor,
+        output_dir=args.output_dir,
+        chunk_size=args.chunk_size,
+        max_in_flight=args.max_in_flight,
+        fit_model=args.fit_model,
+        n_refinement_cycles=args.n_refinement_cycles,
     )
 
     suffix = "" if args.fit_model == "baseline" else "_lsf_surface_iterative"
     extract_meta_and_coef_products(
         input_fits_path=args.data_file,
-        decomp_fits_path_1=Path(args.output_dir) / f"{Path(args.data_file).stem}_decomp_sky1{suffix}.fits",
-        decomp_fits_path_2=Path(args.output_dir) / f"{Path(args.data_file).stem}_decomp_sky2{suffix}.fits",
-        decomp_fits_path_3=Path(args.output_dir) / f"{Path(args.data_file).stem}_decomp_sci{suffix}.fits",
+        decomp_fits_path_1=Path(args.output_dir)
+        / f"{Path(args.data_file).stem}_decomp_sky1{suffix}.fits",
+        decomp_fits_path_2=Path(args.output_dir)
+        / f"{Path(args.data_file).stem}_decomp_sky2{suffix}.fits",
+        decomp_fits_path_3=Path(args.output_dir)
+        / f"{Path(args.data_file).stem}_decomp_sci{suffix}.fits",
     )
 
-    thin_fits_every_n(f"{Path(args.data_file).stem}_decomp_sci{suffix}.fits", f"{Path(args.data_file).stem}_every10_decomp_sci{suffix}.fits", 10)
-    thin_fits_every_n(f"{Path(args.data_file).stem}_decomp_sky1{suffix}.fits", f"{Path(args.data_file).stem}_every10_decomp_sky1{suffix}.fits", 10)
-    thin_fits_every_n(f"{Path(args.data_file).stem}_decomp_sky2{suffix}.fits", f"{Path(args.data_file).stem}_every10_decomp_sky2{suffix}.fits", 10)
-    
 
 if __name__ == "__main__":
     main()
