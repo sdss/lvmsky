@@ -68,6 +68,38 @@ def _baseline_result_kwargs(wave):
     }
 
 
+def _apply_lsf_surface_index_reference(
+    wave,
+    values,
+    kernel_surface,
+    channel_bounds,
+    tap_offsets,
+):
+    source = np.atleast_2d(np.asarray(values, dtype=float))
+    output = np.zeros_like(source)
+    for channel in ("B", "R", "Z"):
+        lower, upper = channel_bounds[channel]
+        mask = np.ones(wave.size, dtype=bool)
+        if lower is not None:
+            mask &= wave >= lower
+        if upper is not None:
+            mask &= wave < upper
+        indices = np.flatnonzero(mask)
+        for tap, offset in enumerate(tap_offsets):
+            if offset >= 0:
+                target_index = indices[offset:]
+                source_index = indices[: indices.size - offset]
+            else:
+                target_index = indices[:offset]
+                source_index = indices[-offset:]
+            if target_index.size:
+                output[:, target_index] += (
+                    source[:, source_index]
+                    * kernel_surface[target_index, tap][None, :]
+                )
+    return output
+
+
 def test_fit_recovers_a_smooth_normalized_kernel_surface():
     wave = np.linspace(5800.0, 7453.0, 1200)
     source = np.zeros_like(wave)
@@ -132,6 +164,37 @@ def test_surface_application_does_not_mix_adjacent_channels():
     )
 
 
+def test_surface_application_matches_index_reference_for_matrix_input():
+    rng = np.random.default_rng(9274)
+    wave = np.linspace(5000.0, 5012.0, 25)
+    values = rng.normal(size=(7, wave.size))
+    surface = rng.random(size=(wave.size, 5))
+    surface /= np.sum(surface, axis=1, keepdims=True)
+    channel_bounds = {
+        "B": (None, 5004.0),
+        "R": (5004.0, 5008.0),
+        "Z": (5008.0, None),
+    }
+    tap_offsets = np.arange(-2, 3)
+
+    expected = _apply_lsf_surface_index_reference(
+        wave,
+        values,
+        surface,
+        channel_bounds,
+        tap_offsets,
+    )
+    actual = apply_lsf_surface(
+        wave,
+        values,
+        surface,
+        channel_bounds=channel_bounds,
+        tap_offsets=tap_offsets,
+    )
+
+    assert np.array_equal(actual, expected)
+
+
 def test_blue_fit_window_still_builds_a_full_channel_surface():
     wave = np.arange(5400.0, 7601.0)
     source = np.zeros_like(wave)
@@ -156,8 +219,8 @@ def test_blue_fit_window_still_builds_a_full_channel_surface():
     assert not hasattr(state, "kernel_surface")
 
 
-def test_public_config_defaults_to_four_configurable_cycles():
-    assert LSFSurfaceIterativeConfig().n_refinement_cycles == 4
+def test_public_config_defaults_to_five_configurable_cycles():
+    assert LSFSurfaceIterativeConfig().n_refinement_cycles == 5
     assert LSFSurfaceIterativeConfig(n_refinement_cycles=2).n_refinement_cycles == 2
     with pytest.raises(ValueError, match="positive"):
         LSFSurfaceIterativeConfig(n_refinement_cycles=0)

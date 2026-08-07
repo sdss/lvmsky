@@ -53,6 +53,7 @@ BANDS = (
     ("Z", 7550.0, 9800.0),
 )
 LINE_COMPONENTS = ("oh", "atom", "orc", "o2")
+HISTORICAL_LSF_CONFIG = LSFSurfaceIterativeConfig(n_refinement_cycles=4)
 
 
 @dataclass(slots=True)
@@ -133,7 +134,7 @@ def _init_decomposition_worker(source_stack: str, wave: np.ndarray) -> None:
         lsf_sigma=0.5,
         base_dir=EXPERIMENT_DIR.parent,
         moon_smooth_lambda=0.1,
-        config=LSFSurfaceIterativeConfig(),
+        config=HISTORICAL_LSF_CONFIG,
     )
 
 
@@ -335,11 +336,11 @@ def prepare_decomposition(
         "decomposition": {
             "implementation": "SkyDecompLSFSurfaceIterative",
             "flux_factor": FLUX_FACTOR,
-            "line_weight": LSFSurfaceIterativeConfig().line_weight,
-            "skyline_cumulative_fraction": LSFSurfaceIterativeConfig().skyline_cumulative_fraction,
-            "skyline_half_width_angstrom": LSFSurfaceIterativeConfig().skyline_half_width_angstrom,
-            "huber_transition_sigma": LSFSurfaceIterativeConfig().huber_transition_sigma,
-            "n_refinement_cycles": LSFSurfaceIterativeConfig().n_refinement_cycles,
+            "line_weight": HISTORICAL_LSF_CONFIG.line_weight,
+            "skyline_cumulative_fraction": HISTORICAL_LSF_CONFIG.skyline_cumulative_fraction,
+            "skyline_half_width_angstrom": HISTORICAL_LSF_CONFIG.skyline_half_width_angstrom,
+            "huber_transition_sigma": HISTORICAL_LSF_CONFIG.huber_transition_sigma,
+            "n_refinement_cycles": HISTORICAL_LSF_CONFIG.n_refinement_cycles,
         },
         "cache": str(output),
         "cache_sha256": _sha256(output),
@@ -1247,7 +1248,7 @@ def run_fit(
             "grid": "unchanged 12401-pixel source wavelength grid",
             "fit_range_angstrom": [3600.0, 9800.0],
             "weights": "baseline LSF-surface iterative continuum weights",
-            "line_weight": LSFSurfaceIterativeConfig().line_weight,
+            "line_weight": HISTORICAL_LSF_CONFIG.line_weight,
             "per_exposure_fitted_normalization": False,
             "split": "five folds grouped by MJD",
             "model": "unchanged analytic A3 Moon+fixed-Zodi family",
