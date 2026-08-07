@@ -59,7 +59,13 @@ dkms.conf
 
 ./skysub/skymodels/SkyM_*.fits
 */SkyM_*.fits
-palace/
+palace
 Spectre_HR_LATMOS_Meftah_V1_350_1000nm.txt
 sky_decomp_results_*.fits
 lvmsframe_*
+*.dat
+*.npz
+.DS_Store
+*.cpython-*.pyc
+.vscode/
+Kp*.txt

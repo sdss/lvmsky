@@ -10,6 +10,15 @@ Example:
     python decompose_parallel.py lvmsframe_median_stack.fits ../ --n-workers 8
 """
 
+import os
+
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
+os.environ["BLIS_NUM_THREADS"] = "1"
+os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
+os.environ["NUMEXPR_NUM_THREADS"] = "1"
+
 import argparse
 import platform
 import sys
@@ -399,7 +408,7 @@ def run(
     chunk_size,
     max_in_flight,
     fit_model="baseline",
-    n_refinement_cycles=4,
+    n_refinement_cycles=3,
 ):
     base_dir = resolve_base_dir(palace_dir)
     output_dir = Path(output_dir)
@@ -608,6 +617,51 @@ def extract_meta_and_coef_products(
     print(f"Wrote META-only file -> {meta_output_path}")
     return (meta_output_path, *resolved_outputs)
 
+def thin_fits_every_n(input_path, output_path, n, row_hdu_name="META"):
+    """Write a new FITS with every n-th row-like element kept.
+
+    The function preserves HDU structure and headers. It identifies the row
+    count from `row_hdu_name` (default: META), then slices any table HDU with
+    that row count and any image HDU whose first axis matches that row count.
+    """
+    if n < 1:
+        raise ValueError("n must be >= 1")
+
+    with fits.open(input_path) as hdul:
+        if row_hdu_name not in hdul:
+            raise KeyError(f"HDU '{row_hdu_name}' not found in {input_path}")
+
+        n_rows = len(hdul[row_hdu_name].data)
+        keep = slice(None, None, n)
+
+        out_hdus = []
+        for hdu in hdul:
+            header = hdu.header.copy()
+
+            if isinstance(hdu, fits.PrimaryHDU):
+                data = hdu.data
+                if data is not None and getattr(data, "ndim", 0) >= 1 and data.shape[0] == n_rows:
+                    data = data[keep, ...]
+                out_hdus.append(fits.PrimaryHDU(data=data, header=header))
+
+            elif isinstance(hdu, (fits.BinTableHDU, fits.TableHDU)):
+                data = hdu.data
+                if data is not None and len(data) == n_rows:
+                    data = data[keep]
+                out_hdus.append(type(hdu)(data=data, header=header, name=hdu.name))
+
+            elif isinstance(hdu, (fits.ImageHDU, fits.CompImageHDU)):
+                data = hdu.data
+                if data is not None and getattr(data, "ndim", 0) >= 1 and data.shape[0] == n_rows:
+                    data = data[keep, ...]
+                out_hdus.append(type(hdu)(data=data, header=header, name=hdu.name))
+
+            else:
+                out_hdus.append(hdu.copy())
+
+        fits.HDUList(out_hdus).writeto(output_path, overwrite=True)
+
+
 def main():
     parser = argparse.ArgumentParser(description="LVM sky spectral decomposition")
     parser.add_argument("data_file",    help="Input FITS file (median stacked LVM frame)")
@@ -661,6 +715,11 @@ def main():
         decomp_fits_path_2=Path(args.output_dir) / f"{Path(args.data_file).stem}_decomp_sky2{suffix}.fits",
         decomp_fits_path_3=Path(args.output_dir) / f"{Path(args.data_file).stem}_decomp_sci{suffix}.fits",
     )
+
+    thin_fits_every_n(f"{Path(args.data_file).stem}_decomp_sci{suffix}.fits", f"{Path(args.data_file).stem}_every10_decomp_sci{suffix}.fits", 10)
+    thin_fits_every_n(f"{Path(args.data_file).stem}_decomp_sky1{suffix}.fits", f"{Path(args.data_file).stem}_every10_decomp_sky1{suffix}.fits", 10)
+    thin_fits_every_n(f"{Path(args.data_file).stem}_decomp_sky2{suffix}.fits", f"{Path(args.data_file).stem}_every10_decomp_sky2{suffix}.fits", 10)
+    
 
 if __name__ == "__main__":
     main()
