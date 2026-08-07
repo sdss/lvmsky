@@ -18,6 +18,11 @@ os.environ["OPENBLAS_NUM_THREADS"] = "1"
 os.environ["BLIS_NUM_THREADS"] = "1"
 os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
 os.environ["NUMEXPR_NUM_THREADS"] = "1"
+# clarabel (Rust QP solver) and any other Rust/Rayon library ignore OMP_NUM_THREADS.
+os.environ["RAYON_NUM_THREADS"] = "1"
+os.environ["POLARS_MAX_THREADS"] = "1"
+os.environ["NUMBA_NUM_THREADS"] = "1"
+os.environ["TBB_NUM_THREADS"] = "1"
 
 import argparse
 import queue as queue_mod
@@ -38,7 +43,7 @@ except ImportError:  # threadpoolctl is optional; env vars are the fallback.
 
 
 def _clamp_native_threads(n=1):
-    """Force every loaded BLAS/OpenMP pool (OpenBLAS/MKL/BLIS/OMP) to `n` threads."""
+    """Force every loaded thread pool (BLAS/OpenMP/Rayon/TBB/etc.) to `n` threads."""
     # Redundant with the env vars but catches lazy imports and fork-inherited pools.
     for var in (
         "OMP_NUM_THREADS",
@@ -47,6 +52,10 @@ def _clamp_native_threads(n=1):
         "BLIS_NUM_THREADS",
         "VECLIB_MAXIMUM_THREADS",
         "NUMEXPR_NUM_THREADS",
+        "RAYON_NUM_THREADS",
+        "POLARS_MAX_THREADS",
+        "NUMBA_NUM_THREADS",
+        "TBB_NUM_THREADS",
     ):
         os.environ[var] = str(n)
     if threadpool_limits is not None:
@@ -73,6 +82,9 @@ def init_worker(
     progress_queue=None,
     fit_model="baseline",
     n_refinement_cycles=5,
+    worker_counter=None,
+    pin_cpu=False,
+    diagnose_threads=False,
 ):
     """Initialise one SkyDecomp instance per worker process."""
     global \
@@ -84,6 +96,20 @@ def init_worker(
         _WORKER_FIT_MODEL
 
     _clamp_native_threads(1)
+
+    worker_rank = 0
+    if worker_counter is not None:
+        with worker_counter.get_lock():
+            worker_rank = int(worker_counter.value)
+            worker_counter.value = worker_rank + 1
+    if pin_cpu and hasattr(os, "sched_setaffinity"):
+        try:
+            available = sorted(os.sched_getaffinity(0))
+            if available:
+                target = available[worker_rank % len(available)]
+                os.sched_setaffinity(0, {target})
+        except OSError as exc:
+            print(f"[worker pid={os.getpid()}] pin_cpu failed: {exc}", flush=True)
 
     _WORKER_FACTOR = float(factor)
     _WORKER_FIT_MODEL = fit_model
@@ -126,6 +152,41 @@ def init_worker(
         )
     else:
         raise ValueError(f"Unknown fit model: {fit_model}")
+
+    # After all heavy imports, clamp once more and (optionally) report per-worker state.
+    _clamp_native_threads(1)
+    if diagnose_threads and worker_rank == 0:
+        _report_thread_diagnostics()
+
+
+def _report_thread_diagnostics():
+    lines = [f"[worker pid={os.getpid()}] thread diagnostics:"]
+    lines.append(
+        f"  affinity_cores={sorted(os.sched_getaffinity(0)) if hasattr(os, 'sched_getaffinity') else 'n/a'}"
+    )
+    for var in (
+        "OMP_NUM_THREADS",
+        "OPENBLAS_NUM_THREADS",
+        "MKL_NUM_THREADS",
+        "RAYON_NUM_THREADS",
+        "NUMBA_NUM_THREADS",
+        "TBB_NUM_THREADS",
+    ):
+        lines.append(f"  {var}={os.environ.get(var, 'unset')}")
+    if threadpool_limits is not None:
+        try:
+            from threadpoolctl import threadpool_info
+
+            for entry in threadpool_info():
+                lines.append(
+                    f"  loaded_pool: {entry.get('user_api', '?'):8s} "
+                    f"{entry.get('prefix', '?'):18s} threads={entry.get('num_threads', '?')}"
+                )
+        except Exception as exc:
+            lines.append(f"  threadpool_info failed: {exc}")
+    else:
+        lines.append("  (threadpoolctl not installed; cannot enumerate loaded pools)")
+    print("\n".join(lines), flush=True)
 
 
 def fit_chunk_worker(args):
@@ -286,6 +347,8 @@ def run(
     fit_model="baseline",
     n_refinement_cycles=5,
     limit=None,
+    pin_workers=False,
+    diagnose_threads=False,
 ):
     base_dir = resolve_base_dir(palace_dir)
     output_dir = Path(output_dir)
@@ -305,6 +368,7 @@ def run(
     print(f"  n_workers={n_workers}, lsf_sigma={lsf_sigma}, factor={factor}")
     print(f"  chunk_size={chunk_size}, max_in_flight={max_in_flight}")
     print(f"  fit_model={fit_model}, n_refinement_cycles={n_refinement_cycles}")
+    print(f"  pin_workers={pin_workers}, diagnose_threads={diagnose_threads}")
     print(f"  base_dir={base_dir}")
 
     n_tasks = int(np.ceil(n_rows / chunk_size)) * 3
@@ -316,6 +380,7 @@ def run(
     # spawn everywhere: `fork` inherits parent BLAS pools and undermines thread limits.
     mp_context = mp.get_context("spawn")
     progress_queue = mp_context.Queue()
+    worker_counter = mp_context.Value("i", 0)
 
     def _drain_progress_queue():
         increment = 0
@@ -340,6 +405,9 @@ def run(
             progress_queue,
             fit_model,
             n_refinement_cycles,
+            worker_counter,
+            bool(pin_workers),
+            bool(diagnose_threads),
         ),
     ) as executor:
         pbar = tqdm(
@@ -563,6 +631,20 @@ def main():
         default=None,
         help="Process only the first N input rows (default: process all rows)",
     )
+    parser.add_argument(
+        "--pin-workers",
+        action="store_true",
+        help=(
+            "Pin each worker to a single CPU core via sched_setaffinity (Linux). "
+            "Nuclear option: hard-caps observed CPU usage per worker to 100%% even if a "
+            "library ignores thread-limit env vars."
+        ),
+    )
+    parser.add_argument(
+        "--diagnose-threads",
+        action="store_true",
+        help="Print per-library thread pool counts from worker 0 after all imports finish.",
+    )
     args = parser.parse_args()
 
     if args.chunk_size < 1:
@@ -588,6 +670,8 @@ def main():
         fit_model=args.fit_model,
         n_refinement_cycles=args.n_refinement_cycles,
         limit=args.limit,
+        pin_workers=args.pin_workers,
+        diagnose_threads=args.diagnose_threads,
     )
 
     suffix = "" if args.fit_model == "baseline" else "_lsf_surface_iterative"
