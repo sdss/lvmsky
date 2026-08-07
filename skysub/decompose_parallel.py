@@ -260,6 +260,7 @@ def run(
     max_in_flight,
     fit_model="baseline",
     n_refinement_cycles=5,
+    limit=None,
 ):
     base_dir = resolve_base_dir(palace_dir)
     output_dir = Path(output_dir)
@@ -268,9 +269,14 @@ def run(
     print(f"Loading data from {data_file} ...")
     wave = fits.getdata(data_file, "WAVE").astype(np.float64)
     with fits.open(data_file, memmap=True) as hdul:
-        n_rows = int(hdul["FLUX_SCI"].data.shape[0])
+        n_rows_total = int(hdul["FLUX_SCI"].data.shape[0])
 
-    print(f"  {n_rows} spectra, {len(wave)} wavelength pixels")
+    n_rows = n_rows_total if limit is None else min(n_rows_total, int(limit))
+
+    if limit is not None and n_rows < n_rows_total:
+        print(f"  {n_rows} spectra (limited from {n_rows_total}), {len(wave)} wavelength pixels")
+    else:
+        print(f"  {n_rows} spectra, {len(wave)} wavelength pixels")
     print(f"  n_workers={n_workers}, lsf_sigma={lsf_sigma}, factor={factor}")
     print(f"  chunk_size={chunk_size}, max_in_flight={max_in_flight}")
     print(f"  fit_model={fit_model}, n_refinement_cycles={n_refinement_cycles}")
@@ -525,6 +531,12 @@ def main():
         default=5,
         help="Continuum/LSF/line cycles for lsf-surface-iterative (default: 5)",
     )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="Process only the first N input rows (default: process all rows)",
+    )
     args = parser.parse_args()
 
     if args.chunk_size < 1:
@@ -535,6 +547,8 @@ def main():
         raise ValueError("--max-in-flight must be >= 1")
     if args.n_refinement_cycles < 1:
         raise ValueError("--n-refinement-cycles must be >= 1")
+    if args.limit is not None and args.limit < 1:
+        raise ValueError("--limit must be >= 1")
 
     run(
         data_file=args.data_file,
@@ -547,6 +561,7 @@ def main():
         max_in_flight=args.max_in_flight,
         fit_model=args.fit_model,
         n_refinement_cycles=args.n_refinement_cycles,
+        limit=args.limit,
     )
 
     suffix = "" if args.fit_model == "baseline" else "_lsf_surface_iterative"
