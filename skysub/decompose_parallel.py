@@ -20,7 +20,6 @@ os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
 os.environ["NUMEXPR_NUM_THREADS"] = "1"
 
 import argparse
-import platform
 import queue as queue_mod
 import time
 from pathlib import Path
@@ -31,6 +30,30 @@ import numpy as np
 from astropy.io import fits
 from astropy.table import Table
 from tqdm import tqdm
+
+try:
+    from threadpoolctl import threadpool_limits
+except ImportError:  # threadpoolctl is optional; env vars are the fallback.
+    threadpool_limits = None
+
+
+def _clamp_native_threads(n=1):
+    """Force every loaded BLAS/OpenMP pool (OpenBLAS/MKL/BLIS/OMP) to `n` threads."""
+    # Redundant with the env vars but catches lazy imports and fork-inherited pools.
+    for var in (
+        "OMP_NUM_THREADS",
+        "MKL_NUM_THREADS",
+        "OPENBLAS_NUM_THREADS",
+        "BLIS_NUM_THREADS",
+        "VECLIB_MAXIMUM_THREADS",
+        "NUMEXPR_NUM_THREADS",
+    ):
+        os.environ[var] = str(n)
+    if threadpool_limits is not None:
+        threadpool_limits(limits=n)
+
+
+_clamp_native_threads(1)
 
 
 _WORKER_DECOMPOSER = None
@@ -59,6 +82,8 @@ def init_worker(
         _WORKER_FLUX, \
         _WORKER_PROGRESS_QUEUE, \
         _WORKER_FIT_MODEL
+
+    _clamp_native_threads(1)
 
     _WORKER_FACTOR = float(factor)
     _WORKER_FIT_MODEL = fit_model
@@ -288,7 +313,8 @@ def run(
 
     t0 = time.perf_counter()
 
-    mp_context = mp.get_context("spawn") if platform.system() == "Darwin" else mp.get_context()
+    # spawn everywhere: `fork` inherits parent BLAS pools and undermines thread limits.
+    mp_context = mp.get_context("spawn")
     progress_queue = mp_context.Queue()
 
     def _drain_progress_queue():
