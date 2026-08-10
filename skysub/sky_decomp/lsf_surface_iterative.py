@@ -1672,6 +1672,11 @@ class SkyDecompLSFSurfaceIterative(SkyDecomp):
             run.line_coefficient,
         )
         components = self._components_from_coef(coefficient, run.matrices)
+        # `run.matrices['o2']` is a (1, n_wave) block already convolved by the
+        # fitted LSF surface; keep `vector_o2` in step so what we persist
+        # matches the O2 basis used to build `components['o2']`.
+        if run.matrices["o2"].shape[0] == 1:
+            self.vector_o2 = run.matrices["o2"][0].copy()
         continuum = components["moon"] + components["diffuse"]
         line_model = (
             components["oh"]
@@ -1786,6 +1791,8 @@ class SkyDecompLSFSurfaceIterative(SkyDecomp):
             bestfit_lsf=bestfit_lsf,
             moon_knots=self.moon_knots_used.copy(),
             moon_boosted_pixels=self.moon_boosted_pixels_used.copy(),
+            vector_o2=self.vector_o2.copy(),
+            o2_prefit_amp=float(self.o2_prefit_amp),
             lsf_state=self.lsf_surface_state,
         )
 

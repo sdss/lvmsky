@@ -141,6 +141,11 @@ class SkyDecompResult:
     bestfit_lsf: np.ndarray
     moon_knots: np.ndarray
     moon_boosted_pixels: np.ndarray
+    # Unit-integrated O2 template on `wave` and the prefit amplitude that
+    # scales it; the fitted `coef['O2_b01']` absorbs the amplitude, so
+    # `coef * vector_o2` reproduces the model O2 contribution.
+    vector_o2: np.ndarray
+    o2_prefit_amp: float
 
 
 class SkyDecomp:
@@ -175,6 +180,7 @@ class SkyDecomp:
 
         self.t_o2 = T_O2_REF
         self.t_o2_err = np.nan
+        self.o2_prefit_amp = np.nan
         self.vector_o2 = np.zeros_like(self.wave)
         self.matrix_o2 = self.vector_o2[None, :]
         self.vector_o2_stick = np.zeros_like(self.wave)
@@ -286,6 +292,11 @@ class SkyDecomp:
             )
 
         components = self._components_from_coef(refined["coef"], final_matrices)
+        # `final_matrices['o2']` is a (1, n_wave) block that already incorporates
+        # every LSF refit; keep `vector_o2` in step so what we persist matches
+        # the O2 basis used to build `components['o2']`.
+        if final_matrices["o2"].shape[0] == 1:
+            self.vector_o2 = final_matrices["o2"][0].copy()
 
         fit_elapsed_sec = time.perf_counter() - t0
         peak_memory_mb = tracemalloc.get_traced_memory()[1] / 1024**2
@@ -369,6 +380,8 @@ class SkyDecomp:
             bestfit_lsf=self.bestfit_lsf,
             moon_knots=self.moon_knots_used.copy(),
             moon_boosted_pixels=self.moon_boosted_pixels_used.copy(),
+            vector_o2=self.vector_o2.copy(),
+            o2_prefit_amp=float(self.o2_prefit_amp),
         )
 
     @staticmethod
@@ -784,6 +797,7 @@ class SkyDecomp:
         if not np.any(self.o2_band) or self.lam_o2.size == 0:
             self.t_o2 = T_O2_REF
             self.t_o2_err = np.nan
+            self.o2_prefit_amp = np.nan
             self.vector_o2 = np.zeros_like(self.wave)
             self.matrix_o2 = self.vector_o2[None, :]
             self.vector_o2_stick = np.zeros_like(self.wave)
@@ -850,12 +864,13 @@ class SkyDecomp:
             amp0 = max(float(init_coef[0]), 0.0)
             self.t_o2 = T_O2_REF
             self.t_o2_err = np.nan
+            self.o2_prefit_amp = amp0
             self.vector_o2 = np.zeros_like(self.wave)
-            self.vector_o2[self.o2_band] = amp0 * full_shape[self.o2_band]
+            self.vector_o2[self.o2_band] = full_shape[self.o2_band]
             self.matrix_o2 = self.vector_o2[None, :]
-            self.vector_o2_stick = amp0 * stick_shape
+            self.vector_o2_stick = stick_shape
             self.matrix_o2_stick = self.vector_o2_stick[None, :]
-            self.o2_prefit_bestfit = self.vector_o2.copy()
+            self.o2_prefit_bestfit = amp0 * self.vector_o2
             self.o2_fit_status = "fallback"
             self.o2_fit_elapsed_sec = 0.0
             set_o2_summary("fallback", 0.0, np.nan, np.r_[self.t_o2, init_coef], np.full(4, np.nan), int(np.sum(base_valid)))
@@ -882,12 +897,13 @@ class SkyDecomp:
             amp0 = max(float(init_coef[0]), 0.0)
             self.t_o2 = T_O2_REF
             self.t_o2_err = np.nan
+            self.o2_prefit_amp = amp0
             self.vector_o2 = np.zeros_like(self.wave)
-            self.vector_o2[self.o2_band] = amp0 * full_shape[self.o2_band]
+            self.vector_o2[self.o2_band] = full_shape[self.o2_band]
             self.matrix_o2 = self.vector_o2[None, :]
-            self.vector_o2_stick = amp0 * stick_shape
+            self.vector_o2_stick = stick_shape
             self.matrix_o2_stick = self.vector_o2_stick[None, :]
-            self.o2_prefit_bestfit = self.vector_o2.copy()
+            self.o2_prefit_bestfit = amp0 * self.vector_o2
             self.o2_fit_status = "fallback"
             self.o2_fit_elapsed_sec = dt
             set_o2_summary("fallback", dt, np.nan, np.r_[self.t_o2, init_coef], np.full(4, np.nan), int(np.sum(base_valid)))
@@ -900,12 +916,13 @@ class SkyDecomp:
         cov = (2.0 * res.cost / dof) * np.linalg.pinv(jtj)
         err = np.sqrt(np.clip(np.diag(cov), 0.0, np.inf))
         self.t_o2_err = float(err[0]) if err.size else np.nan
+        self.o2_prefit_amp = float(res.x[1])
         self.vector_o2 = np.zeros_like(self.wave)
-        self.vector_o2[self.o2_band] = res.x[1] * full_shape[self.o2_band]
+        self.vector_o2[self.o2_band] = full_shape[self.o2_band]
         self.matrix_o2 = self.vector_o2[None, :]
-        self.vector_o2_stick = res.x[1] * stick_shape
+        self.vector_o2_stick = stick_shape
         self.matrix_o2_stick = self.vector_o2_stick[None, :]
-        self.o2_prefit_bestfit = self.vector_o2.copy()
+        self.o2_prefit_bestfit = float(res.x[1]) * self.vector_o2
         self.o2_fit_status = str(res.status)
         self.o2_fit_elapsed_sec = dt
         chi2 = float(np.sum(res.fun**2))

@@ -243,6 +243,7 @@ def results_to_fits(results, filename):
     rows = {
         "t_o2": [r.t_o2 for r in results],
         "t_o2_err": [r.t_o2_err for r in results],
+        "o2_prefit_amp": [r.o2_prefit_amp for r in results],
         "reduced_chi2": [r.reduced_chi2 for r in results],
         "r2": [r.r2 for r in results],
         "rms_resid": [r.rms_resid for r in results],
@@ -279,6 +280,7 @@ def results_to_fits(results, filename):
             fits.ImageHDU(stack("bestfit"), name="BESTFIT"),
             fits.ImageHDU(stack("bestfit_lsf"), name="BESTFIT_LSF"),
             fits.ImageHDU(stack("resid"), name="RESID"),
+            fits.ImageHDU(stack("vector_o2"), name="VECTOR_O2"),
         ]
     )
 
