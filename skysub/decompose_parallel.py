@@ -554,6 +554,12 @@ def thin_fits_every_n(input_path, output_path, n, row_hdu_name="META"):
     The function preserves HDU structure and headers. It identifies the row
     count from `row_hdu_name` (default: META), then slices any table HDU with
     that row count and any image HDU whose first axis matches that row count.
+
+    Tables that reference the row axis indirectly through a `spectrum_index`
+    column (such as `LSF_META`, which has one row per channel per spectrum)
+    are filtered to rows whose `spectrum_index` is in the kept set, and the
+    `spectrum_index` values are remapped to the new 0-based row positions so
+    downstream loaders can still index a thinned coefficient cube directly.
     """
     if n < 1:
         raise ValueError("n must be >= 1")
@@ -563,6 +569,9 @@ def thin_fits_every_n(input_path, output_path, n, row_hdu_name="META"):
             raise KeyError(f"HDU '{row_hdu_name}' not found in {input_path}")
 
         n_rows = len(hdul[row_hdu_name].data)
+        keep_indices = np.arange(0, n_rows, n)
+        # Original spectrum index -> new (thinned) row position.
+        orig_to_new = {int(orig): new for new, orig in enumerate(keep_indices)}
         keep = slice(None, None, n)
 
         out_hdus = []
@@ -579,6 +588,23 @@ def thin_fits_every_n(input_path, output_path, n, row_hdu_name="META"):
                 data = hdu.data
                 if data is not None and len(data) == n_rows:
                     data = data[keep]
+                elif (
+                    data is not None
+                    and "spectrum_index" in data.dtype.names
+                    and len(data) % n_rows == 0
+                ):
+                    # Multi-row-per-spectrum table (e.g. LSF_META has one row
+                    # per channel per spectrum). Filter by spectrum_index and
+                    # remap to the thinned cube's 0-based positions.
+                    si = np.asarray(data["spectrum_index"], dtype=np.int64)
+                    mask = np.isin(si, keep_indices)
+                    data = data[mask].copy()
+                    remapped = np.fromiter(
+                        (orig_to_new[int(v)] for v in data["spectrum_index"]),
+                        dtype=np.int64,
+                        count=len(data),
+                    )
+                    data["spectrum_index"] = remapped
                 out_hdus.append(type(hdu)(data=data, header=header, name=hdu.name))
 
             elif isinstance(hdu, (fits.ImageHDU, fits.CompImageHDU)):
@@ -652,6 +678,14 @@ def main():
         action="store_true",
         help="Print per-library thread pool counts from worker 0 after all imports finish.",
     )
+    parser.add_argument(
+        "--only-thin",
+        action="store_true",
+        help=(
+            "Skip decomposition and extract-compact steps; regenerate only the "
+            "every10-thinned FITS from already-existing decomp files."
+        ),
+    )
     args = parser.parse_args()
 
     if args.chunk_size < 1:
@@ -665,37 +699,50 @@ def main():
     if args.limit is not None and args.limit < 1:
         raise ValueError("--limit must be >= 1")
 
-    run(
-        data_file=args.data_file,
-        palace_dir=args.palace_dir,
-        n_workers=args.n_workers,
-        lsf_sigma=args.lsf_sigma,
-        factor=args.factor,
-        output_dir=args.output_dir,
-        chunk_size=args.chunk_size,
-        max_in_flight=args.max_in_flight,
-        fit_model=args.fit_model,
-        n_refinement_cycles=args.n_refinement_cycles,
-        limit=args.limit,
-        pin_workers=args.pin_workers,
-        diagnose_threads=args.diagnose_threads,
-    )
-
     suffix = "" if args.fit_model == "baseline" else "_lsf_surface_iterative"
-    extract_meta_and_coef_products(
-        input_fits_path=args.data_file,
-        decomp_fits_path_1=Path(args.output_dir)
-        / f"{Path(args.data_file).stem}_decomp_sky1{suffix}.fits",
-        decomp_fits_path_2=Path(args.output_dir)
-        / f"{Path(args.data_file).stem}_decomp_sky2{suffix}.fits",
-        decomp_fits_path_3=Path(args.output_dir)
-        / f"{Path(args.data_file).stem}_decomp_sci{suffix}.fits",
-    )
+    stem = Path(args.data_file).stem
 
-    thin_fits_every_n(f"{Path(args.data_file).stem}_decomp_sci{suffix}.fits", f"{Path(args.data_file).stem}_every10_decomp_sci{suffix}.fits", 10)
-    thin_fits_every_n(f"{Path(args.data_file).stem}_decomp_sky1{suffix}.fits", f"{Path(args.data_file).stem}_every10_decomp_sky1{suffix}.fits", 10)
-    thin_fits_every_n(f"{Path(args.data_file).stem}_decomp_sky2{suffix}.fits", f"{Path(args.data_file).stem}_every10_decomp_sky2{suffix}.fits", 10)
-    thin_fits_every_n(args.data_file, f"{Path(args.data_file).stem}_every10.fits", 10)
+    if not args.only_thin:
+        run(
+            data_file=args.data_file,
+            palace_dir=args.palace_dir,
+            n_workers=args.n_workers,
+            lsf_sigma=args.lsf_sigma,
+            factor=args.factor,
+            output_dir=args.output_dir,
+            chunk_size=args.chunk_size,
+            max_in_flight=args.max_in_flight,
+            fit_model=args.fit_model,
+            n_refinement_cycles=args.n_refinement_cycles,
+            limit=args.limit,
+            pin_workers=args.pin_workers,
+            diagnose_threads=args.diagnose_threads,
+        )
+
+        extract_meta_and_coef_products(
+            input_fits_path=args.data_file,
+            decomp_fits_path_1=Path(args.output_dir) / f"{stem}_decomp_sky1{suffix}.fits",
+            decomp_fits_path_2=Path(args.output_dir) / f"{stem}_decomp_sky2{suffix}.fits",
+            decomp_fits_path_3=Path(args.output_dir) / f"{stem}_decomp_sci{suffix}.fits",
+        )
+    else:
+        required = [
+            args.data_file,
+            f"{stem}_decomp_sci{suffix}.fits",
+            f"{stem}_decomp_sky1{suffix}.fits",
+            f"{stem}_decomp_sky2{suffix}.fits",
+        ]
+        missing = [p for p in required if not Path(p).exists()]
+        if missing:
+            raise FileNotFoundError(
+                "--only-thin requires these files to already exist: " + ", ".join(missing)
+            )
+        print("--only-thin: skipping decomposition and extract-compact; regenerating thinned files only")
+
+    thin_fits_every_n(f"{stem}_decomp_sci{suffix}.fits",  f"{stem}_every10_decomp_sci{suffix}.fits",  10)
+    thin_fits_every_n(f"{stem}_decomp_sky1{suffix}.fits", f"{stem}_every10_decomp_sky1{suffix}.fits", 10)
+    thin_fits_every_n(f"{stem}_decomp_sky2{suffix}.fits", f"{stem}_every10_decomp_sky2{suffix}.fits", 10)
+    thin_fits_every_n(args.data_file, f"{stem}_every10.fits", 10)
 
 if __name__ == "__main__":
     main()
