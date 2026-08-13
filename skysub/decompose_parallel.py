@@ -695,6 +695,7 @@ def main():
     thin_fits_every_n(f"{Path(args.data_file).stem}_decomp_sci{suffix}.fits", f"{Path(args.data_file).stem}_every10_decomp_sci{suffix}.fits", 10)
     thin_fits_every_n(f"{Path(args.data_file).stem}_decomp_sky1{suffix}.fits", f"{Path(args.data_file).stem}_every10_decomp_sky1{suffix}.fits", 10)
     thin_fits_every_n(f"{Path(args.data_file).stem}_decomp_sky2{suffix}.fits", f"{Path(args.data_file).stem}_every10_decomp_sky2{suffix}.fits", 10)
+    thin_fits_every_n(args.data_file, f"{Path(args.data_file).stem}_every10.fits", 10)
 
 if __name__ == "__main__":
     main()
