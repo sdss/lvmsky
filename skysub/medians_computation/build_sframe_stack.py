@@ -57,9 +57,20 @@ def percentile_label(value: float) -> str:
     return f"{value:g}".replace(".", "p")
 
 
-def default_output_path(faint_fiber_percentile: float, every_nth: int) -> Path:
+def default_output_path(
+    sci_percentile: float,
+    sky_percentile: float,
+    every_nth: int,
+) -> Path:
     base = sas_path(DEFAULT_RELATIVE_OUTPUT)
-    suffix = f"p{percentile_label(faint_fiber_percentile)}_every{every_nth}"
+    every_suffix = f"_every{every_nth}" if every_nth > 1 else ""
+    if sci_percentile == sky_percentile:
+        suffix = f"p{percentile_label(sci_percentile)}{every_suffix}"
+    else:
+        suffix = (
+            f"psci{percentile_label(sci_percentile)}"
+            f"_psky{percentile_label(sky_percentile)}{every_suffix}"
+        )
     return base.with_name(f"{base.stem}_{suffix}{base.suffix}")
 
 
@@ -248,13 +259,15 @@ def empty_meta(
     error: str = "",
     *,
     input_index: int = -1,
-    faint_fiber_percentile: float = np.nan,
+    sci_percentile: float = np.nan,
+    sky_percentile: float = np.nan,
     every_nth: int = 1,
 ) -> dict[str, Any]:
     return {
         "path": str(path),
         "input_index": input_index,
-        "faint_fiber_percentile": faint_fiber_percentile,
+        "sci_faint_fiber_percentile": sci_percentile,
+        "sky_faint_fiber_percentile": sky_percentile,
         "every_nth": every_nth,
         "exposure": -1,
         "expnum": -1,
@@ -319,7 +332,8 @@ def empty_meta(
 def extract_meta(
     path: Path,
     input_index: int,
-    faint_fiber_percentile: float,
+    sci_percentile: float,
+    sky_percentile: float,
     every_nth: int,
     header: fits.Header,
     sky_labels: dict[str, str],
@@ -334,7 +348,8 @@ def extract_meta(
         status=status,
         error=error,
         input_index=input_index,
-        faint_fiber_percentile=faint_fiber_percentile,
+        sci_percentile=sci_percentile,
+        sky_percentile=sky_percentile,
         every_nth=every_nth,
     )
     near_label = sky_labels["near"]
@@ -441,7 +456,8 @@ def process_one(
     index: int,
     input_index: int,
     path: Path,
-    faint_fiber_percentile: float,
+    sci_percentile: float,
+    sky_percentile: float,
     every_nth: int,
 ) -> dict[str, Any]:
     reference_wave = REFERENCE_WAVE
@@ -486,10 +502,11 @@ def process_one(
             selected: dict[str, np.ndarray] = {}
             counts: dict[str, int] = {}
             for telescope in ("Sci", "SkyE", "SkyW"):
+                pct = sci_percentile if telescope == "Sci" else sky_percentile
                 indices, n_good, n_used = selected_indices(
                     flux_plus_sky,
                     good & (telescopes == telescope),
-                    faint_fiber_percentile,
+                    pct,
                 )
                 selected[telescope] = indices
                 counts[f"{telescope}_good"] = n_good
@@ -519,7 +536,8 @@ def process_one(
             meta = extract_meta(
                 path,
                 input_index,
-                faint_fiber_percentile,
+                sci_percentile,
+                sky_percentile,
                 every_nth,
                 header,
                 sky_labels,
@@ -537,7 +555,8 @@ def process_one(
             status="ERROR",
             error=repr(exc),
             input_index=input_index,
-            faint_fiber_percentile=faint_fiber_percentile,
+            sci_percentile=sci_percentile,
+            sky_percentile=sky_percentile,
             every_nth=every_nth,
         )
         return {"index": index, "path": str(path), "arrays": arrays, "meta": meta}
@@ -582,7 +601,8 @@ def write_output(
     meta_rows: list[dict[str, Any]],
     input_list: Path,
     reference_path: Path,
-    faint_fiber_percentile: float,
+    sci_percentile: float,
+    sky_percentile: float,
     every_nth: int,
     overwrite: bool,
 ) -> None:
@@ -594,7 +614,8 @@ def write_output(
     primary_header["CREATED"] = datetime.now(timezone.utc).isoformat()
     primary_header["DRPVER"] = DRP_VERSION
     primary_header["NFILES"] = len(meta_rows)
-    primary_header["FAINTPCT"] = faint_fiber_percentile
+    primary_header["FAINTSCI"] = sci_percentile
+    primary_header["FAINTSKY"] = sky_percentile
     primary_header["EVERYNTH"] = every_nth
     primary_header["INLIST"] = str(input_list)
     primary_header["REFWAVE"] = str(reference_path)
@@ -625,8 +646,8 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=None,
         help=(
-            "Output FITS. Default name always includes "
-            "_p{percentile}_every{N}."
+            "Output FITS. Default name encodes the percentile(s) and appends "
+            "_every{N} only when N > 1."
         ),
     )
     parser.add_argument(
@@ -640,8 +661,27 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=70.0,
         help=(
-            "Keep this faintest percentage of good fibers, ranked by median "
-            "FLUX+SKY. Default: 70."
+            "Fallback faintest-fiber percentile applied to any telescope group "
+            "without a per-group override. Fibers are ranked by median "
+            "FLUX+SKY and the faintest fraction is kept. Default: 70."
+        ),
+    )
+    parser.add_argument(
+        "--sci-faint-fiber-percentile",
+        type=float,
+        default=None,
+        help=(
+            "Overrides --faint-fiber-percentile for the science telescope. "
+            "Default: fall back to --faint-fiber-percentile."
+        ),
+    )
+    parser.add_argument(
+        "--sky-faint-fiber-percentile",
+        type=float,
+        default=None,
+        help=(
+            "Overrides --faint-fiber-percentile for both sky telescopes. "
+            "Default: fall back to --faint-fiber-percentile."
         ),
     )
     parser.add_argument(
@@ -684,17 +724,30 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     input_list = args.input_list if args.input_list is not None else default_file_list()
+    sci_percentile = (
+        args.sci_faint_fiber_percentile
+        if args.sci_faint_fiber_percentile is not None
+        else args.faint_fiber_percentile
+    )
+    sky_percentile = (
+        args.sky_faint_fiber_percentile
+        if args.sky_faint_fiber_percentile is not None
+        else args.faint_fiber_percentile
+    )
     output_path = (
         args.output
         if args.output is not None
-        else default_output_path(args.faint_fiber_percentile, args.every_nth)
+        else default_output_path(sci_percentile, sky_percentile, args.every_nth)
     )
     if args.limit is not None and args.limit <= 0:
         raise ValueError("--limit must be positive")
     if args.workers <= 0:
         raise ValueError("--workers must be positive")
-    if not 0.0 < args.faint_fiber_percentile <= 100.0:
-        raise ValueError("--faint-fiber-percentile must be in (0, 100]")
+    for label, value in (("science", sci_percentile), ("sky", sky_percentile)):
+        if not 0.0 < value <= 100.0:
+            raise ValueError(
+                f"{label}-arm faint-fiber percentile must be in (0, 100]; got {value}"
+            )
     if args.every_nth <= 0:
         raise ValueError("--every-nth must be positive")
 
@@ -738,7 +791,8 @@ def main() -> int:
                     index,
                     input_index,
                     path,
-                    args.faint_fiber_percentile,
+                    sci_percentile,
+                    sky_percentile,
                     args.every_nth,
                 )
                 for index, (input_index, path) in enumerate(indexed_paths)
@@ -768,7 +822,8 @@ def main() -> int:
             meta_rows=[row for row in meta_rows if row is not None],
             input_list=input_list,
             reference_path=reference_path,
-            faint_fiber_percentile=args.faint_fiber_percentile,
+            sci_percentile=sci_percentile,
+            sky_percentile=sky_percentile,
             every_nth=args.every_nth,
             overwrite=args.overwrite,
         )

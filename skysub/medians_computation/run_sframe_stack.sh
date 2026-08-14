@@ -18,6 +18,8 @@ WORKERS=""
 LIMIT=""
 OVERWRITE=0
 FAINT_FIBER_PERCENTILE="70"
+SCI_FAINT_FIBER_PERCENTILE=""
+SKY_FAINT_FIBER_PERCENTILE=""
 EVERY_NTH="1"
 SKIP_SCAN=0
 SKIP_BENCHMARK=0
@@ -31,7 +33,12 @@ Options:
   --file-list PATH        SFrame .dat list to write/read.
   --output PATH           Output FITS path. Default is derived automatically.
   --faint-fiber-percentile P
-                          Keep the faintest P percent of good fibers. Default: 70.
+                          Fallback faint-fiber percentile applied to any telescope
+                          group without a per-group override. Default: 70.
+  --sci-faint-fiber-percentile P
+                          Overrides --faint-fiber-percentile for the science telescope.
+  --sky-faint-fiber-percentile P
+                          Overrides --faint-fiber-percentile for both sky telescopes.
   --every-nth N           Process every Nth input entry. Default: 1.
   --sample-size N         Benchmark sample size. Default: ${SAMPLE_SIZE}.
   --worker-counts LIST    Benchmark worker counts. Default: ${WORKER_COUNTS}.
@@ -72,6 +79,14 @@ while [[ $# -gt 0 ]]; do
       ;;
     --faint-fiber-percentile)
       FAINT_FIBER_PERCENTILE="$2"
+      shift 2
+      ;;
+    --sci-faint-fiber-percentile)
+      SCI_FAINT_FIBER_PERCENTILE="$2"
+      shift 2
+      ;;
+    --sky-faint-fiber-percentile)
+      SKY_FAINT_FIBER_PERCENTILE="$2"
       shift 2
       ;;
     --every-nth)
@@ -137,6 +152,14 @@ BUILD_ARGS=(
   --faint-fiber-percentile "${FAINT_FIBER_PERCENTILE}"
   --every-nth "${EVERY_NTH}"
 )
+
+if [[ -n "${SCI_FAINT_FIBER_PERCENTILE}" ]]; then
+  BUILD_ARGS+=(--sci-faint-fiber-percentile "${SCI_FAINT_FIBER_PERCENTILE}")
+fi
+
+if [[ -n "${SKY_FAINT_FIBER_PERCENTILE}" ]]; then
+  BUILD_ARGS+=(--sky-faint-fiber-percentile "${SKY_FAINT_FIBER_PERCENTILE}")
+fi
 
 if [[ -n "${OUTPUT}" ]]; then
   BUILD_ARGS+=(--output "${OUTPUT}")
