@@ -56,6 +56,7 @@ def _baseline_result_kwargs(wave):
         "o2_fit_elapsed_sec": 0.1,
         "o2_valid_frac": 1.0,
         "coef": np.array([1.0]),
+        "coef_err": np.array([np.nan]),
         "design_names": ["component"],
         "bestfit": np.zeros_like(wave),
         "bestfit_lsf": np.zeros_like(wave),
@@ -65,6 +66,8 @@ def _baseline_result_kwargs(wave):
         "lsf_metrics": {},
         "moon_knots": np.array([], dtype=float),
         "moon_boosted_pixels": np.array([], dtype=float),
+        "vector_o2": np.zeros_like(wave),
+        "o2_prefit_amp": 0.0,
     }
 
 
@@ -192,7 +195,8 @@ def test_surface_application_matches_index_reference_for_matrix_input():
         tap_offsets=tap_offsets,
     )
 
-    assert np.array_equal(actual, expected)
+    # Sparse mat-mul reorders summations vs. the per-tap index reference; agreement is exact to float64 rounding.
+    assert np.allclose(actual, expected, atol=1e-14, rtol=1e-14)
 
 
 def test_blue_fit_window_still_builds_a_full_channel_surface():
@@ -436,6 +440,7 @@ def test_lsf_fits_round_trip_reconstructs_surface(tmp_path):
             "PRIMARY",
             "META",
             "COEF",
+            "COEF_ERR",
             "LSF_COEF",
             "LSF_KNOTS",
             "LSF_META",
@@ -455,9 +460,11 @@ def test_baseline_writer_contract_is_unchanged_and_mixed_results_are_rejected(
             "PRIMARY",
             "META",
             "COEF",
+            "COEF_ERR",
             "BESTFIT",
             "BESTFIT_LSF",
             "RESID",
+            "VECTOR_O2",
             "COMP_OH",
         ]
 

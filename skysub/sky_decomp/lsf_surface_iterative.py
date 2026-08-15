@@ -127,6 +127,8 @@ class _FitRun:
     matrices: dict[str, np.ndarray]
     continuum_coefficient: np.ndarray
     line_coefficient: np.ndarray
+    continuum_coef_err: np.ndarray
+    line_coef_err: np.ndarray
     continuum: np.ndarray
     line_model: np.ndarray
     weights: np.ndarray
@@ -1332,6 +1334,47 @@ class SkyDecompLSFSurfaceIterative(SkyDecomp):
             offset += size
         return coefficient
 
+    def _combine_coef_errors(
+        self,
+        matrices: dict[str, np.ndarray],
+        continuum_coef_err: np.ndarray,
+        line_coef_err: np.ndarray,
+    ) -> np.ndarray:
+        """Scatter continuum + line 1σ errors into the combined coefficient layout.
+
+        Every accepted refinement cycle fits the continuum block
+        (``_CONTINUUM_KEYS = ('moon', 'diffuse')``) and the line block
+        (``_LINE_KEYS = ('oh', 'atom', 'orc', 'o2')``) via two independent
+        ``_fit_design`` calls, each of which returns its own active-set
+        covariance. Because the two solves are strictly sequential (the line
+        stage sees the flux with the fresh continuum subtracted) their KKT
+        Hessians share no rows and the cross-block covariance is not defined
+        by the model. The reported per-coefficient standard errors therefore
+        come from whichever solve produced the value: continuum entries from
+        ``continuum_coef_err``, line entries from ``line_coef_err``. Missing
+        elements are left as ``NaN`` — consistent with the boundary
+        convention used by ``_coef_err_active_set``.
+
+        This is the uncertainty-space analogue of ``_combine_coefficients``
+        and uses the same ``_component_slices`` mapping so the two arrays
+        always agree column-by-column with ``coef``.
+        """
+        slices = self._component_slices(matrices)
+        coef_err = np.full(slices["o2"].stop, np.nan, dtype=float)
+        offset = 0
+        for key in self._CONTINUUM_KEYS:
+            size = matrices[key].shape[0]
+            if continuum_coef_err.size >= offset + size:
+                coef_err[slices[key]] = continuum_coef_err[offset : offset + size]
+            offset += size
+        offset = 0
+        for key in self._LINE_KEYS:
+            size = matrices[key].shape[0]
+            if line_coef_err.size >= offset + size:
+                coef_err[slices[key]] = line_coef_err[offset : offset + size]
+            offset += size
+        return coef_err
+
     def _line_source(self, line_coefficient: np.ndarray) -> np.ndarray:
         return np.vstack(self._line_stick_matrices()).T @ line_coefficient
 
@@ -1383,6 +1426,7 @@ class SkyDecompLSFSurfaceIterative(SkyDecomp):
         dict[str, object],
         np.ndarray | None,
         np.ndarray | None,
+        np.ndarray | None,
         np.ndarray,
         dict[str, float],
     ]:
@@ -1404,10 +1448,14 @@ class SkyDecompLSFSurfaceIterative(SkyDecomp):
             diffuse_slice=slice(n_moon, design.shape[0]),
         )
         if str(fit["status"]) not in self._SOLVED:
-            return fit, None, None, weights, channel_noise
+            return fit, None, None, None, weights, channel_noise
         coefficient = np.asarray(fit["coef"], dtype=float)
+        coef_err = np.asarray(
+            fit.get("coef_err", np.full_like(coefficient, np.nan)),
+            dtype=float,
+        )
         continuum = design.T @ coefficient
-        return fit, coefficient, continuum, weights, channel_noise
+        return fit, coefficient, coef_err, continuum, weights, channel_noise
 
     def _run_iterations(
         self,
@@ -1437,11 +1485,21 @@ class SkyDecompLSFSurfaceIterative(SkyDecomp):
             diffuse_slice=slices["diffuse"],
         )
         seed_coefficient = np.asarray(seed["coef"], dtype=float)
+        seed_coef_err = np.asarray(
+            seed.get("coef_err", np.full_like(seed_coefficient, np.nan)),
+            dtype=float,
+        )
         continuum_coefficient = np.concatenate(
             [seed_coefficient[slices[key]] for key in self._CONTINUUM_KEYS]
         )
         line_coefficient = np.concatenate(
             [seed_coefficient[slices[key]] for key in self._LINE_KEYS]
+        )
+        continuum_coef_err = np.concatenate(
+            [seed_coef_err[slices[key]] for key in self._CONTINUUM_KEYS]
+        )
+        line_coef_err = np.concatenate(
+            [seed_coef_err[slices[key]] for key in self._LINE_KEYS]
         )
         continuum_design = self._stack_matrices(matrices, self._CONTINUUM_KEYS)
         line_design = self._stack_matrices(matrices, self._LINE_KEYS)
@@ -1459,6 +1517,8 @@ class SkyDecompLSFSurfaceIterative(SkyDecomp):
             matrices=matrices,
             continuum_coefficient=continuum_coefficient,
             line_coefficient=line_coefficient,
+            continuum_coef_err=continuum_coef_err,
+            line_coef_err=line_coef_err,
             continuum=continuum,
             line_model=line_model,
             weights=ivar.copy(),
@@ -1485,7 +1545,7 @@ class SkyDecompLSFSurfaceIterative(SkyDecomp):
             previous_surface = (
                 None if self._lsf_surface is None else self._lsf_surface.copy()
             )
-            continuum_fit, candidate_coefficient, candidate_continuum, weights, noise = (
+            continuum_fit, candidate_coefficient, candidate_coef_err, candidate_continuum, weights, noise = (
                 self._fit_continuum_stage(run, flux, ivar, skyline_mask)
             )
             run.weights = weights
@@ -1549,6 +1609,10 @@ class SkyDecompLSFSurfaceIterative(SkyDecomp):
                 break
 
             candidate_line_coefficient = np.asarray(line_fit["coef"], dtype=float)
+            candidate_line_coef_err = np.asarray(
+                line_fit.get("coef_err", np.full_like(candidate_line_coefficient, np.nan)),
+                dtype=float,
+            )
             candidate_line_model = line_design.T @ candidate_line_coefficient
             state.completed_cycles = cycle
             lsf_change = (
@@ -1577,14 +1641,16 @@ class SkyDecompLSFSurfaceIterative(SkyDecomp):
             )
             run.matrices = matrices
             run.continuum_coefficient = candidate_coefficient
+            run.continuum_coef_err = candidate_coef_err
             run.line_coefficient = candidate_line_coefficient
+            run.line_coef_err = candidate_line_coef_err
             run.continuum = candidate_continuum
             run.line_model = candidate_line_model
             run.solver_status = line_status
 
         # Closure uses the last fully committed model, even after a failed cycle.
         if seed_solved:
-            continuum_fit, candidate_coefficient, candidate_continuum, weights, noise = (
+            continuum_fit, candidate_coefficient, candidate_coef_err, candidate_continuum, weights, noise = (
                 self._fit_continuum_stage(run, flux, ivar, skyline_mask)
             )
             run.weights = weights
@@ -1631,6 +1697,13 @@ class SkyDecompLSFSurfaceIterative(SkyDecomp):
                         line_fit["coef"],
                         dtype=float,
                     )
+                    candidate_line_coef_err = np.asarray(
+                        line_fit.get(
+                            "coef_err",
+                            np.full_like(candidate_line_coefficient, np.nan),
+                        ),
+                        dtype=float,
+                    )
                     candidate_line_model = line_design.T @ candidate_line_coefficient
                     run.metrics.append(
                         self._metric(
@@ -1647,7 +1720,9 @@ class SkyDecompLSFSurfaceIterative(SkyDecomp):
                         )
                     )
                     run.continuum_coefficient = candidate_coefficient
+                    run.continuum_coef_err = candidate_coef_err
                     run.line_coefficient = candidate_line_coefficient
+                    run.line_coef_err = candidate_line_coef_err
                     run.continuum = candidate_continuum
                     run.line_model = candidate_line_model
                     run.solver_status = run.line_status
@@ -1670,6 +1745,11 @@ class SkyDecompLSFSurfaceIterative(SkyDecomp):
             run.matrices,
             run.continuum_coefficient,
             run.line_coefficient,
+        )
+        coefficient_err = self._combine_coef_errors(
+            run.matrices,
+            run.continuum_coef_err,
+            run.line_coef_err,
         )
         components = self._components_from_coef(coefficient, run.matrices)
         # `run.matrices['o2']` is a (1, n_wave) block already convolved by the
@@ -1716,6 +1796,7 @@ class SkyDecompLSFSurfaceIterative(SkyDecomp):
             tracemalloc.stop()
 
         self.coef = coefficient
+        self.coef_err = coefficient_err
         # Keep the historical seed-valued fields; bestfit_lsf is the refined model.
         self.bestfit = np.asarray(seed["bestfit"], dtype=float)
         self.bestfit_lsf = bestfit_lsf
@@ -1768,6 +1849,7 @@ class SkyDecompLSFSurfaceIterative(SkyDecomp):
 
         return LSFSurfaceIterativeResult(
             coef=self.coef,
+            coef_err=self.coef_err,
             bestfit=np.asarray(seed["bestfit"], dtype=float),
             resid=np.asarray(seed["resid"], dtype=float),
             resid_level=float(seed["resid_level"]),

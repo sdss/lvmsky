@@ -272,11 +272,23 @@ def results_to_fits(results, filename):
     coef_table = Table({name: coef_arr[:, i] for i, name in enumerate(design_names)})
     coef_hdu = fits.BinTableHDU(coef_table, name="COEF")
 
+    coef_err_arr = stack("coef_err")
+    if coef_err_arr.shape != coef_arr.shape:
+        raise ValueError(
+            f"Coefficient error shape {coef_err_arr.shape} does not match "
+            f"coefficient shape {coef_arr.shape}."
+        )
+    coef_err_table = Table(
+        {name: coef_err_arr[:, i] for i, name in enumerate(design_names)}
+    )
+    coef_err_hdu = fits.BinTableHDU(coef_err_table, name="COEF_ERR")
+
     hdul = fits.HDUList(
         [
             fits.PrimaryHDU(),
             fits.BinTableHDU(t, name="META"),
             coef_hdu,
+            coef_err_hdu,
             fits.ImageHDU(stack("bestfit"), name="BESTFIT"),
             fits.ImageHDU(stack("bestfit_lsf"), name="BESTFIT_LSF"),
             fits.ImageHDU(stack("resid"), name="RESID"),
@@ -533,6 +545,8 @@ def extract_meta_and_coef_products(
                 _copy_hdu_with_name(hdul_dec["META"], "META"),
                 _copy_hdu_with_name(hdul_dec["COEF"], "COEF"),
             ]
+            if "COEF_ERR" in hdul_dec:
+                compact_hdus.append(_copy_hdu_with_name(hdul_dec["COEF_ERR"], "COEF_ERR"))
             lsf_extensions = ("LSF_COEF", "LSF_KNOTS", "LSF_META")
             present = [name in hdul_dec for name in lsf_extensions]
             if any(present) and not all(present):
