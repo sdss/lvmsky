@@ -881,6 +881,57 @@ class SkyDecomp:
         components["diffuse"] = components["ho2"] + components["feo"] + components["o2ac"]
         return components
 
+    def _components_sigma_from_coef_err(
+        self,
+        coef_err: np.ndarray,
+        mats: dict[str, np.ndarray],
+    ) -> dict[str, np.ndarray]:
+        """Propagate per-coefficient 1σ to per-component flux 1σ.
+
+        For every matrix component (``oh``, ``moon``, ``atom``, ``orc``,
+        ``o2``) the flux variance at wavelength λ is
+
+            σ²_comp(λ) = Σ_j M[j, λ]² · σ_c[j]²                    (1)
+
+        where ``M`` is the component's design matrix (already
+        LSF-convolved by ``_assemble_refined_matrices``) and ``σ_c`` is the
+        native-space per-coefficient uncertainty. This is the exact
+        first-order (Jacobian) propagation because the reconstruction
+        ``flux = M.T @ coef`` is linear in the coefficients.
+
+        The three diffuse sub-components (``ho2``, ``feo``, ``o2ac``) each
+        scale a fixed shape vector by a single coefficient, so their
+        1σ = |vector| · σ_coef.  The aggregate ``diffuse`` variance is
+        their sum in quadrature (independent coefficients).
+
+        NaN or non-finite ``coef_err`` values are treated as zero
+        contribution, matching the "no measured uncertainty available"
+        semantics used elsewhere in the pipeline.
+        """
+        sl = self._component_slices(mats)
+        err = np.asarray(coef_err, dtype=np.float64).ravel()
+        if err.size != sum(m.shape[0] for m in mats.values()):
+            raise ValueError(
+                f"coef_err length mismatch: expected "
+                f"{sum(m.shape[0] for m in mats.values())}, got {err.size}"
+            )
+        err2 = np.where(np.isfinite(err), err ** 2, 0.0)
+        diffuse_err2 = err2[sl["diffuse"]]
+        sigmas = {
+            "oh": np.sqrt((mats["oh"] ** 2).T @ err2[sl["oh"]]),
+            "moon": np.sqrt((mats["moon"] ** 2).T @ err2[sl["moon"]]),
+            "ho2": np.sqrt(diffuse_err2[0]) * np.abs(self.vector_ho2),
+            "feo": np.sqrt(diffuse_err2[1]) * np.abs(self.vector_feo),
+            "o2ac": np.sqrt(diffuse_err2[2]) * np.abs(self.vector_o2ac),
+            "atom": np.sqrt((mats["atom"] ** 2).T @ err2[sl["atom"]]),
+            "orc": np.sqrt((mats["orc"] ** 2).T @ err2[sl["orc"]]),
+            "o2": np.sqrt((mats["o2"] ** 2).T @ err2[sl["o2"]]),
+        }
+        sigmas["diffuse"] = np.sqrt(
+            sigmas["ho2"] ** 2 + sigmas["feo"] ** 2 + sigmas["o2ac"] ** 2
+        )
+        return sigmas
+
     def _build_lsf_source(self, coef: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         mats = self._matrix_bundle(
             self.matrix_oh_stick,
@@ -1448,6 +1499,7 @@ def reconstruct_component_spectra(
     n_spline_knots: int = 25,
     base_dir: str | Path | None = None,
     o2_vector: np.ndarray | None = None,
+    coef_err: np.ndarray | None = None,
     moon_interline_boost: float = 0.0,
     moon_interline_red_min: float = 7454.0,
     moon_interline_exclusion_a: float = 3.0,
@@ -1469,6 +1521,14 @@ def reconstruct_component_spectra(
         Root path containing PALACE/PMD and solar reference files.
     o2_vector
         Optional precomputed O2 template on `wave`. If omitted, O2 is set to zero.
+    coef_err
+        Optional per-coefficient 1σ uncertainty (same shape as ``coef``). When
+        provided, the returned dict additionally contains ``sigma`` mapping
+        each component name to its per-pixel flux 1σ (first-order Jacobian
+        propagation through the LSF-convolved design matrix; see
+        ``SkyDecompBase._components_sigma_from_coef_err``), plus
+        ``sigma_total`` (quadrature sum of the independent-component
+        variances).
     moon_interline_boost
         Strength of down-weighting for masked red pixels in the moon-spline fit.
         Masked-pixel weight is `1 / (1 + moon_interline_boost)`.
@@ -1535,6 +1595,23 @@ def reconstruct_component_spectra(
         + comps["orc"]
         + comps["o2"]
     )
+    if coef_err is not None:
+        err_arr = np.asarray(coef_err, dtype=np.float64).ravel()
+        if err_arr.size != coef_arr.size:
+            raise ValueError(
+                f"coef_err length mismatch: expected {coef_arr.size}, "
+                f"got {err_arr.size}"
+            )
+        sigma_comps = model._components_sigma_from_coef_err(err_arr, mats)
+        comps["sigma"] = sigma_comps
+        comps["sigma_total"] = np.sqrt(
+            sigma_comps["oh"] ** 2
+            + sigma_comps["moon"] ** 2
+            + sigma_comps["diffuse"] ** 2
+            + sigma_comps["atom"] ** 2
+            + sigma_comps["orc"] ** 2
+            + sigma_comps["o2"] ** 2
+        )
     return comps
 
 
