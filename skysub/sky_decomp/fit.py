@@ -418,6 +418,56 @@ class SkyDecomp:
         }
 
     @staticmethod
+    def _per_column_chi2_from_residuals(
+        design_matrix: np.ndarray,
+        resid: np.ndarray,
+        ivar: np.ndarray,
+        good: np.ndarray,
+        *,
+        fallback: float,
+    ) -> np.ndarray:
+        """Per-column pseudo-chi² from residual power weighted by column support.
+
+        For each column ``j`` of the physical design matrix, compute a
+        heteroscedasticity-consistent (HC1-style) chi² by weighting the
+        pixel-wise weighted residual power by that column's spectral support:
+
+            w_j[i]        = |A[i, j]| / max_i |A[i, j]|
+            chi²_j        = Σ_i w_j[i] · ivar[i] · resid[i]²  /  Σ_i w_j[i]
+
+        Columns with vanishing support (all-zero design, or no ``good`` pixels
+        in support) fall back to ``fallback`` (typically the aggregate
+        ``reduced_chi²``).  This gives ``_coef_err_active_set`` a per-column
+        inflation factor instead of the scalar ``max(reduced_chi², 1)`` used
+        historically, matching the MLP-side observation (top methods §7) that
+        the miscalibration is column-dependent.
+        """
+        # design_matrix here is (n_col, n_pix) -- see _fit_design.
+        a_full = design_matrix.T  # (n_pix, n_col)
+        n_par = a_full.shape[1]
+        per_col = np.full(n_par, float(fallback), dtype=float)
+        if not good.any():
+            return per_col
+        r_good = resid[good]
+        w_good = ivar[good]
+        r2w = r_good * r_good * w_good  # per-good-pixel weighted residual²
+        a_good = np.abs(a_full[good, :])
+        col_max = a_good.max(axis=0)
+        support_mask = col_max > 0.0
+        if not support_mask.any():
+            return per_col
+        # w_j[i] = |A[i,j]| / col_max[j]; normalize once via broadcasting.
+        norm = np.where(col_max > 0.0, col_max, 1.0)
+        w_j = a_good / norm[None, :]
+        num = (r2w[:, None] * w_j).sum(axis=0)
+        den = w_j.sum(axis=0)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            chi2_j = np.where(den > 0.0, num / den, float(fallback))
+        chi2_j = np.where(np.isfinite(chi2_j), chi2_j, float(fallback))
+        per_col[support_mask] = chi2_j[support_mask]
+        return per_col
+
+    @staticmethod
     def _coef_err_active_set(
         coef: np.ndarray,
         source_p: list[np.ndarray],
@@ -425,6 +475,7 @@ class SkyDecomp:
         source_data_scale: list[float],
         source_local_index: list[int],
         reduced_chi2: float,
+        per_column_chi2: np.ndarray | None = None,
     ) -> np.ndarray:
         """Active-set posterior 1σ uncertainty for a nonnegative WLS solve.
 
@@ -477,8 +528,21 @@ class SkyDecomp:
         Noise inflation. Empirical ``reduced_chi²`` above unity indicates that
         the input ``ivar`` under-estimates the noise (or the model is
         mildly under-specified); the variance is therefore inflated by
-        ``max(reduced_chi2, 1)`` before the square root. This is the standard
+        ``max(reduced_chi², 1)`` before the square root. This is the standard
         "sigma-hat" adjustment applied to weighted least squares.
+
+        Per-column inflation (2026-08-16). The MLP sigma-calibration diagnostic
+        (top methods §7) showed the aggregate ``reduced_chi²`` scalar
+        systematically over-inflates well-fit columns and under-inflates poorly
+        fit ones. When ``per_column_chi2`` is provided (see ``_fit_design``),
+        the inflation factor becomes column-specific ``max(per_column_chi2[j], 1)``
+        computed from residual power weighted by each column's spectral support.
+        This is a lightweight heteroscedasticity-consistent (HC1-style) fix that
+        preserves the active-set covariance structure and matches the physical
+        intuition that emission-line columns and continuum-spline columns have
+        very different residual behaviour. If ``per_column_chi2`` is ``None`` the
+        routine falls back to the scalar ``reduced_chi²`` for backward
+        compatibility.
 
         Boundary treatment. Inactive coefficients are pinned at c_j = 0 by
         the constraint and have no symmetric 1σ interval defined; they are
@@ -505,7 +569,18 @@ class SkyDecomp:
         active_mask = coef > active_tol
         coef_err[~active_mask] = np.nan
 
-        inflate = float(max(reduced_chi2, 1.0))
+        scalar_inflate = float(max(reduced_chi2, 1.0))
+        if per_column_chi2 is not None:
+            per_col = np.asarray(per_column_chi2, dtype=float)
+            if per_col.shape != coef.shape:
+                raise ValueError(
+                    f"per_column_chi2 shape {per_col.shape} != coef shape {coef.shape}"
+                )
+            per_col = np.where(np.isfinite(per_col) & (per_col > 0.0), per_col,
+                                scalar_inflate)
+            inflate_arr = np.maximum(per_col, 1.0)
+        else:
+            inflate_arr = np.full(coef.shape, scalar_inflate, dtype=float)
 
         # Group active coefficients by the solve they came from (identity of the
         # Hessian array); within each group we invert one small sub-block once.
@@ -529,13 +604,14 @@ class SkyDecomp:
             except np.linalg.LinAlgError:
                 cov_a = np.linalg.pinv(H_a)
             inv_col = 1.0 / cs_solve[local_idx]
-            # Undo column and data scaling; inflate by reduced-χ² for a hat-sigma
-            # adjustment; clip to nonnegative before the square root to guard
-            # against tiny negative eigenvalues from finite-precision arithmetic.
+            # Undo column and data scaling; inflate by per-column χ² (falling
+            # back to the scalar reduced_chi² when per_column_chi2 is None); clip
+            # to nonnegative before the square root to guard against tiny
+            # negative eigenvalues from finite-precision arithmetic.
             var_a = np.clip(
                 np.diag(inv_col[:, None] * cov_a * inv_col[None, :])
                 * (ds_solve ** 2)
-                * inflate,
+                * inflate_arr[np.asarray(solve_indices, dtype=int)],
                 0.0,
                 np.inf,
             )
@@ -743,6 +819,9 @@ class SkyDecomp:
         y_mean = float(np.average(y, weights=ivar[good])) if n_good else np.nan
         sst = float(np.sum((y - y_mean) ** 2 * ivar[good])) if n_good else np.nan
         r2 = 1.0 - chi2 / sst if np.isfinite(sst) and sst > 0 else np.nan
+        per_column_chi2 = self._per_column_chi2_from_residuals(
+            design_matrix, resid, ivar, good, fallback=reduced_chi2,
+        )
         coef_err = self._coef_err_active_set(
             coef,
             source_p,
@@ -750,6 +829,7 @@ class SkyDecomp:
             source_data_scale,
             source_local_index,
             reduced_chi2,
+            per_column_chi2=per_column_chi2,
         )
         return {
             "coef": coef,
