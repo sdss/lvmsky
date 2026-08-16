@@ -68,6 +68,7 @@ def _baseline_result_kwargs(wave):
         "moon_boosted_pixels": np.array([], dtype=float),
         "vector_o2": np.zeros_like(wave),
         "o2_prefit_amp": 0.0,
+        "bestfit_lsf_sigma": np.zeros_like(wave),
     }
 
 
@@ -463,6 +464,7 @@ def test_baseline_writer_contract_is_unchanged_and_mixed_results_are_rejected(
             "COEF_ERR",
             "BESTFIT",
             "BESTFIT_LSF",
+            "FLUX_SIGMA_TOTAL",
             "RESID",
             "VECTOR_O2",
             "COMP_OH",

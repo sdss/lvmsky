@@ -155,6 +155,13 @@ class SkyDecompResult:
     # `coef * vector_o2` reproduces the model O2 contribution.
     vector_o2: np.ndarray
     o2_prefit_amp: float
+    # Per-pixel 1σ of the LSF-refined reconstruction, obtained by first-order
+    # (Jacobian) propagation of ``coef_err`` through the LSF-convolved design
+    # matrices used to build ``bestfit_lsf`` (see
+    # ``SkyDecomp._components_sigma_from_coef_err``).  Same shape as
+    # ``bestfit_lsf``.  Written to disk as the ``FLUX_SIGMA_TOTAL`` HDU by the
+    # parallel decomposition writer.
+    bestfit_lsf_sigma: np.ndarray
 
 
 class SkyDecomp:
@@ -308,6 +315,25 @@ class SkyDecomp:
         if final_matrices["o2"].shape[0] == 1:
             self.vector_o2 = final_matrices["o2"][0].copy()
 
+        # Per-pixel 1σ of the refined reconstruction (LSF-aware Jacobian
+        # propagation).  Uses the SAME matrix bundle as `_components_from_coef`
+        # above so the mean and σ come from an identical LSF/O2 basis.  Needs
+        # the finalised coef_err from `refined`, not `self.coef_err` (which is
+        # not filled until a few lines below).
+        _sigma_coef_err = np.asarray(
+            refined.get("coef_err", np.full(refined["coef"].shape, np.nan)),
+            dtype=float,
+        )
+        _sigma_comps = self._components_sigma_from_coef_err(_sigma_coef_err, final_matrices)
+        bestfit_lsf_sigma = np.sqrt(
+            _sigma_comps["oh"] ** 2
+            + _sigma_comps["moon"] ** 2
+            + _sigma_comps["diffuse"] ** 2
+            + _sigma_comps["atom"] ** 2
+            + _sigma_comps["orc"] ** 2
+            + _sigma_comps["o2"] ** 2
+        )
+
         fit_elapsed_sec = time.perf_counter() - t0
         peak_memory_mb = tracemalloc.get_traced_memory()[1] / 1024**2
         if trace_started:
@@ -397,6 +423,7 @@ class SkyDecomp:
             moon_boosted_pixels=self.moon_boosted_pixels_used.copy(),
             vector_o2=self.vector_o2.copy(),
             o2_prefit_amp=float(self.o2_prefit_amp),
+            bestfit_lsf_sigma=bestfit_lsf_sigma,
         )
 
     @staticmethod

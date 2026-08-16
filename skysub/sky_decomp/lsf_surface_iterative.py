@@ -1757,6 +1757,18 @@ class SkyDecompLSFSurfaceIterative(SkyDecomp):
         # matches the O2 basis used to build `components['o2']`.
         if run.matrices["o2"].shape[0] == 1:
             self.vector_o2 = run.matrices["o2"][0].copy()
+        # Per-pixel 1σ of the LSF-refined reconstruction: LSF-aware Jacobian
+        # propagation using the SAME matrix bundle as `_components_from_coef`
+        # so mean and σ share an identical basis.
+        _sigma_comps = self._components_sigma_from_coef_err(coefficient_err, run.matrices)
+        bestfit_lsf_sigma = np.sqrt(
+            _sigma_comps["oh"] ** 2
+            + _sigma_comps["moon"] ** 2
+            + _sigma_comps["diffuse"] ** 2
+            + _sigma_comps["atom"] ** 2
+            + _sigma_comps["orc"] ** 2
+            + _sigma_comps["o2"] ** 2
+        )
         continuum = components["moon"] + components["diffuse"]
         line_model = (
             components["oh"]
@@ -1875,6 +1887,7 @@ class SkyDecompLSFSurfaceIterative(SkyDecomp):
             moon_boosted_pixels=self.moon_boosted_pixels_used.copy(),
             vector_o2=self.vector_o2.copy(),
             o2_prefit_amp=float(self.o2_prefit_amp),
+            bestfit_lsf_sigma=bestfit_lsf_sigma,
             lsf_state=self.lsf_surface_state,
         )
 

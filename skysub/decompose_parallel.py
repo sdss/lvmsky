@@ -291,6 +291,7 @@ def results_to_fits(results, filename):
             coef_err_hdu,
             fits.ImageHDU(stack("bestfit"), name="BESTFIT"),
             fits.ImageHDU(stack("bestfit_lsf"), name="BESTFIT_LSF"),
+            fits.ImageHDU(stack("bestfit_lsf_sigma"), name="FLUX_SIGMA_TOTAL"),
             fits.ImageHDU(stack("resid"), name="RESID"),
             fits.ImageHDU(stack("vector_o2"), name="VECTOR_O2"),
         ]
