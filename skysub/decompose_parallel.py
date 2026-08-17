@@ -4,7 +4,7 @@
 Run sky spectral decomposition on a median-stacked LVM frame.
 
 Usage:
-    python decompose_parallel.py <data_file> <palace_dir> [options]
+    python decompose_parallel.py <data_file> [palace_dir] [options]
 
 Example:
     python decompose_parallel.py lvmsframe_median_stack.fits ../ --n-workers 8
@@ -39,6 +39,17 @@ try:
     from sky_decomp.result_io import results_to_fits
 except ModuleNotFoundError:
     from skysub.sky_decomp.result_io import results_to_fits
+
+try:
+    from sky_decomp.moon_zodi_model import (
+        DEFAULT_DATA_ROOT as DEFAULT_MOON_ZODI_DATA_ROOT,
+        validate_decomposition_data_root,
+    )
+except ModuleNotFoundError:
+    from skysub.sky_decomp.moon_zodi_model import (
+        DEFAULT_DATA_ROOT as DEFAULT_MOON_ZODI_DATA_ROOT,
+        validate_decomposition_data_root,
+    )
 
 try:
     from threadpoolctl import threadpool_limits
@@ -84,6 +95,7 @@ FIT_MODEL_SUFFIXES = {
     "lsf-surface-iterative": "_lsf_surface_iterative",
     "moon-zodi-lsf-surface-iterative": "_moon_zodi_lsf_surface_iterative",
 }
+MOON_ZODI_FIT_MODEL = "moon-zodi-lsf-surface-iterative"
 
 
 def init_worker(
@@ -143,7 +155,7 @@ def init_worker(
         "sky1": np.asarray(_WORKER_HDU["FLUX_SKY_NEAR"].data),
         "sky2": np.asarray(_WORKER_HDU["FLUX_SKY_FAR"].data),
     }
-    if fit_model == "moon-zodi-lsf-surface-iterative":
+    if fit_model == MOON_ZODI_FIT_MODEL:
         _WORKER_LSF = {
             "sci": np.asarray(_WORKER_HDU["LSF_SCI"].data),
             "sky1": np.asarray(_WORKER_HDU["LSF_SKY_NEAR"].data),
@@ -188,18 +200,16 @@ def init_worker(
                 n_refinement_cycles=n_refinement_cycles,
             ),
         )
-    elif fit_model == "moon-zodi-lsf-surface-iterative":
+    elif fit_model == MOON_ZODI_FIT_MODEL:
         from sky_decomp.lsf_surface_iterative import LSFSurfaceIterativeConfig
         from sky_decomp.moon_zodi_lsf_surface_iterative import (
             SkyDecompMoonZodiLSFSurfaceIterative,
         )
-        from sky_decomp.moon_zodi_model import DEFAULT_DATA_ROOT
-
         _WORKER_DECOMPOSER = SkyDecompMoonZodiLSFSurfaceIterative(
             wave,
             lsf_sigma=lsf_sigma,
             data_root=(
-                DEFAULT_DATA_ROOT
+                DEFAULT_MOON_ZODI_DATA_ROOT
                 if moon_zodi_data_root is None
                 else moon_zodi_data_root
             ),
@@ -351,6 +361,31 @@ def resolve_base_dir(path_arg):
     )
 
 
+def resolve_runtime_data_roots(
+    fit_model,
+    palace_dir=None,
+    moon_zodi_data_root=None,
+):
+    """Resolve only the data contract used by the selected fit model."""
+    if fit_model == MOON_ZODI_FIT_MODEL:
+        candidate = (
+            moon_zodi_data_root
+            if moon_zodi_data_root is not None
+            else palace_dir
+            if palace_dir is not None
+            else DEFAULT_MOON_ZODI_DATA_ROOT
+        )
+        data_root = Path(candidate).expanduser().resolve()
+        validate_decomposition_data_root(str(data_root))
+        return data_root, data_root
+
+    if palace_dir is None:
+        raise ValueError(
+            "palace_dir is required for baseline and lsf-surface-iterative fits"
+        )
+    return resolve_base_dir(palace_dir), None
+
+
 def _iter_chunk_tasks(n_rows, chunk_size):
     for kind in ("sci", "sky1", "sky2"):
         for i0 in range(0, n_rows, chunk_size):
@@ -379,7 +414,11 @@ def run(
     exposure_seconds=900.0,
     moon_zodi_data_root=None,
 ):
-    base_dir = resolve_base_dir(palace_dir)
+    base_dir, resolved_moon_zodi_data_root = resolve_runtime_data_roots(
+        fit_model,
+        palace_dir=palace_dir,
+        moon_zodi_data_root=moon_zodi_data_root,
+    )
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -401,8 +440,8 @@ def run(
     print(f"  palace_oh_suffix={palace_oh_suffix!r}")
     print(f"  palace_diffuse_suffix={palace_diffuse_suffix!r}")
     print(f"  exposure_seconds_fallback={exposure_seconds}")
-    if fit_model == "moon-zodi-lsf-surface-iterative":
-        print(f"  moon_zodi_data_root={moon_zodi_data_root!r}")
+    if fit_model == MOON_ZODI_FIT_MODEL:
+        print(f"  moon_zodi_data_root={str(resolved_moon_zodi_data_root)!r}")
     print(f"  pin_workers={pin_workers}, diagnose_threads={diagnose_threads}")
     print(f"  base_dir={base_dir}")
 
@@ -447,7 +486,11 @@ def run(
             palace_oh_suffix,
             palace_diffuse_suffix,
             exposure_seconds,
-            moon_zodi_data_root,
+            (
+                None
+                if resolved_moon_zodi_data_root is None
+                else str(resolved_moon_zodi_data_root)
+            ),
         ),
     ) as executor:
         pbar = tqdm(
@@ -687,7 +730,13 @@ def main():
     parser = argparse.ArgumentParser(description="LVM sky spectral decomposition")
     parser.add_argument("data_file", help="Input FITS file (median stacked LVM frame)")
     parser.add_argument(
-        "palace_dir", help="Path to the project base directory or directly to the palace directory"
+        "palace_dir",
+        nargs="?",
+        default=None,
+        help=(
+            "Legacy project/PALACE root. Required by baseline and "
+            "lsf-surface-iterative; optional bundle root for the Moon/Zodi mode."
+        ),
     )
     parser.add_argument(
         "--n-workers", type=int, default=4, help="Number of parallel worker processes (default: 4)"
@@ -802,10 +851,18 @@ def main():
         raise ValueError("--limit must be >= 1")
     if not np.isfinite(args.exposure_seconds) or args.exposure_seconds <= 0.0:
         raise ValueError("--exposure-seconds must be positive and finite")
-    if args.fit_model == "moon-zodi-lsf-surface-iterative" and args.exposure_seconds != 900.0:
+    if args.fit_model == MOON_ZODI_FIT_MODEL and args.exposure_seconds != 900.0:
         raise ValueError(
             "Moon/Zodi v1 records missing META exposure time as 'assumed_900s'; "
             "--exposure-seconds must therefore remain 900"
+        )
+    if (
+        not args.only_thin
+        and args.fit_model != MOON_ZODI_FIT_MODEL
+        and args.palace_dir is None
+    ):
+        parser.error(
+            "palace_dir is required for baseline and lsf-surface-iterative fits"
         )
 
     suffix = FIT_MODEL_SUFFIXES[args.fit_model]

@@ -252,3 +252,66 @@ def test_batch_role_coordinate_and_lsf_contract(monkeypatch):
         "lsf-surface-iterative": "_lsf_surface_iterative",
         "moon-zodi-lsf-surface-iterative": "_moon_zodi_lsf_surface_iterative",
     }
+
+
+def test_runtime_data_roots_are_selected_by_fit_model(monkeypatch, tmp_path):
+    validated = []
+
+    def reject_legacy_path(_path):
+        raise AssertionError("Moon/Zodi mode must not resolve the legacy PALACE path")
+
+    monkeypatch.setattr(
+        decompose_parallel,
+        "validate_decomposition_data_root",
+        validated.append,
+    )
+    monkeypatch.setattr(decompose_parallel, "resolve_base_dir", reject_legacy_path)
+
+    named_root = tmp_path / "named_bundle"
+    base_dir, data_root = decompose_parallel.resolve_runtime_data_roots(
+        decompose_parallel.MOON_ZODI_FIT_MODEL,
+        palace_dir=tmp_path / "invalid_legacy_path",
+        moon_zodi_data_root=named_root,
+    )
+    assert base_dir == named_root.resolve()
+    assert data_root == named_root.resolve()
+    assert validated == [str(named_root.resolve())]
+
+    positional_root = tmp_path / "positional_bundle"
+    base_dir, data_root = decompose_parallel.resolve_runtime_data_roots(
+        decompose_parallel.MOON_ZODI_FIT_MODEL,
+        palace_dir=positional_root,
+    )
+    assert base_dir == positional_root.resolve()
+    assert data_root == positional_root.resolve()
+
+    default_root = tmp_path / "default_bundle"
+    monkeypatch.setattr(
+        decompose_parallel,
+        "DEFAULT_MOON_ZODI_DATA_ROOT",
+        default_root,
+    )
+    base_dir, data_root = decompose_parallel.resolve_runtime_data_roots(
+        decompose_parallel.MOON_ZODI_FIT_MODEL,
+    )
+    assert base_dir == default_root.resolve()
+    assert data_root == default_root.resolve()
+
+
+def test_runtime_data_roots_preserve_legacy_resolution(monkeypatch, tmp_path):
+    resolved = tmp_path / "legacy_root"
+    calls = []
+
+    def resolve(path):
+        calls.append(path)
+        return resolved
+
+    monkeypatch.setattr(decompose_parallel, "resolve_base_dir", resolve)
+    base_dir, data_root = decompose_parallel.resolve_runtime_data_roots(
+        "lsf-surface-iterative",
+        palace_dir="legacy-palace",
+        moon_zodi_data_root=tmp_path / "ignored_moon_zodi_bundle",
+    )
+    assert base_dir == resolved
+    assert data_root is None
+    assert calls == ["legacy-palace"]

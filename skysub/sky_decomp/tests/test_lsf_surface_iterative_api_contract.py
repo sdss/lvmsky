@@ -6,6 +6,7 @@ import sys
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 from skysub import decompose_parallel
 import skysub.sky_decomp.lsf_surface_iterative as iterative
@@ -224,6 +225,55 @@ def test_batch_and_cli_defaults_resolve_to_five_cycles(monkeypatch):
     decompose_parallel.main()
 
     assert captured["n_refinement_cycles"] == 5
+
+
+def test_moon_zodi_cli_does_not_require_legacy_palace_path(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(
+        decompose_parallel,
+        "run",
+        lambda **kwargs: captured.update(kwargs),
+    )
+    monkeypatch.setattr(
+        decompose_parallel,
+        "extract_meta_and_coef_products",
+        lambda **kwargs: None,
+    )
+    monkeypatch.setattr(
+        decompose_parallel,
+        "thin_fits_every_n",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "decompose_parallel.py",
+            "input.fits",
+            "--fit-model",
+            decompose_parallel.MOON_ZODI_FIT_MODEL,
+            "--moon-zodi-data-root",
+            "/external/data",
+        ],
+    )
+
+    decompose_parallel.main()
+
+    assert captured["palace_dir"] is None
+    assert str(captured["moon_zodi_data_root"]) == "/external/data"
+
+
+def test_legacy_cli_still_requires_palace_path(monkeypatch):
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["decompose_parallel.py", "input.fits", "--fit-model", "baseline"],
+    )
+
+    with pytest.raises(SystemExit) as error:
+        decompose_parallel.main()
+
+    assert error.value.code == 2
 
 
 def test_chunk_worker_preserves_indices_and_reports_each_row(monkeypatch):
