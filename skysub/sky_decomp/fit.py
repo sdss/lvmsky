@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import re
 import time
 import tracemalloc
 
@@ -22,6 +23,7 @@ O2_MAX = 8696.0
 T_O2_REF = 191.5
 T_O2_HALF_RANGE = 20.0
 O2_MIN_VALID_FRAC = 0.5
+SUFFIXED_PMD_TABLES = frozenset({"pmd_popmodel_OH.dat", "pmd_refcont.dat"})
 LSF_KERNEL_SIZE = 11
 LSF_MIN_VALID_FRAC = 0.5
 LSF_CHANNELS = (
@@ -156,6 +158,9 @@ class SkyDecomp:
         lsf_sigma: np.ndarray | float = 0.5,
         n_spline_knots: int = 25,
         base_dir: str | Path | None = None,
+        palace_suffix: str | None = None,
+        palace_oh_suffix: str | None = None,
+        palace_diffuse_suffix: str | None = None,
         o2_min_valid_frac: float = O2_MIN_VALID_FRAC,
         moon_smooth_lambda: float = 1e-3,
         moon_interline_boost: float = 0.0,
@@ -175,6 +180,9 @@ class SkyDecomp:
         self.base_dir = (
             Path(base_dir).resolve() if base_dir is not None else Path(__file__).resolve().parent.parent
         )
+        self.palace_suffix = self._validate_palace_suffix(palace_suffix)
+        self.palace_oh_suffix = self._validate_palace_suffix(palace_oh_suffix)
+        self.palace_diffuse_suffix = self._validate_palace_suffix(palace_diffuse_suffix)
         self.pmd_dir = self.base_dir / "palace" / "PMD"
         self.solar_path = self.base_dir / "Spectre_HR_LATMOS_Meftah_V1_350_1000nm.txt"
 
@@ -735,10 +743,21 @@ class SkyDecomp:
     def _build_diffuse(self) -> tuple[np.ndarray, list[str]]:
         ref = Table.read(self._pmd_path("pmd_refcont.dat"), format="ascii")
         lam_ref = np.asarray(ref["lam"], float) * 1e4
-
-        self.vector_ho2 = np.nan_to_num(np.interp(self.wave, lam_ref, np.asarray(ref["fcHO2"], float)), nan=0.0, posinf=0.0, neginf=0.0)
-        self.vector_feo = np.nan_to_num(np.interp(self.wave, lam_ref, np.asarray(ref["fcFeO"], float)), nan=0.0, posinf=0.0, neginf=0.0)
-        self.vector_o2ac = np.nan_to_num(np.interp(self.wave, lam_ref, np.asarray(ref["fcO2Ac"], float)), nan=0.0, posinf=0.0, neginf=0.0)
+        exact_native_grid = (
+            lam_ref.shape == self.wave.shape
+            and np.max(np.abs(lam_ref - self.wave)) <= 1.0e-10
+        )
+        if exact_native_grid:
+            vectors = [np.asarray(ref[name], float) for name in ("fcHO2", "fcFeO", "fcO2Ac")]
+        else:
+            vectors = [
+                np.interp(self.wave, lam_ref, np.asarray(ref[name], float))
+                for name in ("fcHO2", "fcFeO", "fcO2Ac")
+            ]
+        self.vector_ho2, self.vector_feo, self.vector_o2ac = [
+            np.nan_to_num(vector, nan=0.0, posinf=0.0, neginf=0.0)
+            for vector in vectors
+        ]
 
         matrix = np.vstack([self.vector_ho2, self.vector_feo, self.vector_o2ac])
         return matrix, ["HO2", "FeO", "O2Ac"]
@@ -1128,7 +1147,35 @@ class SkyDecomp:
         return out
 
     def _pmd_path(self, name: str) -> Path:
+        suffix = self.palace_suffix
+        if name == "pmd_popmodel_OH.dat" and self.palace_oh_suffix is not None:
+            suffix = self.palace_oh_suffix
+        elif name == "pmd_refcont.dat" and self.palace_diffuse_suffix is not None:
+            suffix = self.palace_diffuse_suffix
+        if suffix is not None and name in SUFFIXED_PMD_TABLES:
+            path = Path(name)
+            name = f"{path.stem}{suffix}{path.suffix}"
         return self._require_path(self.pmd_dir / name)
+
+    @staticmethod
+    def _validate_palace_suffix(suffix: str | None) -> str | None:
+        if suffix is None:
+            return None
+        if not isinstance(suffix, str):
+            raise TypeError("palace_suffix must be a string or None")
+
+        if not suffix:
+            raise ValueError("palace_suffix must not be empty")
+        if suffix.endswith(".dat"):
+            raise ValueError("palace_suffix must not include the .dat extension")
+        if (
+            re.fullmatch(r"[A-Za-z0-9._-]+", suffix) is None
+            or re.search(r"[A-Za-z0-9]", suffix) is None
+        ):
+            raise ValueError(
+                "palace_suffix must contain only letters, digits, '.', '_', or '-'"
+            )
+        return suffix
 
     @staticmethod
     def _require_path(path: Path) -> Path:
@@ -1144,6 +1191,9 @@ def reconstruct_component_spectra(
     *,
     n_spline_knots: int = 25,
     base_dir: str | Path | None = None,
+    palace_suffix: str | None = None,
+    palace_oh_suffix: str | None = None,
+    palace_diffuse_suffix: str | None = None,
     o2_vector: np.ndarray | None = None,
     moon_interline_boost: float = 0.0,
     moon_interline_red_min: float = 7454.0,
@@ -1164,6 +1214,16 @@ def reconstruct_component_spectra(
         Number of interior moon B-spline knots.
     base_dir
         Root path containing PALACE/PMD and solar reference files.
+    palace_suffix
+        Optional suffix selecting versioned ``pmd_popmodel_OH`` and
+        ``pmd_refcont`` tables. For example, ``"_adam_v1"`` selects
+        ``pmd_popmodel_OH_adam_v1.dat`` and ``pmd_refcont_adam_v1.dat``.
+    palace_oh_suffix
+        Optional exact suffix overriding ``palace_suffix`` for
+        ``pmd_popmodel_OH`` only.
+    palace_diffuse_suffix
+        Optional exact suffix overriding ``palace_suffix`` for
+        ``pmd_refcont`` only.
     o2_vector
         Optional precomputed O2 template on `wave`. If omitted, O2 is set to zero.
     moon_interline_boost
@@ -1190,6 +1250,9 @@ def reconstruct_component_spectra(
         lsf_sigma=lsf_sigma,
         n_spline_knots=n_spline_knots,
         base_dir=base_dir,
+        palace_suffix=palace_suffix,
+        palace_oh_suffix=palace_oh_suffix,
+        palace_diffuse_suffix=palace_diffuse_suffix,
         moon_interline_boost=moon_interline_boost,
         moon_interline_red_min=moon_interline_red_min,
         moon_interline_exclusion_a=moon_interline_exclusion_a,

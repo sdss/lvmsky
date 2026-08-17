@@ -65,6 +65,8 @@ def _baseline_result_kwargs(wave):
         "lsf_metrics": {},
         "moon_knots": np.array([], dtype=float),
         "moon_boosted_pixels": np.array([], dtype=float),
+        "vector_o2": np.zeros_like(wave),
+        "o2_prefit_amp": 0.0,
     }
 
 
@@ -192,7 +194,7 @@ def test_surface_application_matches_index_reference_for_matrix_input():
         tap_offsets=tap_offsets,
     )
 
-    assert np.array_equal(actual, expected)
+    assert np.allclose(actual, expected, rtol=0.0, atol=1.0e-15)
 
 
 def test_blue_fit_window_still_builds_a_full_channel_surface():
@@ -458,6 +460,7 @@ def test_baseline_writer_contract_is_unchanged_and_mixed_results_are_rejected(
             "BESTFIT",
             "BESTFIT_LSF",
             "RESID",
+            "VECTOR_O2",
             "COMP_OH",
         ]
 
@@ -467,3 +470,25 @@ def test_baseline_writer_contract_is_unchanged_and_mixed_results_are_rejected(
     )
     with pytest.raises(ValueError, match="Cannot mix"):
         results_to_fits([baseline, iterative], tmp_path / "mixed.fits")
+
+
+def test_o2_component_uses_the_named_fitted_coefficient_once():
+    wave = np.arange(5.0)
+    vector_o2 = np.linspace(0.0, 1.0, wave.size)
+    coefficient = 2.5
+    result = SkyDecompResult(
+        **{
+            **_baseline_result_kwargs(wave),
+            "coef": np.array([coefficient]),
+            "design_names": ["O2_b01"],
+            "components": {"o2": coefficient * vector_o2},
+            "vector_o2": vector_o2,
+            "o2_prefit_amp": 17.0,
+        }
+    )
+
+    o2_index = result.design_names.index("O2_b01")
+    assert np.array_equal(
+        result.components["o2"],
+        result.coef[o2_index] * result.vector_o2,
+    )

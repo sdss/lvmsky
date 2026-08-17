@@ -1,0 +1,1232 @@
+{
+  "schema_version": 1,
+  "description": "LSFSurfaceIterative controlled N=5 golden master",
+  "input": {
+    "data_path": "lvmsframe_median_stack_1.2.1_every10.fits",
+    "input_hdus": [
+      "PRIMARY",
+      "WAVE",
+      "FLUX_SCI",
+      "FLUX_SKY_NEAR",
+      "FLUX_SKY_FAR",
+      "FLUX_SCI_NOSKY",
+      "LSF_SCI",
+      "LSF_SKY_NEAR",
+      "LSF_SKY_FAR",
+      "META"
+    ],
+    "row": 837,
+    "wave_extension": "WAVE",
+    "flux_hdu": "FLUX_SCI",
+    "flux_scale": 100000000000000.0,
+    "ivar": "float64 ones on the unchanged native wavelength grid",
+    "wave_n": 12401,
+    "wave_min": 3600.0,
+    "wave_max": 9799.9990234375,
+    "wave_dtype": "float64",
+    "flux_dtype": "float64"
+  },
+  "model": {
+    "base_dir": ".",
+    "kwargs": {
+      "lsf_sigma": 0.5,
+      "moon_smooth_lambda": 0.1,
+      "moon_interline_boost": 0.0
+    },
+    "config": {
+      "line_weight": 0.0005,
+      "skyline_cumulative_fraction": 0.99,
+      "skyline_half_width_angstrom": 2.0,
+      "huber_transition_sigma": 3.0,
+      "n_refinement_cycles": 5,
+      "n_basis": 6,
+      "degree": 3,
+      "roughness_fraction": 0.01,
+      "fallback_prior_fraction": 0.0001,
+      "information_prior_max_boost": 50.0,
+      "background_degree": 3,
+      "blue_fit_lower": 5500.0
+    }
+  },
+  "source_hashes": {
+    "lvmsframe_median_stack_1.2.1_every10.fits": "19493035b04c41b665192938b0c7f873fb507fd82447530fcdccb73d0aebfbc7",
+    "Spectre_HR_LATMOS_Meftah_V1_350_1000nm.txt": "d141e880a3486c039610bcd8de2b6b08930796de6588857ba643c493fbd687bd",
+    "palace/PMD/pmd_popmodel_OH.dat": "2210a90e263e7222cf9e3a18ea33c3b6b5081a0e8ecccc0dacbf6984d9a62de6",
+    "palace/PMD/pmd_refcont.dat": "6377da7bb40b003f7305d080c66dff4fa6785b3ddd24eb5acc7848838ed62fdc",
+    "palace/PMD/pmd_intdata_atom.dat": "a208957dd86ca8691672e509352538acca120408c3e7dd893b74097c3cf6be6d",
+    "palace/PMD/pmd_intmodel_Orc.dat": "587838718c946667ac0faf903f4a725bc777ef9460cf91a557ec77c39b9c3277",
+    "palace/PMD/pmd_popmodel_O2.dat": "147c0ae244bf6af3c8c70d4b889857651a9956384e4436b0892e3664691701cb"
+  },
+  "production_source_hashes_at_generation": {
+    "sky_decomp/fit.py": "4c792b93222c8526629311b27c3cf758399f9ed24ae5dce8cf2718ac5d55b38c",
+    "sky_decomp/lsf_surface_iterative.py": "4ef304914e1d20c524c6a562e8dd4c80ea835f21da4e633b4e4485bb4d8d039d",
+    "decompose_parallel.py": "8555e8e88a73e147da3e3e383c7d41e07daa80a8a2ad3de95b6ff7781fd19af3"
+  },
+  "fixture": {
+    "path": "sky_decomp/tests/data/lsf_surface_iterative_row837_n5_golden.npz",
+    "sha256": "3d6db2a2f010768b71af0d2d0be3a02e7015a0e611b51c9b7bc0155ff9a9f8e5",
+    "arrays": {
+      "bestfit": {
+        "shape": [
+          12401
+        ],
+        "dtype": "float64"
+      },
+      "bestfit_lsf": {
+        "shape": [
+          12401
+        ],
+        "dtype": "float64"
+      },
+      "coef": {
+        "shape": [
+          442
+        ],
+        "dtype": "float64"
+      },
+      "component_atom": {
+        "shape": [
+          12401
+        ],
+        "dtype": "float64"
+      },
+      "component_diffuse": {
+        "shape": [
+          12401
+        ],
+        "dtype": "float64"
+      },
+      "component_feo": {
+        "shape": [
+          12401
+        ],
+        "dtype": "float64"
+      },
+      "component_ho2": {
+        "shape": [
+          12401
+        ],
+        "dtype": "float64"
+      },
+      "component_moon": {
+        "shape": [
+          12401
+        ],
+        "dtype": "float64"
+      },
+      "component_o2": {
+        "shape": [
+          12401
+        ],
+        "dtype": "float64"
+      },
+      "component_o2ac": {
+        "shape": [
+          12401
+        ],
+        "dtype": "float64"
+      },
+      "component_oh": {
+        "shape": [
+          12401
+        ],
+        "dtype": "float64"
+      },
+      "component_orc": {
+        "shape": [
+          12401
+        ],
+        "dtype": "float64"
+      },
+      "continuum_weights": {
+        "shape": [
+          12401
+        ],
+        "dtype": "float64"
+      },
+      "design_names": {
+        "shape": [
+          442
+        ],
+        "dtype": "<U15"
+      },
+      "final_continuum": {
+        "shape": [
+          12401
+        ],
+        "dtype": "float64"
+      },
+      "final_line_model": {
+        "shape": [
+          12401
+        ],
+        "dtype": "float64"
+      },
+      "flux": {
+        "shape": [
+          12401
+        ],
+        "dtype": "float64"
+      },
+      "ivar": {
+        "shape": [
+          12401
+        ],
+        "dtype": "float64"
+      },
+      "lsf_coefficient_B": {
+        "shape": [
+          11,
+          1
+        ],
+        "dtype": "float64"
+      },
+      "lsf_coefficient_R": {
+        "shape": [
+          11,
+          6
+        ],
+        "dtype": "float64"
+      },
+      "lsf_coefficient_Z": {
+        "shape": [
+          11,
+          6
+        ],
+        "dtype": "float64"
+      },
+      "lsf_kernel_B": {
+        "shape": [
+          11
+        ],
+        "dtype": "float64"
+      },
+      "lsf_kernel_R": {
+        "shape": [
+          11
+        ],
+        "dtype": "float64"
+      },
+      "lsf_kernel_Z": {
+        "shape": [
+          11
+        ],
+        "dtype": "float64"
+      },
+      "lsf_knots_B": {
+        "shape": [
+          2
+        ],
+        "dtype": "float64"
+      },
+      "lsf_knots_R": {
+        "shape": [
+          10
+        ],
+        "dtype": "float64"
+      },
+      "lsf_knots_Z": {
+        "shape": [
+          10
+        ],
+        "dtype": "float64"
+      },
+      "lsf_surface": {
+        "shape": [
+          12401,
+          11
+        ],
+        "dtype": "float64"
+      },
+      "moon_boosted_pixels": {
+        "shape": [
+          0
+        ],
+        "dtype": "float64"
+      },
+      "moon_knots": {
+        "shape": [
+          25
+        ],
+        "dtype": "float64"
+      },
+      "resid": {
+        "shape": [
+          12401
+        ],
+        "dtype": "float64"
+      },
+      "skyline_mask": {
+        "shape": [
+          12401
+        ],
+        "dtype": "bool"
+      },
+      "tap_offsets": {
+        "shape": [
+          11
+        ],
+        "dtype": "int64"
+      },
+      "wave": {
+        "shape": [
+          12401
+        ],
+        "dtype": "float64"
+      }
+    }
+  },
+  "public_contract": {
+    "baseline_result_fields": [
+      "coef",
+      "bestfit",
+      "resid",
+      "resid_level",
+      "fit_status",
+      "fit_summary",
+      "reduced_chi2",
+      "fit_elapsed_sec",
+      "components",
+      "design_names",
+      "t_o2",
+      "t_o2_err",
+      "r2",
+      "rms_resid",
+      "peak_memory_mb",
+      "o2_fit_status",
+      "o2_fit_summary",
+      "o2_fit_elapsed_sec",
+      "o2_valid_frac",
+      "lsf_kernels",
+      "lsf_metrics",
+      "bestfit_lsf",
+      "moon_knots",
+      "moon_boosted_pixels",
+      "vector_o2",
+      "o2_prefit_amp"
+    ],
+    "iterative_result_fields": [
+      "coef",
+      "bestfit",
+      "resid",
+      "resid_level",
+      "fit_status",
+      "fit_summary",
+      "reduced_chi2",
+      "fit_elapsed_sec",
+      "components",
+      "design_names",
+      "t_o2",
+      "t_o2_err",
+      "r2",
+      "rms_resid",
+      "peak_memory_mb",
+      "o2_fit_status",
+      "o2_fit_summary",
+      "o2_fit_elapsed_sec",
+      "o2_valid_frac",
+      "lsf_kernels",
+      "lsf_metrics",
+      "bestfit_lsf",
+      "moon_knots",
+      "moon_boosted_pixels",
+      "vector_o2",
+      "o2_prefit_amp",
+      "lsf_state"
+    ],
+    "design_names": [
+      "OH_000",
+      "OH_001",
+      "OH_002",
+      "OH_003",
+      "OH_004",
+      "OH_005",
+      "OH_006",
+      "OH_007",
+      "OH_008",
+      "OH_009",
+      "OH_010",
+      "OH_011",
+      "OH_012",
+      "OH_013",
+      "OH_014",
+      "OH_015",
+      "OH_016",
+      "OH_017",
+      "OH_018",
+      "OH_019",
+      "OH_020",
+      "OH_021",
+      "OH_022",
+      "OH_023",
+      "OH_024",
+      "OH_025",
+      "OH_026",
+      "OH_027",
+      "OH_028",
+      "OH_029",
+      "OH_030",
+      "OH_031",
+      "OH_032",
+      "OH_033",
+      "OH_034",
+      "OH_035",
+      "OH_036",
+      "OH_037",
+      "OH_038",
+      "OH_039",
+      "OH_040",
+      "OH_041",
+      "OH_042",
+      "OH_043",
+      "OH_044",
+      "OH_045",
+      "OH_046",
+      "OH_047",
+      "OH_048",
+      "OH_049",
+      "OH_050",
+      "OH_051",
+      "OH_052",
+      "OH_053",
+      "OH_054",
+      "OH_055",
+      "OH_056",
+      "OH_057",
+      "OH_058",
+      "OH_059",
+      "OH_060",
+      "OH_061",
+      "OH_062",
+      "OH_063",
+      "OH_064",
+      "OH_065",
+      "OH_066",
+      "OH_067",
+      "OH_068",
+      "OH_069",
+      "OH_070",
+      "OH_071",
+      "OH_072",
+      "OH_073",
+      "OH_074",
+      "OH_075",
+      "OH_076",
+      "OH_077",
+      "OH_078",
+      "OH_079",
+      "OH_080",
+      "OH_081",
+      "OH_082",
+      "OH_083",
+      "OH_084",
+      "OH_085",
+      "OH_086",
+      "OH_087",
+      "OH_088",
+      "OH_089",
+      "OH_090",
+      "OH_091",
+      "OH_092",
+      "OH_093",
+      "OH_094",
+      "OH_095",
+      "OH_096",
+      "OH_097",
+      "OH_098",
+      "OH_099",
+      "OH_100",
+      "OH_101",
+      "OH_102",
+      "OH_103",
+      "OH_104",
+      "OH_105",
+      "OH_106",
+      "OH_107",
+      "OH_108",
+      "OH_109",
+      "OH_110",
+      "OH_111",
+      "OH_112",
+      "OH_113",
+      "OH_114",
+      "OH_115",
+      "OH_116",
+      "OH_117",
+      "OH_118",
+      "OH_119",
+      "OH_120",
+      "OH_121",
+      "OH_122",
+      "OH_123",
+      "OH_124",
+      "OH_125",
+      "OH_126",
+      "OH_127",
+      "OH_128",
+      "OH_129",
+      "OH_130",
+      "OH_131",
+      "OH_132",
+      "OH_133",
+      "OH_134",
+      "OH_135",
+      "OH_136",
+      "OH_137",
+      "OH_138",
+      "OH_139",
+      "OH_140",
+      "OH_141",
+      "OH_142",
+      "OH_143",
+      "OH_144",
+      "OH_145",
+      "OH_146",
+      "OH_147",
+      "OH_148",
+      "OH_149",
+      "OH_150",
+      "OH_151",
+      "OH_152",
+      "OH_153",
+      "OH_154",
+      "OH_155",
+      "OH_156",
+      "OH_157",
+      "OH_158",
+      "OH_159",
+      "OH_160",
+      "OH_161",
+      "OH_162",
+      "OH_163",
+      "OH_164",
+      "OH_165",
+      "OH_166",
+      "OH_167",
+      "OH_168",
+      "OH_169",
+      "OH_170",
+      "OH_171",
+      "OH_172",
+      "OH_173",
+      "OH_174",
+      "OH_175",
+      "OH_176",
+      "OH_177",
+      "OH_178",
+      "OH_179",
+      "OH_180",
+      "OH_181",
+      "OH_182",
+      "OH_183",
+      "OH_184",
+      "OH_185",
+      "OH_186",
+      "OH_187",
+      "OH_188",
+      "OH_189",
+      "OH_190",
+      "OH_191",
+      "OH_192",
+      "OH_193",
+      "OH_194",
+      "OH_195",
+      "OH_196",
+      "OH_197",
+      "OH_198",
+      "OH_199",
+      "OH_200",
+      "OH_201",
+      "OH_202",
+      "OH_203",
+      "OH_204",
+      "OH_205",
+      "OH_206",
+      "OH_207",
+      "OH_208",
+      "OH_209",
+      "OH_210",
+      "OH_211",
+      "OH_212",
+      "OH_213",
+      "OH_214",
+      "OH_215",
+      "OH_216",
+      "OH_217",
+      "OH_218",
+      "OH_219",
+      "OH_220",
+      "OH_221",
+      "OH_222",
+      "OH_223",
+      "OH_224",
+      "OH_225",
+      "OH_226",
+      "OH_227",
+      "OH_228",
+      "OH_229",
+      "OH_230",
+      "OH_231",
+      "OH_232",
+      "OH_233",
+      "OH_234",
+      "OH_235",
+      "OH_236",
+      "OH_237",
+      "OH_238",
+      "OH_239",
+      "OH_240",
+      "OH_241",
+      "OH_242",
+      "OH_243",
+      "OH_244",
+      "OH_245",
+      "OH_246",
+      "OH_247",
+      "OH_248",
+      "OH_249",
+      "OH_250",
+      "OH_251",
+      "OH_252",
+      "OH_253",
+      "OH_254",
+      "OH_255",
+      "OH_256",
+      "OH_257",
+      "OH_258",
+      "OH_259",
+      "OH_260",
+      "OH_261",
+      "OH_262",
+      "OH_263",
+      "OH_264",
+      "OH_265",
+      "OH_266",
+      "OH_267",
+      "OH_268",
+      "OH_269",
+      "OH_270",
+      "OH_271",
+      "OH_272",
+      "OH_273",
+      "OH_274",
+      "OH_275",
+      "OH_276",
+      "OH_277",
+      "OH_278",
+      "OH_279",
+      "OH_280",
+      "OH_281",
+      "OH_282",
+      "OH_283",
+      "OH_284",
+      "OH_285",
+      "OH_286",
+      "OH_287",
+      "OH_288",
+      "OH_289",
+      "OH_290",
+      "OH_291",
+      "OH_292",
+      "OH_293",
+      "OH_294",
+      "OH_295",
+      "OH_296",
+      "OH_297",
+      "OH_298",
+      "OH_299",
+      "OH_300",
+      "OH_301",
+      "OH_302",
+      "OH_303",
+      "OH_304",
+      "OH_305",
+      "OH_306",
+      "OH_307",
+      "OH_308",
+      "OH_309",
+      "OH_310",
+      "OH_311",
+      "OH_312",
+      "OH_313",
+      "OH_314",
+      "OH_315",
+      "OH_316",
+      "OH_317",
+      "OH_318",
+      "OH_319",
+      "OH_320",
+      "OH_321",
+      "OH_322",
+      "OH_323",
+      "OH_324",
+      "OH_325",
+      "OH_326",
+      "OH_327",
+      "OH_328",
+      "OH_329",
+      "OH_330",
+      "OH_331",
+      "OH_332",
+      "OH_333",
+      "OH_334",
+      "OH_335",
+      "OH_336",
+      "OH_337",
+      "OH_338",
+      "OH_339",
+      "OH_340",
+      "OH_341",
+      "OH_342",
+      "OH_343",
+      "OH_344",
+      "OH_345",
+      "OH_346",
+      "OH_347",
+      "OH_348",
+      "OH_349",
+      "OH_350",
+      "OH_351",
+      "OH_352",
+      "OH_353",
+      "OH_354",
+      "OH_355",
+      "OH_356",
+      "OH_357",
+      "OH_358",
+      "OH_359",
+      "OH_360",
+      "OH_361",
+      "OH_362",
+      "OH_363",
+      "OH_364",
+      "OH_365",
+      "OH_366",
+      "OH_367",
+      "OH_368",
+      "OH_369",
+      "OH_370",
+      "OH_371",
+      "OH_372",
+      "OH_373",
+      "OH_374",
+      "OH_375",
+      "OH_376",
+      "OH_377",
+      "OH_378",
+      "OH_379",
+      "OH_380",
+      "OH_381",
+      "OH_382",
+      "OH_383",
+      "OH_384",
+      "OH_385",
+      "OH_386",
+      "OH_387",
+      "OH_388",
+      "OH_389",
+      "OH_390",
+      "OH_391",
+      "OH_392",
+      "OH_393",
+      "OH_394",
+      "OH_395",
+      "OH_396",
+      "OH_397",
+      "OH_398",
+      "OH_399",
+      "OH_400",
+      "OH_401",
+      "Moon_bs00",
+      "Moon_bs01",
+      "Moon_bs02",
+      "Moon_bs03",
+      "Moon_bs04",
+      "Moon_bs05",
+      "Moon_bs06",
+      "Moon_bs07",
+      "Moon_bs08",
+      "Moon_bs09",
+      "Moon_bs10",
+      "Moon_bs11",
+      "Moon_bs12",
+      "Moon_bs13",
+      "Moon_bs14",
+      "Moon_bs15",
+      "Moon_bs16",
+      "Moon_bs17",
+      "Moon_bs18",
+      "Moon_bs19",
+      "Moon_bs20",
+      "Moon_bs21",
+      "Moon_bs22",
+      "Moon_bs23",
+      "Moon_bs24",
+      "Moon_bs25",
+      "Moon_bs26",
+      "Moon_bs27",
+      "Moon_bs28",
+      "HO2",
+      "FeO",
+      "O2Ac",
+      "ATOM_K",
+      "ATOM_N",
+      "ATOM_Na",
+      "ATOM_Og",
+      "ATOM_Or",
+      "ATOM_Orc_OI0777",
+      "ATOM_Orc_OI0845",
+      "O2_b01"
+    ]
+  },
+  "result": {
+    "fit_status": "Solved",
+    "reduced_chi2": 1.6536234176255473,
+    "r2": 0.9076956056787906,
+    "rms_resid": 1.2628081791505643,
+    "resid_level": -5.675075725475149,
+    "t_o2": 181.4182796868329,
+    "t_o2_err": 6.064065624129102,
+    "o2_fit_status": "2",
+    "o2_valid_frac": 1.0,
+    "component_names": [
+      "atom",
+      "diffuse",
+      "feo",
+      "ho2",
+      "moon",
+      "o2",
+      "o2ac",
+      "oh",
+      "orc"
+    ],
+    "lsf_kernel_names": [
+      "B",
+      "R",
+      "Z"
+    ],
+    "lsf_metrics": {
+      "B": {
+        "status": "Solved",
+        "reason": "",
+        "n_pixels": 574.0,
+        "n_valid_pixels": 574.0,
+        "n_basis": 1.0,
+        "degree": 0.0,
+        "chi2_red": 0.004862209061198654,
+        "rms_resid": 0.06881241057249769,
+        "center_pix_min": 0.0056879793429542354,
+        "center_pix_median": 0.0056879793429542354,
+        "center_pix_max": 0.0056879793429542354,
+        "center_pix": 0.0056879793429542354,
+        "sigma_pix_min": 1.2470449237349868,
+        "sigma_pix_median": 1.2470449237349868,
+        "sigma_pix_max": 1.2470449237349868,
+        "sigma_pix": 1.2470449237349868,
+        "fitted_amplitude_scale": 0.9995624421403421,
+        "model": "constant_blue_kernel",
+        "fit_lower": 5500.00048828125,
+        "fit_upper": 5786.5,
+        "knots_fixed": true,
+        "legacy_kernel_representation": "native_grid_channel_median"
+      },
+      "R": {
+        "status": "Solved",
+        "reason": "",
+        "n_pixels": 3334.0,
+        "n_valid_pixels": 3334.0,
+        "n_basis": 6.0,
+        "degree": 3.0,
+        "chi2_red": 0.31348832752548855,
+        "rms_resid": 0.5539913257760913,
+        "center_pix_min": -0.35459487132829764,
+        "center_pix_median": -0.04628780203728999,
+        "center_pix_max": 0.010858224669204962,
+        "center_pix": -0.04628780203728999,
+        "sigma_pix_min": 0.9509865168812724,
+        "sigma_pix_median": 1.0457831558351267,
+        "sigma_pix_max": 1.6666594883650716,
+        "sigma_pix": 1.0457831558351267,
+        "fitted_amplitude_scale": 1.0,
+        "model": "cubic_bspline_kernel",
+        "fit_lower": 5787.0,
+        "fit_upper": 7453.5,
+        "knots_fixed": true,
+        "legacy_kernel_representation": "native_grid_channel_median"
+      },
+      "Z": {
+        "status": "Solved",
+        "reason": "",
+        "n_pixels": 4693.0,
+        "n_valid_pixels": 4693.0,
+        "n_basis": 6.0,
+        "degree": 3.0,
+        "chi2_red": 3.9801408202341184,
+        "rms_resid": 1.9800943684742829,
+        "center_pix_min": -0.15544740580037875,
+        "center_pix_median": 0.10965381444965497,
+        "center_pix_max": 0.47006709975557354,
+        "center_pix": 0.10965381444965497,
+        "sigma_pix_min": 1.3141323557665388,
+        "sigma_pix_median": 1.3637213398590264,
+        "sigma_pix_max": 2.1678816146952173,
+        "sigma_pix": 1.3637213398590264,
+        "fitted_amplitude_scale": 1.0,
+        "model": "cubic_bspline_kernel",
+        "fit_lower": 7454.0,
+        "fit_upper": 9799.9990234375,
+        "knots_fixed": true,
+        "legacy_kernel_representation": "native_grid_channel_median"
+      }
+    }
+  },
+  "runtime_state": {
+    "channel_noise": {
+      "B": 0.17039264675339172,
+      "R": 0.06632672171935013,
+      "Z": 0.04226528655862334
+    },
+    "stage_metrics": [
+      {
+        "stage": "00_nominal_joint_seed",
+        "solver_status": "Solved",
+        "chi2_per_valid_pixel": 3.5784997432363572,
+        "rms": 1.8916922961296738,
+        "line_free_rms": 0.2729651724165692,
+        "line_free_mad": 0.11265427683368659,
+        "skyline_rms": 2.414670490196927,
+        "skyline_mad": 0.24821728298245455
+      },
+      {
+        "stage": "01_continuum",
+        "solver_status": "Solved",
+        "chi2_per_valid_pixel": 3.6768854195384306,
+        "rms": 1.9175206438363135,
+        "line_free_rms": 0.23967663127622849,
+        "line_free_mad": 0.07446437660509568,
+        "skyline_rms": 2.4501476294638818,
+        "skyline_mad": 0.10547558635698882,
+        "continuum_relative_change": 0.14685736084190293
+      },
+      {
+        "stage": "01_lsf_lines",
+        "solver_status": "Solved",
+        "chi2_per_valid_pixel": 3.1375686281368877,
+        "rms": 1.771318330548433,
+        "line_free_rms": 0.2397097118503755,
+        "line_free_mad": 0.0745225283779097,
+        "skyline_rms": 2.2621359617783376,
+        "skyline_mad": 0.0981092838999305,
+        "line_relative_change": 0.25129332267991283,
+        "lsf_relative_change": "nan",
+        "lsf_status": {
+          "B": "Solved",
+          "R": "Solved",
+          "Z": "Solved"
+        }
+      },
+      {
+        "stage": "02_continuum",
+        "solver_status": "Solved",
+        "chi2_per_valid_pixel": 3.1506517230857316,
+        "rms": 1.7750075276138215,
+        "line_free_rms": 0.289878226379953,
+        "line_free_mad": 0.12479981730949823,
+        "skyline_rms": 2.263111703882045,
+        "skyline_mad": 0.1190586509929262,
+        "continuum_relative_change": 0.06415186931384462
+      },
+      {
+        "stage": "02_lsf_lines",
+        "solver_status": "Solved",
+        "chi2_per_valid_pixel": 1.8203117231121895,
+        "rms": 1.3491892836485877,
+        "line_free_rms": 0.2898287494379836,
+        "line_free_mad": 0.1248226012407556,
+        "skyline_rms": 1.7135629803118868,
+        "skyline_mad": 0.1075011623327436,
+        "line_relative_change": 0.24308068738133515,
+        "lsf_relative_change": 0.34985054850657926,
+        "lsf_status": {
+          "B": "Solved",
+          "R": "Solved",
+          "Z": "Solved"
+        }
+      },
+      {
+        "stage": "03_continuum",
+        "solver_status": "Solved",
+        "chi2_per_valid_pixel": 1.8203499141163004,
+        "rms": 1.3492034368901897,
+        "line_free_rms": 0.2897653117881116,
+        "line_free_mad": 0.1231247008907989,
+        "skyline_rms": 1.713588181934328,
+        "skyline_mad": 0.10620593046194957,
+        "continuum_relative_change": 0.004401391182136467
+      },
+      {
+        "stage": "03_lsf_lines",
+        "solver_status": "Solved",
+        "chi2_per_valid_pixel": 1.6309630772333679,
+        "rms": 1.2770916479381453,
+        "line_free_rms": 0.28971269658081217,
+        "line_free_mad": 0.12284913496306232,
+        "skyline_rms": 1.620275233339667,
+        "skyline_mad": 0.10074669693160657,
+        "line_relative_change": 0.07541468389553949,
+        "lsf_relative_change": 0.09817840911062982,
+        "lsf_status": {
+          "B": "Solved",
+          "R": "Solved",
+          "Z": "Solved"
+        }
+      },
+      {
+        "stage": "04_continuum",
+        "solver_status": "Solved",
+        "chi2_per_valid_pixel": 1.6302370647540885,
+        "rms": 1.2768073718279076,
+        "line_free_rms": 0.28973585316677253,
+        "line_free_mad": 0.12260553544609758,
+        "skyline_rms": 1.6199044916449392,
+        "skyline_mad": 0.09966974937650287,
+        "continuum_relative_change": 0.0025414661618146095
+      },
+      {
+        "stage": "04_lsf_lines",
+        "solver_status": "Solved",
+        "chi2_per_valid_pixel": 1.6000733052949943,
+        "rms": 1.264940040197556,
+        "line_free_rms": 0.2901450804069787,
+        "line_free_mad": 0.12246912875847343,
+        "skyline_rms": 1.604489639075946,
+        "skyline_mad": 0.0989739182241178,
+        "line_relative_change": 0.02898975280865368,
+        "lsf_relative_change": 0.03513618052271538,
+        "lsf_status": {
+          "B": "Solved",
+          "R": "Solved",
+          "Z": "Solved"
+        }
+      },
+      {
+        "stage": "05_continuum",
+        "solver_status": "Solved",
+        "chi2_per_valid_pixel": 1.5999990877626145,
+        "rms": 1.2649107034738123,
+        "line_free_rms": 0.2901776119366815,
+        "line_free_mad": 0.12223851133330034,
+        "skyline_rms": 1.6044478639670832,
+        "skyline_mad": 0.09894323836124606,
+        "continuum_relative_change": 0.00048423467285478003
+      },
+      {
+        "stage": "05_lsf_lines",
+        "solver_status": "Solved",
+        "chi2_per_valid_pixel": 1.5946976350061448,
+        "rms": 1.2628133809103168,
+        "line_free_rms": 0.29044528197282843,
+        "line_free_mad": 0.12220969247115719,
+        "skyline_rms": 1.601700402702841,
+        "skyline_mad": 0.09806522707721173,
+        "line_relative_change": 0.012332351175852668,
+        "lsf_relative_change": 0.01399957919204125,
+        "lsf_status": {
+          "B": "Solved",
+          "R": "Solved",
+          "Z": "Solved"
+        }
+      },
+      {
+        "stage": "final_continuum",
+        "solver_status": "Solved",
+        "chi2_per_valid_pixel": 1.5946845770347609,
+        "rms": 1.262808210709275,
+        "line_free_rms": 0.29045436448255874,
+        "line_free_mad": 0.12207767895361336,
+        "skyline_rms": 1.6016926478449693,
+        "skyline_mad": 0.09791938074944012,
+        "continuum_relative_change": 0.0003045826637911694
+      },
+      {
+        "stage": "final_lines",
+        "solver_status": "Solved",
+        "chi2_per_valid_pixel": 1.5946844973295637,
+        "rms": 1.2628081791505643,
+        "line_free_rms": 0.2904544104784861,
+        "line_free_mad": 0.12207773780435928,
+        "skyline_rms": 1.6016926016101483,
+        "skyline_mad": 0.09785019998118522,
+        "line_relative_change": 7.002824608520914e-05
+      }
+    ]
+  },
+  "lsf_state": {
+    "degrees": {
+      "B": 0,
+      "R": 3,
+      "Z": 3
+    },
+    "channel_bounds": {
+      "B": [
+        null,
+        5787.0
+      ],
+      "R": [
+        5787.0,
+        7454.0
+      ],
+      "Z": [
+        7454.0,
+        null
+      ]
+    },
+    "config": {
+      "line_weight": 0.0005,
+      "skyline_cumulative_fraction": 0.99,
+      "skyline_half_width_angstrom": 2.0,
+      "huber_transition_sigma": 3.0,
+      "n_refinement_cycles": 5,
+      "n_basis": 6,
+      "degree": 3,
+      "roughness_fraction": 0.01,
+      "fallback_prior_fraction": 0.0001,
+      "information_prior_max_boost": 50.0,
+      "background_degree": 3,
+      "blue_fit_lower": 5500.0
+    },
+    "metrics": {
+      "B": {
+        "status": "Solved",
+        "reason": "",
+        "n_pixels": 574.0,
+        "n_valid_pixels": 574.0,
+        "n_basis": 1.0,
+        "degree": 0.0,
+        "chi2_red": 0.004862209061198654,
+        "rms_resid": 0.06881241057249769,
+        "center_pix_min": 0.0056879793429542354,
+        "center_pix_median": 0.0056879793429542354,
+        "center_pix_max": 0.0056879793429542354,
+        "center_pix": 0.0056879793429542354,
+        "sigma_pix_min": 1.2470449237349868,
+        "sigma_pix_median": 1.2470449237349868,
+        "sigma_pix_max": 1.2470449237349868,
+        "sigma_pix": 1.2470449237349868,
+        "fitted_amplitude_scale": 0.9995624421403421,
+        "model": "constant_blue_kernel",
+        "fit_lower": 5500.00048828125,
+        "fit_upper": 5786.5,
+        "knots_fixed": true
+      },
+      "R": {
+        "status": "Solved",
+        "reason": "",
+        "n_pixels": 3334.0,
+        "n_valid_pixels": 3334.0,
+        "n_basis": 6.0,
+        "degree": 3.0,
+        "chi2_red": 0.31348832752548855,
+        "rms_resid": 0.5539913257760913,
+        "center_pix_min": -0.35459487132829764,
+        "center_pix_median": -0.04628780203728999,
+        "center_pix_max": 0.010858224669204962,
+        "center_pix": -0.04628780203728999,
+        "sigma_pix_min": 0.9509865168812724,
+        "sigma_pix_median": 1.0457831558351267,
+        "sigma_pix_max": 1.6666594883650716,
+        "sigma_pix": 1.0457831558351267,
+        "fitted_amplitude_scale": 1.0,
+        "model": "cubic_bspline_kernel",
+        "fit_lower": 5787.0,
+        "fit_upper": 7453.5,
+        "knots_fixed": true
+      },
+      "Z": {
+        "status": "Solved",
+        "reason": "",
+        "n_pixels": 4693.0,
+        "n_valid_pixels": 4693.0,
+        "n_basis": 6.0,
+        "degree": 3.0,
+        "chi2_red": 3.9801408202341184,
+        "rms_resid": 1.9800943684742829,
+        "center_pix_min": -0.15544740580037875,
+        "center_pix_median": 0.10965381444965497,
+        "center_pix_max": 0.47006709975557354,
+        "center_pix": 0.10965381444965497,
+        "sigma_pix_min": 1.3141323557665388,
+        "sigma_pix_median": 1.3637213398590264,
+        "sigma_pix_max": 2.1678816146952173,
+        "sigma_pix": 1.3637213398590264,
+        "fitted_amplitude_scale": 1.0,
+        "model": "cubic_bspline_kernel",
+        "fit_lower": 7454.0,
+        "fit_upper": 9799.9990234375,
+        "knots_fixed": true
+      }
+    },
+    "requested_cycles": 5,
+    "completed_cycles": 5,
+    "wave_n": 12401,
+    "wave_min": 3600.0,
+    "wave_max": 9799.9990234375,
+    "wave_sha256": "78d6785c2ecda6afb2b1d4d02bfc2a28c9803dfca7477ad407d946c46e9e3dd1",
+    "fit_status": "Solved",
+    "failure_reason": "",
+    "final_continuum_status": "Solved",
+    "final_line_status": "Solved",
+    "knot_strategy": "first_cycle_adaptive_then_fixed",
+    "legacy_kernel_representation": "native_grid_channel_median",
+    "schema_version": 1
+  },
+  "array_keys": [
+    "bestfit",
+    "bestfit_lsf",
+    "coef",
+    "component_atom",
+    "component_diffuse",
+    "component_feo",
+    "component_ho2",
+    "component_moon",
+    "component_o2",
+    "component_o2ac",
+    "component_oh",
+    "component_orc",
+    "continuum_weights",
+    "design_names",
+    "final_continuum",
+    "final_line_model",
+    "flux",
+    "ivar",
+    "lsf_coefficient_B",
+    "lsf_coefficient_R",
+    "lsf_coefficient_Z",
+    "lsf_kernel_B",
+    "lsf_kernel_R",
+    "lsf_kernel_Z",
+    "lsf_knots_B",
+    "lsf_knots_R",
+    "lsf_knots_Z",
+    "lsf_surface",
+    "moon_boosted_pixels",
+    "moon_knots",
+    "resid",
+    "skyline_mask",
+    "tap_offsets",
+    "wave"
+  ],
+  "excluded": [
+    "fit_elapsed_sec",
+    "peak_memory_mb",
+    "o2_fit_elapsed_sec",
+    "fit_summary",
+    "o2_fit_summary",
+    "per-channel runtime_sec",
+    "stage runtime/elapsed fields"
+  ],
+  "comparison": {
+    "rtol": 2e-9,
+    "atol": 1e-9
+  }
+}

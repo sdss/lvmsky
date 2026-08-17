@@ -19,7 +19,7 @@ import numpy as np
 import scipy.sparse as sp
 from scipy.interpolate import BSpline
 
-from ._lsf_surface_fits import CHANNEL_NAMES, METRIC_COLUMNS, STATE_CONFIG_COLUMNS
+from .result_io import CHANNEL_NAMES, METRIC_COLUMNS, STATE_CONFIG_COLUMNS
 from .fit import LSF_CHANNELS, LSF_KERNEL_SIZE, SkyDecomp, SkyDecompResult
 
 
@@ -1041,98 +1041,14 @@ def apply_lsf_channelwise(
     return applied.reshape(original_shape)
 
 
-def _text_value(value: object) -> str:
-    return value.decode().strip() if isinstance(value, bytes) else str(value).strip()
-
-
 def load_lsf_surface_state(
     filename: str | Path,
     spectrum_index: int = 0,
 ) -> LSFSurfaceState:
-    """Load one compact LSF state from an extended output FITS."""
-    from astropy.io import fits
+    """Load one compact LSF state through the shared result I/O layer."""
+    from .result_io import load_lsf_surface_state as load_state
 
-    with fits.open(filename, memmap=False) as hdul:
-        for name in ("LSF_COEF", "LSF_KNOTS", "LSF_META"):
-            if name not in hdul:
-                raise KeyError(f"Missing {name} extension in {filename}")
-        coefficient_cube = np.asarray(hdul["LSF_COEF"].data, dtype=float)
-        knot_cube = np.asarray(hdul["LSF_KNOTS"].data, dtype=float)
-        meta = hdul["LSF_META"].data
-
-    if coefficient_cube.ndim != 4 or knot_cube.ndim != 3:
-        raise ValueError("Stored LSF coefficient or knot arrays have invalid shapes")
-    if spectrum_index < 0 or spectrum_index >= coefficient_cube.shape[0]:
-        raise IndexError("spectrum_index is outside the stored LSF array")
-    rows = meta[meta["spectrum_index"] == spectrum_index]
-    if len(rows) != len(CHANNEL_NAMES):
-        raise ValueError("LSF_META does not contain exactly one row per channel")
-    if not np.all(np.asarray(rows["available"], dtype=bool)):
-        raise ValueError("No fitted LSF state is available for this spectrum")
-
-    coefficients: dict[str, np.ndarray] = {}
-    knots: dict[str, np.ndarray] = {}
-    degrees: dict[str, int] = {}
-    bounds: dict[str, tuple[float | None, float | None]] = {}
-    metrics: dict[str, dict[str, object]] = {}
-    first_row = rows[0]
-    config = {
-        name: converter(first_row[column])
-        for name, column, converter in STATE_CONFIG_COLUMNS
-    }
-    tap_offsets = np.asarray(first_row["tap_offsets"], dtype=int)
-    if tap_offsets.ndim != 1 or tap_offsets.size != coefficient_cube.shape[2]:
-        raise ValueError("Stored tap offsets do not match LSF_COEF")
-    schema_version = int(first_row["schema_version"])
-    if schema_version != LSF_STATE_SCHEMA_VERSION:
-        raise ValueError(f"Unsupported LSF state schema version: {schema_version}")
-    channel_to_index = {name: index for index, name in enumerate(CHANNEL_NAMES)}
-    for row in rows:
-        channel = _text_value(row["channel"])
-        if channel not in channel_to_index or channel in coefficients:
-            raise ValueError(f"Invalid or duplicate LSF channel row: {channel}")
-        if not np.array_equal(np.asarray(row["tap_offsets"], dtype=int), tap_offsets):
-            raise ValueError("Stored LSF tap offsets differ between channels")
-        channel_index = channel_to_index[channel]
-        n_basis = int(row["n_basis"])
-        n_knots = int(row["n_knots"])
-        if n_basis < 1 or n_knots < 2:
-            raise ValueError(f"Invalid stored LSF dimensions for channel {channel}")
-        coefficients[channel] = coefficient_cube[spectrum_index, channel_index, :, :n_basis].copy()
-        knots[channel] = knot_cube[spectrum_index, channel_index, :n_knots].copy()
-        degrees[channel] = int(row["degree"])
-        lower_value = float(row["lower"])
-        upper_value = float(row["upper"])
-        bounds[channel] = (
-            None if np.isnan(lower_value) else lower_value,
-            None if np.isnan(upper_value) else upper_value,
-        )
-        metrics[channel] = {
-            name: _text_value(row[name]) if converter is str else converter(row[name])
-            for name, _, converter in METRIC_COLUMNS
-        }
-    return LSFSurfaceState(
-        coefficients=coefficients,
-        knot_vectors=knots,
-        degrees=degrees,
-        channel_bounds=bounds,
-        tap_offsets=tap_offsets,
-        config=config,
-        metrics=metrics,
-        requested_cycles=int(first_row["requested_cycles"]),
-        completed_cycles=int(first_row["completed_cycles"]),
-        wave_n=int(first_row["wave_n"]),
-        wave_min=float(first_row["wave_min"]),
-        wave_max=float(first_row["wave_max"]),
-        wave_sha256=_text_value(first_row["wave_sha256"]),
-        fit_status=_text_value(first_row["fit_status"]),
-        failure_reason=_text_value(first_row["failure_reason"]),
-        final_continuum_status=_text_value(first_row["final_continuum_status"]),
-        final_line_status=_text_value(first_row["final_line_status"]),
-        knot_strategy=_text_value(first_row["knot_strategy"]),
-        legacy_kernel_representation=_text_value(first_row["legacy_kernel_representation"]),
-        schema_version=schema_version,
-    )
+    return load_state(filename, spectrum_index=spectrum_index)
 
 
 def _nominal_lsf_state(
@@ -1334,6 +1250,13 @@ class SkyDecompLSFSurfaceIterative(SkyDecomp):
 
     def _line_source(self, line_coefficient: np.ndarray) -> np.ndarray:
         return np.vstack(self._line_stick_matrices()).T @ line_coefficient
+
+    def _continuum_from_components(
+        self,
+        components: dict[str, np.ndarray],
+    ) -> np.ndarray:
+        """Return the additive continuum represented by the public components."""
+        return components["moon"] + components["diffuse"]
 
     @staticmethod
     def _relative_change(new: np.ndarray, old: np.ndarray) -> float:
@@ -1677,7 +1600,7 @@ class SkyDecompLSFSurfaceIterative(SkyDecomp):
         # matches the O2 basis used to build `components['o2']`.
         if run.matrices["o2"].shape[0] == 1:
             self.vector_o2 = run.matrices["o2"][0].copy()
-        continuum = components["moon"] + components["diffuse"]
+        continuum = self._continuum_from_components(components)
         line_model = (
             components["oh"]
             + components["atom"]

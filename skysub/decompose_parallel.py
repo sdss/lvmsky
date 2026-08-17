@@ -33,8 +33,12 @@ import multiprocessing as mp
 
 import numpy as np
 from astropy.io import fits
-from astropy.table import Table
 from tqdm import tqdm
+
+try:
+    from sky_decomp.result_io import results_to_fits
+except ModuleNotFoundError:
+    from skysub.sky_decomp.result_io import results_to_fits
 
 try:
     from threadpoolctl import threadpool_limits
@@ -69,8 +73,17 @@ _WORKER_DECOMPOSER = None
 _WORKER_FACTOR = 1.0
 _WORKER_HDU = None
 _WORKER_FLUX = {}
+_WORKER_LSF = {}
+_WORKER_META = None
 _WORKER_PROGRESS_QUEUE = None
 _WORKER_FIT_MODEL = "baseline"
+_WORKER_EXPOSURE_SECONDS = 900.0
+
+FIT_MODEL_SUFFIXES = {
+    "baseline": "",
+    "lsf-surface-iterative": "_lsf_surface_iterative",
+    "moon-zodi-lsf-surface-iterative": "_moon_zodi_lsf_surface_iterative",
+}
 
 
 def init_worker(
@@ -85,6 +98,11 @@ def init_worker(
     worker_counter=None,
     pin_cpu=False,
     diagnose_threads=False,
+    palace_suffix=None,
+    palace_oh_suffix=None,
+    palace_diffuse_suffix=None,
+    exposure_seconds=900.0,
+    moon_zodi_data_root=None,
 ):
     """Initialise one SkyDecomp instance per worker process."""
     global \
@@ -92,8 +110,11 @@ def init_worker(
         _WORKER_FACTOR, \
         _WORKER_HDU, \
         _WORKER_FLUX, \
+        _WORKER_LSF, \
+        _WORKER_META, \
         _WORKER_PROGRESS_QUEUE, \
-        _WORKER_FIT_MODEL
+        _WORKER_FIT_MODEL, \
+        _WORKER_EXPOSURE_SECONDS
 
     _clamp_native_threads(1)
 
@@ -113,6 +134,7 @@ def init_worker(
 
     _WORKER_FACTOR = float(factor)
     _WORKER_FIT_MODEL = fit_model
+    _WORKER_EXPOSURE_SECONDS = float(exposure_seconds)
     # Keep worker-local memmapped access to flux tables to avoid large IPC payloads.
     _WORKER_HDU = fits.open(data_file, memmap=True)
     _WORKER_PROGRESS_QUEUE = progress_queue
@@ -121,6 +143,16 @@ def init_worker(
         "sky1": np.asarray(_WORKER_HDU["FLUX_SKY_NEAR"].data),
         "sky2": np.asarray(_WORKER_HDU["FLUX_SKY_FAR"].data),
     }
+    if fit_model == "moon-zodi-lsf-surface-iterative":
+        _WORKER_LSF = {
+            "sci": np.asarray(_WORKER_HDU["LSF_SCI"].data),
+            "sky1": np.asarray(_WORKER_HDU["LSF_SKY_NEAR"].data),
+            "sky2": np.asarray(_WORKER_HDU["LSF_SKY_FAR"].data),
+        }
+        _WORKER_META = _WORKER_HDU["META"].data
+    else:
+        _WORKER_LSF = {}
+        _WORKER_META = None
     if fit_model == "baseline":
         from sky_decomp.fit import SkyDecomp
 
@@ -128,6 +160,9 @@ def init_worker(
             wave,
             lsf_sigma=lsf_sigma,
             base_dir=base_dir,
+            palace_suffix=palace_suffix,
+            palace_oh_suffix=palace_oh_suffix,
+            palace_diffuse_suffix=palace_diffuse_suffix,
             moon_smooth_lambda=0.1,
             moon_interline_boost=10000.0,
             moon_interline_red_min=6000.0,
@@ -144,8 +179,36 @@ def init_worker(
             wave,
             lsf_sigma=lsf_sigma,
             base_dir=base_dir,
+            palace_suffix=palace_suffix,
+            palace_oh_suffix=palace_oh_suffix,
+            palace_diffuse_suffix=palace_diffuse_suffix,
             moon_smooth_lambda=0.1,
             moon_interline_boost=0.0,
+            config=LSFSurfaceIterativeConfig(
+                n_refinement_cycles=n_refinement_cycles,
+            ),
+        )
+    elif fit_model == "moon-zodi-lsf-surface-iterative":
+        from sky_decomp.lsf_surface_iterative import LSFSurfaceIterativeConfig
+        from sky_decomp.moon_zodi_lsf_surface_iterative import (
+            SkyDecompMoonZodiLSFSurfaceIterative,
+        )
+        from sky_decomp.moon_zodi_model import DEFAULT_DATA_ROOT
+
+        _WORKER_DECOMPOSER = SkyDecompMoonZodiLSFSurfaceIterative(
+            wave,
+            lsf_sigma=lsf_sigma,
+            data_root=(
+                DEFAULT_DATA_ROOT
+                if moon_zodi_data_root is None
+                else moon_zodi_data_root
+            ),
+            palace_suffix=palace_suffix,
+            palace_oh_suffix=palace_oh_suffix,
+            palace_diffuse_suffix=palace_diffuse_suffix,
+            moon_smooth_lambda=0.1,
+            moon_interline_boost=0.0,
+            physical_to_fit_flux_scale=float(factor),
             config=LSFSurfaceIterativeConfig(
                 n_refinement_cycles=n_refinement_cycles,
             ),
@@ -189,6 +252,44 @@ def _report_thread_diagnostics():
     print("\n".join(lines), flush=True)
 
 
+def _text_value(value):
+    return value.decode().strip() if isinstance(value, bytes) else str(value).strip()
+
+
+def _moon_zodi_observation(kind, row_index):
+    from sky_decomp.moon_zodi_model import MoonZodiObservation
+
+    role_contract = {
+        "sci": ("sci", "sci_ra", "sci_dec"),
+        "sky1": ("sky_near", "sky_near_ra", "sky_near_dec"),
+        "sky2": ("sky_far", "sky_far_ra", "sky_far_dec"),
+    }
+    role, ra_column, dec_column = role_contract[kind]
+    row = _WORKER_META[row_index]
+    names = set(_WORKER_META.dtype.names or ())
+    exposure = None
+    for column in ("exposure_seconds", "exptime"):
+        if column in names:
+            candidate = float(row[column])
+            if np.isfinite(candidate) and candidate > 0.0:
+                exposure = candidate
+                break
+    if exposure is None:
+        exposure = _WORKER_EXPOSURE_SECONDS
+        exposure_source = "assumed_900s"
+    else:
+        exposure_source = "metadata"
+    return MoonZodiObservation(
+        expnum=int(row["expnum"]),
+        date_obs=_text_value(row["date_obs"]),
+        role=role,
+        target_ra_deg=float(row[ra_column]),
+        target_dec_deg=float(row[dec_column]),
+        exposure_seconds=float(exposure),
+        exposure_seconds_source=exposure_source,
+    )
+
+
 def fit_chunk_worker(args):
     """Fit one chunk of spectra using the worker-local SkyDecomp instance."""
     global _WORKER_DECOMPOSER, _WORKER_FACTOR, _WORKER_PROGRESS_QUEUE, _WORKER_FIT_MODEL
@@ -209,12 +310,26 @@ def fit_chunk_worker(args):
                 verbose=False,
                 n_lsf_refits=3,
             )
-        else:
+        elif _WORKER_FIT_MODEL == "lsf-surface-iterative":
             result = _WORKER_DECOMPOSER.fit(
                 flux_row,
                 ivar_row,
                 verbose=False,
             )
+        elif _WORKER_FIT_MODEL == "moon-zodi-lsf-surface-iterative":
+            # Preserve invalid source pixels; zero IVAR excludes them without
+            # interpolating, imputing, cropping, or changing the native grid.
+            ivar_row = np.isfinite(flux_row).astype(np.float64)
+            lsf_row = np.asarray(_WORKER_LSF[kind][idx], dtype=np.float64)
+            result = _WORKER_DECOMPOSER.fit(
+                flux_row,
+                ivar_row,
+                observation=_moon_zodi_observation(kind, idx),
+                detector_lsf_fwhm=lsf_row,
+                verbose=False,
+            )
+        else:
+            raise RuntimeError(f"Worker has unsupported fit model: {_WORKER_FIT_MODEL}")
         out.append((idx, result))
         if _WORKER_PROGRESS_QUEUE is not None:
             _WORKER_PROGRESS_QUEUE.put(1)
@@ -233,99 +348,6 @@ def resolve_base_dir(path_arg):
     raise FileNotFoundError(
         "Could not resolve a valid SkyDecomp base directory from "
         f"{path}. Expected either a base dir containing palace/PMD or the palace directory itself."
-    )
-
-
-def results_to_fits(results, filename):
-    """Write a list of SkyDecompResult objects to a FITS file."""
-    if not results:
-        raise ValueError("results must contain at least one decomposition result")
-    rows = {
-        "t_o2": [r.t_o2 for r in results],
-        "t_o2_err": [r.t_o2_err for r in results],
-        "o2_prefit_amp": [r.o2_prefit_amp for r in results],
-        "reduced_chi2": [r.reduced_chi2 for r in results],
-        "r2": [r.r2 for r in results],
-        "rms_resid": [r.rms_resid for r in results],
-        "resid_level": [r.resid_level for r in results],
-        "fit_status": [r.fit_status for r in results],
-        "fit_summary": [r.fit_summary for r in results],
-        "fit_elapsed_sec": [r.fit_elapsed_sec for r in results],
-        "peak_memory_mb": [r.peak_memory_mb for r in results],
-        "o2_fit_status": [r.o2_fit_status for r in results],
-        "o2_fit_summary": [r.o2_fit_summary for r in results],
-        "o2_fit_elapsed_sec": [r.o2_fit_elapsed_sec for r in results],
-        "o2_valid_frac": [r.o2_valid_frac for r in results],
-    }
-    t = Table(rows)
-
-    def stack(attr):
-        return np.vstack([getattr(r, attr) for r in results])
-
-    coef_arr = stack("coef")
-    design_names = results[0].design_names
-    if coef_arr.shape[1] != len(design_names):
-        raise ValueError(
-            f"Coefficient count ({coef_arr.shape[1]}) does not match "
-            f"number of design names ({len(design_names)})."
-        )
-    coef_table = Table({name: coef_arr[:, i] for i, name in enumerate(design_names)})
-    coef_hdu = fits.BinTableHDU(coef_table, name="COEF")
-
-    hdul = fits.HDUList(
-        [
-            fits.PrimaryHDU(),
-            fits.BinTableHDU(t, name="META"),
-            coef_hdu,
-            fits.ImageHDU(stack("bestfit"), name="BESTFIT"),
-            fits.ImageHDU(stack("bestfit_lsf"), name="BESTFIT_LSF"),
-            fits.ImageHDU(stack("resid"), name="RESID"),
-            fits.ImageHDU(stack("vector_o2"), name="VECTOR_O2"),
-        ]
-    )
-
-    comp_keys = list(results[0].components.keys())
-    for key in comp_keys:
-        arr = np.vstack([r.components[key] for r in results])
-        hdul.append(fits.ImageHDU(arr, name=f"COMP_{key.upper()}"))
-
-    iterative_result_types = []
-    try:
-        from sky_decomp.lsf_surface_iterative import LSFSurfaceIterativeResult
-
-        iterative_result_types.append(LSFSurfaceIterativeResult)
-    except ModuleNotFoundError:
-        pass
-    try:
-        from skysub.sky_decomp.lsf_surface_iterative import (
-            LSFSurfaceIterativeResult,
-        )
-
-        iterative_result_types.append(LSFSurfaceIterativeResult)
-    except ModuleNotFoundError:
-        pass
-    iterative_result_types = tuple(set(iterative_result_types))
-    is_iterative = [
-        bool(iterative_result_types) and isinstance(result, iterative_result_types)
-        for result in results
-    ]
-    if any(is_iterative) and not all(is_iterative):
-        raise ValueError("Cannot mix baseline and LSF-surface iterative results")
-    if all(is_iterative):
-        states = [result.lsf_state for result in results]
-        if any(state is None for state in states):
-            raise ValueError("Every iterative result must contain a compact LSF state")
-        try:
-            from sky_decomp._lsf_surface_fits import build_lsf_hdus
-        except ModuleNotFoundError:
-            from skysub.sky_decomp._lsf_surface_fits import build_lsf_hdus
-
-        hdul.extend(build_lsf_hdus(states))
-
-    hdul.writeto(filename, overwrite=True)
-    print(
-        f"Wrote {len(results)} results, {coef_arr.shape[1]} coefs, "
-        f"{len(comp_keys)} components → {filename}"
     )
 
 
@@ -351,6 +373,11 @@ def run(
     limit=None,
     pin_workers=False,
     diagnose_threads=False,
+    palace_suffix=None,
+    palace_oh_suffix=None,
+    palace_diffuse_suffix=None,
+    exposure_seconds=900.0,
+    moon_zodi_data_root=None,
 ):
     base_dir = resolve_base_dir(palace_dir)
     output_dir = Path(output_dir)
@@ -370,6 +397,12 @@ def run(
     print(f"  n_workers={n_workers}, lsf_sigma={lsf_sigma}, factor={factor}")
     print(f"  chunk_size={chunk_size}, max_in_flight={max_in_flight}")
     print(f"  fit_model={fit_model}, n_refinement_cycles={n_refinement_cycles}")
+    print(f"  palace_suffix={palace_suffix!r}")
+    print(f"  palace_oh_suffix={palace_oh_suffix!r}")
+    print(f"  palace_diffuse_suffix={palace_diffuse_suffix!r}")
+    print(f"  exposure_seconds_fallback={exposure_seconds}")
+    if fit_model == "moon-zodi-lsf-surface-iterative":
+        print(f"  moon_zodi_data_root={moon_zodi_data_root!r}")
     print(f"  pin_workers={pin_workers}, diagnose_threads={diagnose_threads}")
     print(f"  base_dir={base_dir}")
 
@@ -410,6 +443,11 @@ def run(
             worker_counter,
             bool(pin_workers),
             bool(diagnose_threads),
+            palace_suffix,
+            palace_oh_suffix,
+            palace_diffuse_suffix,
+            exposure_seconds,
+            moon_zodi_data_root,
         ),
     ) as executor:
         pbar = tqdm(
@@ -455,7 +493,7 @@ def run(
     print(f"Fitting done in {elapsed:.1f}s ({elapsed / n_rows:.2f}s per spectrum)")
 
     stem = Path(data_file).stem
-    suffix = "" if fit_model == "baseline" else "_lsf_surface_iterative"
+    suffix = FIT_MODEL_SUFFIXES[fit_model]
     for kind in ("sci", "sky1", "sky2"):
         results_to_fits(results[kind], output_dir / f"{stem}_decomp_{kind}{suffix}.fits")
 
@@ -516,11 +554,13 @@ def extract_meta_and_coef_products(
         label = _infer_decomp_label(decomp_path, index)
         out_path = decomp_outputs[index - 1]
         if out_path is None:
-            variant = (
-                "_lsf_surface_iterative"
-                if "lsf_surface_iterative" in Path(decomp_path).stem.lower()
-                else ""
-            )
+            stem_lower = Path(decomp_path).stem.lower()
+            if "moon_zodi_lsf_surface_iterative" in stem_lower:
+                variant = "_moon_zodi_lsf_surface_iterative"
+            elif "lsf_surface_iterative" in stem_lower:
+                variant = "_lsf_surface_iterative"
+            else:
+                variant = ""
             out_path = str(
                 cwd / (f"{input_path.stem}_{label.lower()}_meta_coef{variant}{input_path.suffix}")
             )
@@ -540,6 +580,15 @@ def extract_meta_and_coef_products(
             if all(present):
                 compact_hdus.extend(
                     _copy_hdu_with_name(hdul_dec[name], name) for name in lsf_extensions
+                )
+            moon_zodi_extensions = ("MZ_MODEL", "MZ_ASSETS", "MZ_KNOTS", "MZ_META")
+            moon_zodi_present = [name in hdul_dec for name in moon_zodi_extensions]
+            if any(moon_zodi_present) and not all(moon_zodi_present):
+                raise KeyError(f"Incomplete Moon/Zodi extensions in {decomp_path}")
+            if all(moon_zodi_present):
+                compact_hdus.extend(
+                    _copy_hdu_with_name(hdul_dec[name], name)
+                    for name in moon_zodi_extensions
                 )
             fits.HDUList(compact_hdus).writeto(out_path, overwrite=True)
         print(f"Wrote {label} META/COEF file -> {out_path}")
@@ -563,7 +612,10 @@ def thin_fits_every_n(input_path, output_path, n, row_hdu_name="META"):
             raise KeyError(f"HDU '{row_hdu_name}' not found in {input_path}")
 
         n_rows = len(hdul[row_hdu_name].data)
+        indices = np.arange(n_rows, dtype=int)[::n]
+        remap = {int(old): int(new) for new, old in enumerate(indices)}
         keep = slice(None, None, n)
+        global_hdus = {"MZ_MODEL", "MZ_ASSETS", "MZ_KNOTS"}
 
         out_hdus = []
         for hdu in hdul:
@@ -577,13 +629,26 @@ def thin_fits_every_n(input_path, output_path, n, row_hdu_name="META"):
 
             elif isinstance(hdu, (fits.BinTableHDU, fits.TableHDU)):
                 data = hdu.data
-                if data is not None and len(data) == n_rows:
+                if hdu.name == "LSF_META" and data is not None:
+                    selected = np.isin(np.asarray(data["spectrum_index"], dtype=int), indices)
+                    data = data[selected].copy()
+                    for row in data:
+                        row["spectrum_index"] = remap[int(row["spectrum_index"])]
+                elif hdu.name == "MZ_META" and data is not None:
+                    data = data[keep].copy()
+                    data["spectrum_index"] = np.arange(len(data), dtype=int)
+                elif hdu.name not in global_hdus and data is not None and len(data) == n_rows:
                     data = data[keep]
                 out_hdus.append(type(hdu)(data=data, header=header, name=hdu.name))
 
             elif isinstance(hdu, (fits.ImageHDU, fits.CompImageHDU)):
                 data = hdu.data
-                if data is not None and getattr(data, "ndim", 0) >= 1 and data.shape[0] == n_rows:
+                if (
+                    hdu.name not in global_hdus
+                    and data is not None
+                    and getattr(data, "ndim", 0) >= 1
+                    and data.shape[0] == n_rows
+                ):
                     data = data[keep, ...]
                 out_hdus.append(type(hdu)(data=data, header=header, name=hdu.name))
 
@@ -622,7 +687,7 @@ def main():
     )
     parser.add_argument(
         "--fit-model",
-        choices=("baseline", "lsf-surface-iterative"),
+        choices=tuple(FIT_MODEL_SUFFIXES),
         default="baseline",
         help="Fit implementation (default: baseline)",
     )
@@ -631,6 +696,44 @@ def main():
         type=int,
         default=5,
         help="Continuum/LSF/line cycles for lsf-surface-iterative (default: 5)",
+    )
+    parser.add_argument(
+        "--palace-suffix",
+        default=None,
+        help=(
+            "Optional suffix for versioned pmd_popmodel_OH and pmd_refcont files. "
+            "The suffix is appended exactly; for example, '_adam_v1' selects "
+            "pmd_popmodel_OH_adam_v1.dat and "
+            "pmd_refcont_adam_v1.dat (default: canonical unsuffixed files)."
+        ),
+    )
+    parser.add_argument(
+        "--palace-oh-suffix",
+        default=None,
+        help="Optional exact suffix overriding --palace-suffix for pmd_popmodel_OH only.",
+    )
+    parser.add_argument(
+        "--palace-diffuse-suffix",
+        default=None,
+        help="Optional exact suffix overriding --palace-suffix for pmd_refcont only.",
+    )
+    parser.add_argument(
+        "--exposure-seconds",
+        type=float,
+        default=900.0,
+        help=(
+            "Exposure duration used only when META has no exposure duration "
+            "(v1 provenance contract requires the default 900 s assumption)."
+        ),
+    )
+    parser.add_argument(
+        "--moon-zodi-data-root",
+        type=Path,
+        default=None,
+        help=(
+            "Complete data root containing moon_zodi/ and palace/PMD for the "
+            "Moon/Zodi method (default: packaged skysub/sky_decomp/data)."
+        ),
     )
     parser.add_argument(
         "--limit",
@@ -664,6 +767,13 @@ def main():
         raise ValueError("--n-refinement-cycles must be >= 1")
     if args.limit is not None and args.limit < 1:
         raise ValueError("--limit must be >= 1")
+    if not np.isfinite(args.exposure_seconds) or args.exposure_seconds <= 0.0:
+        raise ValueError("--exposure-seconds must be positive and finite")
+    if args.fit_model == "moon-zodi-lsf-surface-iterative" and args.exposure_seconds != 900.0:
+        raise ValueError(
+            "Moon/Zodi v1 records missing META exposure time as 'assumed_900s'; "
+            "--exposure-seconds must therefore remain 900"
+        )
 
     run(
         data_file=args.data_file,
@@ -679,9 +789,14 @@ def main():
         limit=args.limit,
         pin_workers=args.pin_workers,
         diagnose_threads=args.diagnose_threads,
+        palace_suffix=args.palace_suffix,
+        palace_oh_suffix=args.palace_oh_suffix,
+        palace_diffuse_suffix=args.palace_diffuse_suffix,
+        exposure_seconds=args.exposure_seconds,
+        moon_zodi_data_root=args.moon_zodi_data_root,
     )
 
-    suffix = "" if args.fit_model == "baseline" else "_lsf_surface_iterative"
+    suffix = FIT_MODEL_SUFFIXES[args.fit_model]
     extract_meta_and_coef_products(
         input_fits_path=args.data_file,
         decomp_fits_path_1=Path(args.output_dir)
@@ -690,11 +805,22 @@ def main():
         / f"{Path(args.data_file).stem}_decomp_sky2{suffix}.fits",
         decomp_fits_path_3=Path(args.output_dir)
         / f"{Path(args.data_file).stem}_decomp_sci{suffix}.fits",
+        meta_output_path=Path(args.output_dir)
+        / f"{Path(args.data_file).stem}_meta_only.fits",
+        sky1_output_path=Path(args.output_dir)
+        / f"{Path(args.data_file).stem}_sky1_meta_coef{suffix}.fits",
+        sky2_output_path=Path(args.output_dir)
+        / f"{Path(args.data_file).stem}_sky2_meta_coef{suffix}.fits",
+        sci_output_path=Path(args.output_dir)
+        / f"{Path(args.data_file).stem}_sci_meta_coef{suffix}.fits",
     )
 
-    thin_fits_every_n(f"{Path(args.data_file).stem}_decomp_sci{suffix}.fits", f"{Path(args.data_file).stem}_every10_decomp_sci{suffix}.fits", 10)
-    thin_fits_every_n(f"{Path(args.data_file).stem}_decomp_sky1{suffix}.fits", f"{Path(args.data_file).stem}_every10_decomp_sky1{suffix}.fits", 10)
-    thin_fits_every_n(f"{Path(args.data_file).stem}_decomp_sky2{suffix}.fits", f"{Path(args.data_file).stem}_every10_decomp_sky2{suffix}.fits", 10)
+    for kind in ("sci", "sky1", "sky2"):
+        thin_fits_every_n(
+            Path(args.output_dir) / f"{Path(args.data_file).stem}_decomp_{kind}{suffix}.fits",
+            Path(args.output_dir) / f"{Path(args.data_file).stem}_every10_decomp_{kind}{suffix}.fits",
+            10,
+        )
 
 if __name__ == "__main__":
     main()
