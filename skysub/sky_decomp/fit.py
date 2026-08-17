@@ -120,6 +120,15 @@ def sticks2vector(
 @dataclass(slots=True)
 class SkyDecompResult:
     coef: np.ndarray
+    # Per-coefficient 1σ posterior uncertainty in the same units and order as
+    # ``coef``. Computed from the active-set Fisher information of the final
+    # weighted-NNLS solve (see ``SkyDecomp._coef_err_active_set`` for the full
+    # derivation): the (regularised) Hessian sub-block of the strictly positive
+    # coefficients is inverted, the internal column/data scaling is undone, and
+    # the variance is inflated by ``max(reduced_chi², 1)`` before taking the
+    # square root. Boundary coefficients pinned at c = 0 by the c ≥ 0 constraint
+    # get ``NaN`` (no symmetric interval is defined there).
+    coef_err: np.ndarray
     bestfit: np.ndarray
     resid: np.ndarray
     resid_level: float
@@ -148,6 +157,13 @@ class SkyDecompResult:
     # `coef * vector_o2` reproduces the model O2 contribution.
     vector_o2: np.ndarray
     o2_prefit_amp: float
+    # Per-pixel 1σ of the LSF-refined reconstruction, obtained by first-order
+    # (Jacobian) propagation of ``coef_err`` through the LSF-convolved design
+    # matrices used to build ``bestfit_lsf`` (see
+    # ``SkyDecomp._components_sigma_from_coef_err``).  Same shape as
+    # ``bestfit_lsf``.  Written to disk as the ``FLUX_SIGMA_TOTAL`` HDU by the
+    # parallel decomposition writer.
+    bestfit_lsf_sigma: np.ndarray
 
 
 class SkyDecomp:
@@ -196,6 +212,7 @@ class SkyDecomp:
         self.o2_prefit_bestfit = self.vector_o2.copy()
         self.bestfit = np.zeros_like(self.wave)
         self.coef = np.array([], float)
+        self.coef_err = np.array([], float)
         self.fit_status = ""
         self.fit_summary = ""
         self.r2 = np.nan
@@ -306,6 +323,25 @@ class SkyDecomp:
         if final_matrices["o2"].shape[0] == 1:
             self.vector_o2 = final_matrices["o2"][0].copy()
 
+        # Per-pixel 1σ of the refined reconstruction (LSF-aware Jacobian
+        # propagation).  Uses the SAME matrix bundle as `_components_from_coef`
+        # above so the mean and σ come from an identical LSF/O2 basis.  Needs
+        # the finalised coef_err from `refined`, not `self.coef_err` (which is
+        # not filled until a few lines below).
+        _sigma_coef_err = np.asarray(
+            refined.get("coef_err", np.full(refined["coef"].shape, np.nan)),
+            dtype=float,
+        )
+        _sigma_comps = self._components_sigma_from_coef_err(_sigma_coef_err, final_matrices)
+        bestfit_lsf_sigma = np.sqrt(
+            _sigma_comps["oh"] ** 2
+            + _sigma_comps["moon"] ** 2
+            + _sigma_comps["diffuse"] ** 2
+            + _sigma_comps["atom"] ** 2
+            + _sigma_comps["orc"] ** 2
+            + _sigma_comps["o2"] ** 2
+        )
+
         fit_elapsed_sec = time.perf_counter() - t0
         peak_memory_mb = tracemalloc.get_traced_memory()[1] / 1024**2
         if trace_started:
@@ -313,6 +349,10 @@ class SkyDecomp:
         self.peak_memory_mb = peak_memory_mb
         self.bestfit_lsf = refined["bestfit"]
         self.coef = refined["coef"]
+        self.coef_err = np.asarray(
+            refined.get("coef_err", np.full_like(self.coef, np.nan)),
+            dtype=float,
+        )
         self.fit_status = refined["status"]
         self.fit_summary = (
             f"status={refined['status']} | npar={refined['n_par']} | ngood={refined['n_good']} | "
@@ -365,6 +405,7 @@ class SkyDecomp:
 
         return SkyDecompResult(
             coef=self.coef,
+            coef_err=self.coef_err,
             bestfit=first["bestfit"],
             resid=first["resid"],
             resid_level=first["resid_level"],
@@ -390,6 +431,7 @@ class SkyDecomp:
             moon_boosted_pixels=self.moon_boosted_pixels_used.copy(),
             vector_o2=self.vector_o2.copy(),
             o2_prefit_amp=float(self.o2_prefit_amp),
+            bestfit_lsf_sigma=bestfit_lsf_sigma,
         )
 
     @staticmethod
@@ -410,6 +452,212 @@ class SkyDecomp:
             "o2": matrix_o2,
         }
 
+    @staticmethod
+    def _per_column_chi2_from_residuals(
+        design_matrix: np.ndarray,
+        resid: np.ndarray,
+        ivar: np.ndarray,
+        good: np.ndarray,
+        *,
+        fallback: float,
+    ) -> np.ndarray:
+        """Per-column pseudo-chi² from residual power weighted by column support.
+
+        For each column ``j`` of the physical design matrix, compute a
+        heteroscedasticity-consistent (HC1-style) chi² by weighting the
+        pixel-wise weighted residual power by that column's spectral support:
+
+            w_j[i]        = |A[i, j]| / max_i |A[i, j]|
+            chi²_j        = Σ_i w_j[i] · ivar[i] · resid[i]²  /  Σ_i w_j[i]
+
+        The ``max_i |A[i, j]|`` normalisation cancels in the ratio, so the
+        implementation collapses to two BLAS gemv calls over ``|A[good, :]|``:
+
+            chi²_j        = (Σ_i |A[i, j]| · ivar[i] · resid[i]²) / Σ_i |A[i, j]|
+
+        Columns with vanishing support (all-zero design over the good pixels)
+        fall back to ``fallback`` (typically the aggregate ``reduced_chi²``).
+        This gives ``_coef_err_active_set`` a per-column inflation factor
+        instead of the scalar ``max(reduced_chi², 1)`` used historically,
+        matching the MLP-side observation (top methods §7) that the
+        miscalibration is column-dependent.
+        """
+        # design_matrix here is (n_col, n_pix) -- see _fit_design.
+        n_par = int(design_matrix.shape[0])
+        per_col = np.full(n_par, float(fallback), dtype=float)
+        if not good.any():
+            return per_col
+        # Take absolute value once on the good-pixel slice (n_col, n_good);
+        # the transpose in the historical implementation is skipped because
+        # gemv over rows is just as fast as gemv over columns and saves the
+        # extra (n_good, n_col) copy.
+        abs_slice = np.abs(design_matrix[:, good])  # (n_col, n_good)
+        r2w = (resid[good] * resid[good]) * ivar[good]  # (n_good,)
+        num = abs_slice @ r2w  # (n_col,) -- single gemv
+        den = abs_slice.sum(axis=1)  # (n_col,)
+        support_mask = den > 0.0
+        with np.errstate(divide="ignore", invalid="ignore"):
+            chi2_j = num / np.where(support_mask, den, 1.0)
+        chi2_j = np.where(np.isfinite(chi2_j), chi2_j, float(fallback))
+        per_col[support_mask] = chi2_j[support_mask]
+        return per_col
+
+    @staticmethod
+    def _coef_err_active_set(
+        coef: np.ndarray,
+        source_p: list[np.ndarray],
+        source_col_scale: list[np.ndarray],
+        source_data_scale: list[float],
+        source_local_index: list[int],
+        reduced_chi2: float,
+        per_column_chi2: np.ndarray | None = None,
+    ) -> np.ndarray:
+        """Active-set posterior 1σ uncertainty for a nonnegative WLS solve.
+
+        Notes
+        -----
+        The QP minimises
+
+            J(c) = ½‖W(A c − y)‖² + ½ λ ‖L c‖²    subject to    c ≥ 0
+
+        where ``W = diag(ivar_good)`` is the weighting used by ``_fit_design``,
+        ``A`` is the physical design matrix and ``L`` is the moon-spline
+        second-difference operator (with strength ``λ = 2·moon_smooth_lambda``).
+        For readability the internal solve additionally divides the data by a
+        scalar ``data_scale`` and rescales columns by ``col_scale``; those
+        transformations cancel out of the KKT solution but must be undone here
+        before the covariance is reported in native coefficient units.
+
+        At the KKT solution, split coefficients into
+
+            active   := {j : c_j > tol}      inactive := {j : c_j = 0}
+
+        Holding the inactive set at zero collapses the constrained problem to
+        an unconstrained WLS on the active columns
+
+            c_a ← argmin ‖W (A_a c_a − y)‖² + λ ‖L_a c_a‖²
+
+        whose Hessian is the active sub-block of the (regularised) Fisher
+        information ``H = AᵀWA + λ LᵀL``. The corresponding maximum a
+        posteriori covariance is
+
+            Cov(c_a) = H_{a,a}⁻¹                                    (1)
+
+        and it is what the routine reports.  Equivalently, this is the
+        classical Cramér–Rao unconstrained covariance of the sub-model that
+        contains only the active coefficients.
+
+        Undoing the internal scaling. What is stored in the QP is the dense
+        matrix
+
+            P_scaled = diag(1/col_scale) · (H / data_scale²) · diag(1/col_scale)
+                       + regulariser
+
+        so ``H⁻¹ = diag(1/col_scale) · P_scaled⁻¹ · diag(1/col_scale) · data_scale²``.
+        The active sub-block of ``P_scaled`` is inverted once per solve group
+        (Hessian identity is the group key so a two-stage moon/diffuse refit
+        is handled cleanly), the column-scale factors are folded in via
+        ``inv_col = 1/col_scale[a]``, and the diagonal gives ``Var(c_j)`` in
+        physical units. The 1σ error is ``sqrt(Var)``.
+
+        Noise inflation. Empirical ``reduced_chi²`` above unity indicates that
+        the input ``ivar`` under-estimates the noise (or the model is
+        mildly under-specified); the variance is therefore inflated by
+        ``max(reduced_chi², 1)`` before the square root. This is the standard
+        "sigma-hat" adjustment applied to weighted least squares.
+
+        Per-column inflation (2026-08-16). The MLP sigma-calibration diagnostic
+        (top methods §7) showed the aggregate ``reduced_chi²`` scalar
+        systematically over-inflates well-fit columns and under-inflates poorly
+        fit ones. When ``per_column_chi2`` is provided (see ``_fit_design``),
+        the inflation factor becomes column-specific ``max(per_column_chi2[j], 1)``
+        computed from residual power weighted by each column's spectral support.
+        This is a lightweight heteroscedasticity-consistent (HC1-style) fix that
+        preserves the active-set covariance structure and matches the physical
+        intuition that emission-line columns and continuum-spline columns have
+        very different residual behaviour. If ``per_column_chi2`` is ``None`` the
+        routine falls back to the scalar ``reduced_chi²`` for backward
+        compatibility.
+
+        Boundary treatment. Inactive coefficients are pinned at c_j = 0 by
+        the constraint and have no symmetric 1σ interval defined; they are
+        reported as ``NaN``. A one-sided upper limit is easy to derive from
+        ``|A_jᵀ W (y − A c)| / √(A_jᵀ W A_j)`` but is not written here to
+        keep the array shape aligned with ``coef`` and avoid mixing
+        interval-type semantics on a per-row basis.
+
+        Caveats. Active-set covariance ignores the constraint's effect on
+        coefficients that are close to zero: a small perturbation of the data
+        can flip a boundary coefficient into the active set. A bootstrap or
+        profile-likelihood analysis is more faithful in that regime but not
+        needed for the calibration MLP downstream. Off-diagonal correlations
+        of the active sub-block are computed but discarded to keep the
+        FITS-persisted product one-dimensional; if the MLP starts using
+        vector uncertainties this routine can be extended trivially.
+        """
+        n_par = int(coef.size)
+        coef_err = np.full(n_par, np.nan, dtype=float)
+        if n_par == 0:
+            return coef_err
+
+        active_tol = 1e-8 * float(max(np.max(coef), 1.0))
+        active_mask = coef > active_tol
+        coef_err[~active_mask] = np.nan
+
+        scalar_inflate = float(max(reduced_chi2, 1.0))
+        if per_column_chi2 is not None:
+            per_col = np.asarray(per_column_chi2, dtype=float)
+            if per_col.shape != coef.shape:
+                raise ValueError(
+                    f"per_column_chi2 shape {per_col.shape} != coef shape {coef.shape}"
+                )
+            per_col = np.where(np.isfinite(per_col) & (per_col > 0.0), per_col,
+                                scalar_inflate)
+            inflate_arr = np.maximum(per_col, 1.0)
+        else:
+            inflate_arr = np.full(coef.shape, scalar_inflate, dtype=float)
+
+        # Group active coefficients by the solve they came from (identity of the
+        # Hessian array); within each group we invert one small sub-block once.
+        groups: dict[int, list[int]] = {}
+        for j in np.flatnonzero(active_mask):
+            groups.setdefault(id(source_p[int(j)]), []).append(int(j))
+
+        for solve_indices in groups.values():
+            first = solve_indices[0]
+            p_solve = source_p[first]
+            cs_solve = source_col_scale[first]
+            ds_solve = source_data_scale[first]
+            local_idx = np.asarray(
+                [source_local_index[j] for j in solve_indices],
+                dtype=int,
+            )
+            H_a = p_solve[np.ix_(local_idx, local_idx)]
+            H_a = 0.5 * (H_a + H_a.T) + 1e-12 * np.eye(H_a.shape[0])
+            try:
+                cov_a = np.linalg.inv(H_a)
+            except np.linalg.LinAlgError:
+                cov_a = np.linalg.pinv(H_a)
+            inv_col = 1.0 / cs_solve[local_idx]
+            # Undo column and data scaling; inflate by per-column χ² (falling
+            # back to the scalar reduced_chi² when per_column_chi2 is None); clip
+            # to nonnegative before the square root to guard against tiny
+            # negative eigenvalues from finite-precision arithmetic.
+            #
+            # diag(D · cov_a · D) = d² · diag(cov_a) when D is diagonal, so the
+            # historical outer-product materialisation is skipped.
+            solve_indices_arr = np.asarray(solve_indices, dtype=int)
+            var_a = np.clip(
+                (inv_col * inv_col)
+                * np.diagonal(cov_a)
+                * (ds_solve ** 2)
+                * inflate_arr[solve_indices_arr],
+                0.0,
+                np.inf,
+            )
+            coef_err[solve_indices_arr] = np.sqrt(var_a)
+        return coef_err
+
     def _fit_design(
         self,
         design_matrix: np.ndarray,
@@ -419,6 +667,51 @@ class SkyDecomp:
         moon_slice: slice | None = None,
         diffuse_slice: slice | None = None,
     ) -> dict[str, object]:
+        """Weighted nonnegative least-squares fit of one design matrix.
+
+        Solves the quadratic program
+
+            c* = argmin_{c ≥ 0} ½‖diag(√ivar) (A c − y)‖²
+                                + λ ‖L c‖²    (moon-spline curvature)
+
+        on the finite/positive-ivar subset of the data. ``A = design_matrix``
+        holds the physical basis; ``λ = moon_smooth_lambda`` (from the model
+        config) is nonzero only for the moon block, whose curvature operator
+        ``L`` penalises second differences of adjacent spline coefficients.
+
+        For numerical stability the solve is performed on a doubly-rescaled
+        version of the problem: ``y'' = y / data_scale`` and
+        ``A'' = A / (data_scale · col_scale)`` where ``data_scale`` normalises
+        the target RMS to unity and ``col_scale`` normalises each column to
+        unit ℓ²-norm. The nonnegative QP is delegated to Clarabel. The
+        returned coefficient is the fitted vector rescaled back into physical
+        units, ``c = x* / col_scale``.
+
+        An optional second solve refits the moon+diffuse (``target_cols``)
+        block with an interline-boosted weight vector while the remaining
+        coefficients are held at their first-solve values (subtracted from
+        the data). When this happens each moon/diffuse coefficient's covariance
+        is taken from the target-refit Hessian, not the first-solve Hessian —
+        see the per-column provenance arrays ``source_p``, ``source_col_scale``,
+        ``source_data_scale`` and ``source_local_index`` prepared here.
+
+        Uncertainties
+        -------------
+        ``coef_err`` is filled by ``_coef_err_active_set`` right before the
+        result dict is built. See that method for the full derivation; briefly,
+        it inverts the active sub-block of the regularised Fisher information
+        stored on ``source_p`` (one small linear-algebra call per solve group),
+        undoes the ``col_scale`` / ``data_scale`` transformations, inflates
+        variance by ``max(reduced_chi², 1)`` for a hat-sigma adjustment and
+        reports the square root. Coefficients pinned at c = 0 by the c ≥ 0
+        constraint receive ``NaN``.
+
+        Returns
+        -------
+        dict with ``coef``, ``coef_err``, ``status``, ``bestfit``, ``resid``,
+        ``resid_level``, ``n_good``, ``n_par``, ``chi2``, ``reduced_chi2``,
+        ``r2``, ``rms_resid``, ``qp_elapsed_sec``.
+        """
         good = np.isfinite(flux) & np.isfinite(ivar) & (ivar > 0)
         y = flux[good]
         base_w = np.sqrt(ivar[good])
@@ -438,7 +731,7 @@ class SkyDecomp:
             y_vec: np.ndarray,
             w_vec: np.ndarray,
             moon_slice_local: slice | None,
-        ) -> tuple[np.ndarray, str, float]:
+        ) -> tuple[np.ndarray, str, float, np.ndarray, np.ndarray, float]:
             aw = a_mat * w_vec[:, None]
             yw = y_vec * w_vec
             data_scale = max(float(np.sqrt(np.nanmean(yw**2))) if yw.size else 1.0, 1.0)
@@ -482,10 +775,34 @@ class SkyDecomp:
             qp_result_local = solver.solve()
             qp_dt_local = time.perf_counter() - t_qp_local
             coef_local = np.asarray(qp_result_local.x, float) / col_scale
-            return coef_local, str(qp_result_local.status), qp_dt_local
+            # `p_dense_local` is the column- and data-scaled Fisher information
+            # (plus any regulariser); the caller needs it, `col_scale`, and
+            # `data_scale` to back out the native-coordinate covariance.
+            return (
+                coef_local,
+                str(qp_result_local.status),
+                qp_dt_local,
+                p_dense_local,
+                col_scale,
+                float(data_scale),
+            )
 
         n_par = int(a.shape[1])
-        coef, status, qp_elapsed_sec = _solve_nonnegative_weighted(a, y, base_w, moon_slice)
+        (
+            coef,
+            status,
+            qp_elapsed_sec,
+            p_main,
+            col_scale_main,
+            data_scale_main,
+        ) = _solve_nonnegative_weighted(a, y, base_w, moon_slice)
+
+        # Track whichever solve produced the FINAL value of each coefficient,
+        # so uncertainties come from that solve's Hessian.
+        source_p: list[np.ndarray] = [p_main] * n_par
+        source_col_scale: list[np.ndarray] = [col_scale_main] * n_par
+        source_data_scale: list[float] = [data_scale_main] * n_par
+        source_local_index: list[int] = list(range(n_par))
 
         target_cols = []
         for comp_slice in (moon_slice, diffuse_slice):
@@ -517,13 +834,18 @@ class SkyDecomp:
                     local_pos = local_pos[target_cols_arr[local_pos] == moon_global[in_bounds]]
                     if local_pos.size > 0:
                         moon_slice_local = slice(int(local_pos.min()), int(local_pos.max()) + 1)
-            coef_target, status_target, qp_dt_target = _solve_nonnegative_weighted(
+            coef_target, status_target, qp_dt_target, p_target, col_scale_target, data_scale_target = _solve_nonnegative_weighted(
                 a_target,
                 y_target,
                 boosted_w,
                 moon_slice_local,
             )
             coef[target_cols_arr] = coef_target
+            for local_pos_i, global_col in enumerate(target_cols_arr):
+                source_p[int(global_col)] = p_target
+                source_col_scale[int(global_col)] = col_scale_target
+                source_data_scale[int(global_col)] = data_scale_target
+                source_local_index[int(global_col)] = int(local_pos_i)
             status = f"{status} | md_refit={status_target}"
             qp_elapsed_sec += qp_dt_target
 
@@ -537,8 +859,21 @@ class SkyDecomp:
         y_mean = float(np.average(y, weights=ivar[good])) if n_good else np.nan
         sst = float(np.sum((y - y_mean) ** 2 * ivar[good])) if n_good else np.nan
         r2 = 1.0 - chi2 / sst if np.isfinite(sst) and sst > 0 else np.nan
+        per_column_chi2 = self._per_column_chi2_from_residuals(
+            design_matrix, resid, ivar, good, fallback=reduced_chi2,
+        )
+        coef_err = self._coef_err_active_set(
+            coef,
+            source_p,
+            source_col_scale,
+            source_data_scale,
+            source_local_index,
+            reduced_chi2,
+            per_column_chi2=per_column_chi2,
+        )
         return {
             "coef": coef,
+            "coef_err": coef_err,
             "status": status,
             "bestfit": bestfit,
             "resid": resid,
@@ -585,6 +920,76 @@ class SkyDecomp:
         }
         components["diffuse"] = components["ho2"] + components["feo"] + components["o2ac"]
         return components
+
+    def _components_sigma_from_coef_err(
+        self,
+        coef_err: np.ndarray,
+        mats: dict[str, np.ndarray],
+    ) -> dict[str, np.ndarray]:
+        """Propagate per-coefficient 1σ to per-component flux 1σ.
+
+        For every matrix component (``oh``, ``moon``, ``atom``, ``orc``,
+        ``o2``) the flux variance at wavelength λ is
+
+            σ²_comp(λ) = Σ_j M[j, λ]² · σ_c[j]²                    (1)
+
+        where ``M`` is the component's design matrix (already
+        LSF-convolved by ``_assemble_refined_matrices``) and ``σ_c`` is the
+        native-space per-coefficient uncertainty. This is the exact
+        first-order (Jacobian) propagation because the reconstruction
+        ``flux = M.T @ coef`` is linear in the coefficients.
+
+        Implementation note. The sum is evaluated as ``(M*M).T @ σ²_c`` which
+        dispatches to BLAS gemv on the squared matrix. Micro-benchmarks show
+        this is faster than ``np.einsum('ij,ij,i->j', M, M, σ²_c)`` for
+        typical shapes (n_coef ~ 400, n_pix ~ 3500) because einsum falls back
+        to a general-purpose Python-side path for 3-tensor contractions
+        instead of the tuned BLAS kernel.
+
+        The diffuse sub-component uncertainties use the rows of the supplied
+        diffuse design matrix. This keeps uncertainty propagation tied to the
+        same final LSF-aware matrix bundle as the reconstructed mean and also
+        supports reduced synthetic matrices used by workflow tests.
+
+        NaN or non-finite ``coef_err`` values are treated as zero
+        contribution, matching the "no measured uncertainty available"
+        semantics used elsewhere in the pipeline.
+        """
+        sl = self._component_slices(mats)
+        err = np.asarray(coef_err, dtype=np.float64).ravel()
+        if err.size != sum(m.shape[0] for m in mats.values()):
+            raise ValueError(
+                f"coef_err length mismatch: expected "
+                f"{sum(m.shape[0] for m in mats.values())}, got {err.size}"
+            )
+        err2 = np.where(np.isfinite(err), err ** 2, 0.0)
+
+        def _matrix_sigma(name: str) -> np.ndarray:
+            m = mats[name]
+            # (m*m).T @ vec dispatches to BLAS gemv on the squared matrix.
+            var = (m * m).T @ err2[sl[name]]
+            return np.sqrt(np.maximum(var, 0.0))
+
+        diffuse_err2 = err2[sl["diffuse"]]
+        diffuse_matrix = mats["diffuse"]
+
+        def _diffuse_row_sigma(index: int) -> np.ndarray:
+            if index >= diffuse_matrix.shape[0]:
+                return np.zeros(diffuse_matrix.shape[1], dtype=np.float64)
+            return np.sqrt(diffuse_err2[index]) * np.abs(diffuse_matrix[index])
+
+        sigmas = {
+            "oh": _matrix_sigma("oh"),
+            "moon": _matrix_sigma("moon"),
+            "ho2": _diffuse_row_sigma(0),
+            "feo": _diffuse_row_sigma(1),
+            "o2ac": _diffuse_row_sigma(2),
+            "diffuse": _matrix_sigma("diffuse"),
+            "atom": _matrix_sigma("atom"),
+            "orc": _matrix_sigma("orc"),
+            "o2": _matrix_sigma("o2"),
+        }
+        return sigmas
 
     def _build_lsf_source(self, coef: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         mats = self._matrix_bundle(
@@ -1195,6 +1600,7 @@ def reconstruct_component_spectra(
     palace_oh_suffix: str | None = None,
     palace_diffuse_suffix: str | None = None,
     o2_vector: np.ndarray | None = None,
+    coef_err: np.ndarray | None = None,
     moon_interline_boost: float = 0.0,
     moon_interline_red_min: float = 7454.0,
     moon_interline_exclusion_a: float = 3.0,
@@ -1226,6 +1632,14 @@ def reconstruct_component_spectra(
         ``pmd_refcont`` only.
     o2_vector
         Optional precomputed O2 template on `wave`. If omitted, O2 is set to zero.
+    coef_err
+        Optional per-coefficient 1σ uncertainty (same shape as ``coef``). When
+        provided, the returned dict additionally contains ``sigma`` mapping
+        each component name to its per-pixel flux 1σ (first-order Jacobian
+        propagation through the LSF-convolved design matrix; see
+        ``SkyDecompBase._components_sigma_from_coef_err``), plus
+        ``sigma_total`` (quadrature sum of the independent-component
+        variances).
     moon_interline_boost
         Strength of down-weighting for masked red pixels in the moon-spline fit.
         Masked-pixel weight is `1 / (1 + moon_interline_boost)`.
@@ -1295,6 +1709,23 @@ def reconstruct_component_spectra(
         + comps["orc"]
         + comps["o2"]
     )
+    if coef_err is not None:
+        err_arr = np.asarray(coef_err, dtype=np.float64).ravel()
+        if err_arr.size != coef_arr.size:
+            raise ValueError(
+                f"coef_err length mismatch: expected {coef_arr.size}, "
+                f"got {err_arr.size}"
+            )
+        sigma_comps = model._components_sigma_from_coef_err(err_arr, mats)
+        comps["sigma"] = sigma_comps
+        comps["sigma_total"] = np.sqrt(
+            sigma_comps["oh"] ** 2
+            + sigma_comps["moon"] ** 2
+            + sigma_comps["diffuse"] ** 2
+            + sigma_comps["atom"] ** 2
+            + sigma_comps["orc"] ** 2
+            + sigma_comps["o2"] ** 2
+        )
     return comps
 
 

@@ -56,6 +56,7 @@ def _baseline_result_kwargs(wave):
         "o2_fit_elapsed_sec": 0.1,
         "o2_valid_frac": 1.0,
         "coef": np.array([1.0]),
+        "coef_err": np.array([np.nan]),
         "design_names": ["component"],
         "bestfit": np.zeros_like(wave),
         "bestfit_lsf": np.zeros_like(wave),
@@ -67,6 +68,7 @@ def _baseline_result_kwargs(wave):
         "moon_boosted_pixels": np.array([], dtype=float),
         "vector_o2": np.zeros_like(wave),
         "o2_prefit_amp": 0.0,
+        "bestfit_lsf_sigma": np.zeros_like(wave),
     }
 
 
@@ -438,6 +440,7 @@ def test_lsf_fits_round_trip_reconstructs_surface(tmp_path):
             "PRIMARY",
             "META",
             "COEF",
+            "COEF_ERR",
             "LSF_COEF",
             "LSF_KNOTS",
             "LSF_META",
@@ -457,8 +460,10 @@ def test_baseline_writer_contract_is_unchanged_and_mixed_results_are_rejected(
             "PRIMARY",
             "META",
             "COEF",
+            "COEF_ERR",
             "BESTFIT",
             "BESTFIT_LSF",
+            "FLUX_SIGMA_TOTAL",
             "RESID",
             "VECTOR_O2",
             "COMP_OH",

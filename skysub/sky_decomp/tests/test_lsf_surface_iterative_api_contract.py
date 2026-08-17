@@ -124,6 +124,7 @@ def test_dataclass_field_order_and_defaults():
 
     assert tuple(field.name for field in fields(iterative.LSFSurfaceIterativeResult)) == (
         "coef",
+        "coef_err",
         "bestfit",
         "resid",
         "resid_level",
@@ -149,6 +150,7 @@ def test_dataclass_field_order_and_defaults():
         "moon_boosted_pixels",
         "vector_o2",
         "o2_prefit_amp",
+        "bestfit_lsf_sigma",
         "lsf_state",
     )
 

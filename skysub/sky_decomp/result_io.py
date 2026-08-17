@@ -524,7 +524,17 @@ def _validate_result_batch(results):
             raise ValueError(f"Result {index} has different ordered component keys")
         if np.asarray(result.coef).shape != (len(design_names),):
             raise ValueError(f"Result {index} coefficient shape does not match design_names")
-        for name in ("bestfit", "bestfit_lsf", "resid", "vector_o2"):
+        if np.asarray(result.coef_err).shape != (len(design_names),):
+            raise ValueError(
+                f"Result {index} coefficient error shape does not match design_names"
+            )
+        for name in (
+            "bestfit",
+            "bestfit_lsf",
+            "bestfit_lsf_sigma",
+            "resid",
+            "vector_o2",
+        ):
             if np.asarray(getattr(result, name)).shape != (n_wave,):
                 raise ValueError(f"Result {index} {name} has an incompatible wavelength shape")
         for name, component in result.components.items():
@@ -623,13 +633,24 @@ def results_to_fits(results, filename):
     coef_table = Table(
         {name: coef_arr[:, index] for index, name in enumerate(design_names)}
     )
+    coef_err_arr = stack("coef_err")
+    if coef_err_arr.shape != coef_arr.shape:
+        raise ValueError(
+            f"Coefficient error shape {coef_err_arr.shape} does not match "
+            f"coefficient shape {coef_arr.shape}."
+        )
+    coef_err_table = Table(
+        {name: coef_err_arr[:, index] for index, name in enumerate(design_names)}
+    )
     hdul = fits.HDUList(
         [
             fits.PrimaryHDU(),
             fits.BinTableHDU(Table(rows), name="META"),
             fits.BinTableHDU(coef_table, name="COEF"),
+            fits.BinTableHDU(coef_err_table, name="COEF_ERR"),
             fits.ImageHDU(stack("bestfit"), name="BESTFIT"),
             fits.ImageHDU(stack("bestfit_lsf"), name="BESTFIT_LSF"),
+            fits.ImageHDU(stack("bestfit_lsf_sigma"), name="FLUX_SIGMA_TOTAL"),
             fits.ImageHDU(stack("resid"), name="RESID"),
             fits.ImageHDU(stack("vector_o2"), name="VECTOR_O2"),
         ]
