@@ -227,6 +227,23 @@ class MoonZodiPrediction:
     state: MoonZodiState
 
 
+class MoonZodiInvalidObservationError(ValueError):
+    """Expected geometry rejection for an observation that cannot be modelled."""
+
+    def __init__(
+        self,
+        reason: str,
+        message: str,
+        *,
+        observation: MoonZodiObservation,
+        geometry: MoonZodiGeometry,
+    ) -> None:
+        super().__init__(message)
+        self.reason = str(reason)
+        self.observation = observation
+        self.geometry = geometry
+
+
 def _text(value: object) -> str:
     return value.decode().strip() if isinstance(value, bytes) else str(value).strip()
 
@@ -328,6 +345,14 @@ def _load_leinert(path: str) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     return lon, lat, values
 
 
+class _LeinertDomainError(ValueError):
+    """Expected physical-domain rejection from the Leinert lookup table."""
+
+    def __init__(self, reason: str, message: str) -> None:
+        super().__init__(message)
+        self.reason = str(reason)
+
+
 def _interpolate_leinert(
     lon_abs_deg: float,
     lat_abs_deg: float,
@@ -336,13 +361,19 @@ def _interpolate_leinert(
     lon, lat, values = grid
     x, y = abs(float(lon_abs_deg)), abs(float(lat_abs_deg))
     if not (lon[0] <= x <= lon[-1] and lat[0] <= y <= lat[-1]):
-        raise ValueError(f"Coordinates are outside the Leinert grid: lon={x:.3f}, lat={y:.3f}")
+        raise _LeinertDomainError(
+            "zodi_outside_leinert_grid",
+            f"Coordinates are outside the Leinert grid: lon={x:.3f}, lat={y:.3f}",
+        )
     i1 = min(max(int(np.searchsorted(lon, x, side="right")), 1), lon.size - 1)
     j1 = min(max(int(np.searchsorted(lat, y, side="right")), 1), lat.size - 1)
     i0, j0 = i1 - 1, j1 - 1
     corners = values[np.ix_([i0, i1], [j0, j1])]
     if np.any(corners >= 99999):
-        raise ValueError(f"Invalid near-Sun Leinert cell: lon={x:.3f}, lat={y:.3f}")
+        raise _LeinertDomainError(
+            "zodi_invalid_near_sun_cell",
+            f"Invalid near-Sun Leinert cell: lon={x:.3f}, lat={y:.3f}",
+        )
     tx = (x - lon[i0]) / (lon[i1] - lon[i0])
     ty = (y - lat[j0]) / (lat[j1] - lat[j0])
     return float(
@@ -415,8 +446,29 @@ def compute_midpoint_geometry(
     altaz = AltAz(obstime=obstime, location=LCO, pressure=0 * u.hPa)
     target_altitude = float(target.transform_to(altaz).alt.deg)
     if target_altitude <= 0.0:
-        raise ValueError(
-            f"Moon/Zodi target is below the horizon: altitude={target_altitude:.3f} deg"
+        geometry = MoonZodiGeometry(
+            midpoint_utc=obstime.isot,
+            target_altitude_deg=target_altitude,
+            target_airmass=np.nan,
+            sun_altitude_deg=np.nan,
+            moon_altitude_deg=np.nan,
+            moon_airmass=np.nan,
+            moon_separation_deg=np.nan,
+            signed_phase_deg=np.nan,
+            moon_distance_km=np.nan,
+            sun_moon_distance_km=np.nan,
+            solar_elongation_deg=np.nan,
+            ecliptic_lon_relative_deg=np.nan,
+            ecliptic_latitude_deg=np.nan,
+            moon_velocity_kms=np.nan,
+            zodi_velocity_kms=np.nan,
+            zodi_b500=np.nan,
+        )
+        raise MoonZodiInvalidObservationError(
+            "target_below_horizon",
+            f"Moon/Zodi target is below the horizon: altitude={target_altitude:.3f} deg",
+            observation=observation,
+            geometry=geometry,
         )
 
     with solar_system_ephemeris.set(str(root / EPHEMERIS_ASSET)):
@@ -444,11 +496,6 @@ def compute_midpoint_geometry(
         signed_phase = float(np.sign(moon_relative_longitude) * phase_abs)
         ecliptic_latitude = float(target_ecliptic.lat.to_value(u.deg))
         solar_elongation = float(target_topocentric.separation(sun).deg)
-        zodi_b500 = _interpolate_leinert(
-            relative_longitude,
-            ecliptic_latitude,
-            _load_leinert(str(root / ZODIACAL_LIGHT_ASSET)),
-        )
         sun_position, _ = get_body_barycentric_posvel("sun", obstime)
         moon_position, _ = get_body_barycentric_posvel("moon", obstime)
         sun_moon_distance = float(
@@ -461,22 +508,38 @@ def compute_midpoint_geometry(
         * np.sin(np.deg2rad(relative_longitude))
         * np.cos(np.deg2rad(ecliptic_latitude))
     )
+    geometry_values = {
+        "midpoint_utc": obstime.isot,
+        "target_altitude_deg": target_altitude,
+        "target_airmass": _airmass(target_altitude),
+        "sun_altitude_deg": sun_altitude,
+        "moon_altitude_deg": moon_altitude,
+        "moon_airmass": _airmass(moon_altitude),
+        "moon_separation_deg": moon_separation,
+        "signed_phase_deg": signed_phase,
+        "moon_distance_km": float(moon.distance.to_value(u.km)),
+        "sun_moon_distance_km": sun_moon_distance,
+        "solar_elongation_deg": solar_elongation,
+        "ecliptic_lon_relative_deg": relative_longitude,
+        "ecliptic_latitude_deg": ecliptic_latitude,
+        "moon_velocity_kms": moon_velocity,
+        "zodi_velocity_kms": zodi_velocity,
+    }
+    try:
+        zodi_b500 = _interpolate_leinert(
+            relative_longitude,
+            ecliptic_latitude,
+            _load_leinert(str(root / ZODIACAL_LIGHT_ASSET)),
+        )
+    except _LeinertDomainError as error:
+        raise MoonZodiInvalidObservationError(
+            error.reason,
+            str(error),
+            observation=observation,
+            geometry=MoonZodiGeometry(**geometry_values, zodi_b500=np.nan),
+        ) from error
     return MoonZodiGeometry(
-        midpoint_utc=obstime.isot,
-        target_altitude_deg=target_altitude,
-        target_airmass=_airmass(target_altitude),
-        sun_altitude_deg=sun_altitude,
-        moon_altitude_deg=moon_altitude,
-        moon_airmass=_airmass(moon_altitude),
-        moon_separation_deg=moon_separation,
-        signed_phase_deg=signed_phase,
-        moon_distance_km=float(moon.distance.to_value(u.km)),
-        sun_moon_distance_km=sun_moon_distance,
-        solar_elongation_deg=solar_elongation,
-        ecliptic_lon_relative_deg=relative_longitude,
-        ecliptic_latitude_deg=ecliptic_latitude,
-        moon_velocity_kms=moon_velocity,
-        zodi_velocity_kms=zodi_velocity,
+        **geometry_values,
         zodi_b500=zodi_b500,
     )
 
@@ -886,6 +949,60 @@ class MoonZodiPhysicalModel:
         )
         return MoonZodiPrediction(moon=moon, zodi=zodi, state=state)
 
+    def invalid_observation_state(
+        self,
+        wave_air_angstrom: np.ndarray,
+        observation: MoonZodiObservation,
+        error: MoonZodiInvalidObservationError,
+        *,
+        physical_to_fit_flux_scale: float,
+    ) -> MoonZodiState:
+        """Return provenance for one expected rejection without fabricating a fit."""
+        wave = np.asarray(wave_air_angstrom)
+        self.validate_wave(wave)
+        if error.observation != observation:
+            raise ValueError("Invalid-observation context does not match the observation")
+        if (
+            not np.isfinite(physical_to_fit_flux_scale)
+            or physical_to_fit_flux_scale <= 0.0
+        ):
+            raise ValueError("physical_to_fit_flux_scale must be positive and finite")
+        flags = [
+            "invalid_observation",
+            f"invalid_observation:{error.reason}",
+        ]
+        if observation.exposure_seconds_source == "assumed_900s":
+            flags.append("exposure_time_assumed")
+        return MoonZodiState(
+            schema_version=MODEL_SCHEMA_VERSION,
+            model_id=MODEL_ID,
+            formula_version=FORMULA_VERSION,
+            scientific_status=str(self.manifest["scientific_status"]),
+            source_session=str(self.manifest["source_session"]),
+            manifest_sha256=self.manifest_sha256,
+            checkpoint_sha256=str(self.manifest["source_checkpoint"]["sha256"]),
+            parameter_names=MODEL_PARAMETER_NAMES,
+            parameter_values=tuple(float(value) for value in self.parameter_values),
+            asset_records=self.asset_records,
+            observation=observation,
+            geometry=error.geometry,
+            feature_t=np.nan,
+            feature_m=np.nan,
+            feature_p=np.nan,
+            feature_u=np.nan,
+            feature_q=np.nan,
+            wave_n=int(wave.size),
+            wave_min=float(wave[0]),
+            wave_max=float(wave[-1]),
+            wave_sha256=wave_sha256(wave),
+            correction_scope=CORRECTION_SCOPE,
+            correction_degree=3,
+            correction_knots=(),
+            physical_to_fit_flux_scale=float(physical_to_fit_flux_scale),
+            predictor_seconds=np.nan,
+            flags=tuple(flags),
+        )
+
 
 __all__ = [
     "CORRECTION_SCOPE",
@@ -902,6 +1019,7 @@ __all__ = [
     "MODEL_PARAMETER_NAMES",
     "MODEL_SCHEMA_VERSION",
     "MoonZodiGeometry",
+    "MoonZodiInvalidObservationError",
     "MoonZodiObservation",
     "MoonZodiPhysicalModel",
     "MoonZodiPrediction",
