@@ -345,6 +345,14 @@ def _load_leinert(path: str) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     return lon, lat, values
 
 
+class _LeinertDomainError(ValueError):
+    """Expected physical-domain rejection from the Leinert lookup table."""
+
+    def __init__(self, reason: str, message: str) -> None:
+        super().__init__(message)
+        self.reason = str(reason)
+
+
 def _interpolate_leinert(
     lon_abs_deg: float,
     lat_abs_deg: float,
@@ -353,13 +361,19 @@ def _interpolate_leinert(
     lon, lat, values = grid
     x, y = abs(float(lon_abs_deg)), abs(float(lat_abs_deg))
     if not (lon[0] <= x <= lon[-1] and lat[0] <= y <= lat[-1]):
-        raise ValueError(f"Coordinates are outside the Leinert grid: lon={x:.3f}, lat={y:.3f}")
+        raise _LeinertDomainError(
+            "zodi_outside_leinert_grid",
+            f"Coordinates are outside the Leinert grid: lon={x:.3f}, lat={y:.3f}",
+        )
     i1 = min(max(int(np.searchsorted(lon, x, side="right")), 1), lon.size - 1)
     j1 = min(max(int(np.searchsorted(lat, y, side="right")), 1), lat.size - 1)
     i0, j0 = i1 - 1, j1 - 1
     corners = values[np.ix_([i0, i1], [j0, j1])]
     if np.any(corners >= 99999):
-        raise ValueError(f"Invalid near-Sun Leinert cell: lon={x:.3f}, lat={y:.3f}")
+        raise _LeinertDomainError(
+            "zodi_invalid_near_sun_cell",
+            f"Invalid near-Sun Leinert cell: lon={x:.3f}, lat={y:.3f}",
+        )
     tx = (x - lon[i0]) / (lon[i1] - lon[i0])
     ty = (y - lat[j0]) / (lat[j1] - lat[j0])
     return float(
@@ -482,11 +496,6 @@ def compute_midpoint_geometry(
         signed_phase = float(np.sign(moon_relative_longitude) * phase_abs)
         ecliptic_latitude = float(target_ecliptic.lat.to_value(u.deg))
         solar_elongation = float(target_topocentric.separation(sun).deg)
-        zodi_b500 = _interpolate_leinert(
-            relative_longitude,
-            ecliptic_latitude,
-            _load_leinert(str(root / ZODIACAL_LIGHT_ASSET)),
-        )
         sun_position, _ = get_body_barycentric_posvel("sun", obstime)
         moon_position, _ = get_body_barycentric_posvel("moon", obstime)
         sun_moon_distance = float(
@@ -499,22 +508,38 @@ def compute_midpoint_geometry(
         * np.sin(np.deg2rad(relative_longitude))
         * np.cos(np.deg2rad(ecliptic_latitude))
     )
+    geometry_values = {
+        "midpoint_utc": obstime.isot,
+        "target_altitude_deg": target_altitude,
+        "target_airmass": _airmass(target_altitude),
+        "sun_altitude_deg": sun_altitude,
+        "moon_altitude_deg": moon_altitude,
+        "moon_airmass": _airmass(moon_altitude),
+        "moon_separation_deg": moon_separation,
+        "signed_phase_deg": signed_phase,
+        "moon_distance_km": float(moon.distance.to_value(u.km)),
+        "sun_moon_distance_km": sun_moon_distance,
+        "solar_elongation_deg": solar_elongation,
+        "ecliptic_lon_relative_deg": relative_longitude,
+        "ecliptic_latitude_deg": ecliptic_latitude,
+        "moon_velocity_kms": moon_velocity,
+        "zodi_velocity_kms": zodi_velocity,
+    }
+    try:
+        zodi_b500 = _interpolate_leinert(
+            relative_longitude,
+            ecliptic_latitude,
+            _load_leinert(str(root / ZODIACAL_LIGHT_ASSET)),
+        )
+    except _LeinertDomainError as error:
+        raise MoonZodiInvalidObservationError(
+            error.reason,
+            str(error),
+            observation=observation,
+            geometry=MoonZodiGeometry(**geometry_values, zodi_b500=np.nan),
+        ) from error
     return MoonZodiGeometry(
-        midpoint_utc=obstime.isot,
-        target_altitude_deg=target_altitude,
-        target_airmass=_airmass(target_altitude),
-        sun_altitude_deg=sun_altitude,
-        moon_altitude_deg=moon_altitude,
-        moon_airmass=_airmass(moon_altitude),
-        moon_separation_deg=moon_separation,
-        signed_phase_deg=signed_phase,
-        moon_distance_km=float(moon.distance.to_value(u.km)),
-        sun_moon_distance_km=sun_moon_distance,
-        solar_elongation_deg=solar_elongation,
-        ecliptic_lon_relative_deg=relative_longitude,
-        ecliptic_latitude_deg=ecliptic_latitude,
-        moon_velocity_kms=moon_velocity,
-        zodi_velocity_kms=zodi_velocity,
+        **geometry_values,
         zodi_b500=zodi_b500,
     )
 

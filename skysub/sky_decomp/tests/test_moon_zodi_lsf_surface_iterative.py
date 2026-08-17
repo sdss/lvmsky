@@ -11,6 +11,7 @@ import numpy as np
 import pytest
 
 from skysub import decompose_parallel
+from skysub.sky_decomp import moon_zodi_model
 from skysub.sky_decomp.result_io import (
     INVALID_OBSERVATION_FIT_STATUS,
     load_lsf_surface_state,
@@ -273,6 +274,28 @@ def test_valid_fit_recovers_after_invalid_placeholder(fitted_case, invalid_case)
     )
     assert recovered.fit_status != INVALID_OBSERVATION_FIT_STATUS
     assert np.all(np.isfinite(recovered.bestfit_lsf))
+
+
+def test_near_sun_leinert_rejection_returns_nan_result(fitted_case, monkeypatch):
+    wave, lsf, observation, decomposer, _ = fitted_case
+
+    def reject_near_sun(*_args):
+        raise moon_zodi_model._LeinertDomainError(
+            "zodi_invalid_near_sun_cell",
+            "Invalid near-Sun Leinert cell: lon=6.770, lat=0.000",
+        )
+
+    monkeypatch.setattr(moon_zodi_model, "_interpolate_leinert", reject_near_sun)
+    result = decomposer.fit(
+        np.zeros_like(wave),
+        np.ones_like(wave),
+        observation=observation,
+        detector_lsf_fwhm=lsf,
+    )
+    assert result.fit_status == INVALID_OBSERVATION_FIT_STATUS
+    assert "reason=zodi_invalid_near_sun_cell" in result.fit_summary
+    assert np.all(np.isnan(result.bestfit_lsf))
+    assert np.isnan(result.moon_zodi_state.geometry.zodi_b500)
 
 
 def test_decomposition_zeroes_only_moon_below_horizon(fitted_case):

@@ -191,6 +191,67 @@ def test_target_below_horizon_raises_typed_rejection_with_partial_geometry():
     assert error.geometry.midpoint_utc
 
 
+def test_invalid_near_sun_leinert_cell_is_a_typed_observation_rejection(monkeypatch):
+    with np.load(REFERENCE, allow_pickle=False) as reference:
+        index = 1
+        wave = np.asarray(reference["wave"], dtype=np.float64)
+        lsf = np.asarray(reference["lsf"][index], dtype=np.float64)
+        observation = MoonZodiObservation(
+            int(reference["expnum"][index]),
+            str(reference["date_obs"][index]),
+            "sky_far",
+            float(reference["ra_deg"][index]),
+            float(reference["dec_deg"][index]),
+            900.0,
+            "assumed_900s",
+        )
+
+    def reject_near_sun(*_args):
+        raise moon_zodi_model._LeinertDomainError(
+            "zodi_invalid_near_sun_cell",
+            "Invalid near-Sun Leinert cell: lon=6.770, lat=0.000",
+        )
+
+    monkeypatch.setattr(moon_zodi_model, "_interpolate_leinert", reject_near_sun)
+    with pytest.raises(MoonZodiInvalidObservationError) as caught:
+        MoonZodiPhysicalModel().predict(
+            wave,
+            lsf,
+            observation,
+            physical_to_fit_flux_scale=1.0e14,
+        )
+    error = caught.value
+    assert error.reason == "zodi_invalid_near_sun_cell"
+    assert str(error) == "Invalid near-Sun Leinert cell: lon=6.770, lat=0.000"
+    assert error.observation == observation
+    assert error.geometry.target_altitude_deg > 0.0
+    assert np.isfinite(error.geometry.ecliptic_lon_relative_deg)
+    assert np.isfinite(error.geometry.ecliptic_latitude_deg)
+    assert np.isnan(error.geometry.zodi_b500)
+
+
+def test_unexpected_leinert_error_is_not_converted(monkeypatch):
+    with np.load(REFERENCE, allow_pickle=False) as reference:
+        index = 1
+        observation = MoonZodiObservation(
+            int(reference["expnum"][index]),
+            str(reference["date_obs"][index]),
+            "sky_far",
+            float(reference["ra_deg"][index]),
+            float(reference["dec_deg"][index]),
+            900.0,
+            "assumed_900s",
+        )
+
+    def fail_unexpectedly(*_args):
+        raise ValueError("corrupt Leinert table")
+
+    monkeypatch.setattr(moon_zodi_model, "_interpolate_leinert", fail_unexpectedly)
+    with pytest.raises(ValueError, match="corrupt Leinert table") as caught:
+        moon_zodi_model.compute_midpoint_geometry(observation)
+    assert type(caught.value) is ValueError
+
+
 def test_native_grid_and_precision_are_fail_fast():
     with np.load(REFERENCE, allow_pickle=False) as reference:
         wave = np.asarray(reference["wave"], dtype=np.float64)
