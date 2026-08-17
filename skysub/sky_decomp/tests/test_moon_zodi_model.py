@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+from dataclasses import replace
 from pathlib import Path
 import shutil
 
@@ -15,6 +16,7 @@ from skysub.sky_decomp.moon_zodi_model import (
     DEFAULT_DATA_ROOT,
     MODEL_ID,
     NATIVE_GRID_SHA256,
+    MoonZodiInvalidObservationError,
     MoonZodiObservation,
     MoonZodiPhysicalModel,
     file_sha256,
@@ -153,6 +155,40 @@ def test_predictor_matches_three_frozen_jax_reference_cases():
             ),
             physical_to_fit_flux_scale=1.0e14,
         ).state.flags
+
+
+def test_target_below_horizon_raises_typed_rejection_with_partial_geometry():
+    with np.load(REFERENCE, allow_pickle=False) as reference:
+        index = 1
+        wave = np.asarray(reference["wave"], dtype=np.float64)
+        lsf = np.asarray(reference["lsf"][index], dtype=np.float64)
+        observation = MoonZodiObservation(
+            int(reference["expnum"][index]),
+            str(reference["date_obs"][index]),
+            "sky_far",
+            float(reference["ra_deg"][index]),
+            float(reference["dec_deg"][index]),
+            900.0,
+            "assumed_900s",
+        )
+    invalid = replace(
+        observation,
+        target_ra_deg=(observation.target_ra_deg + 180.0) % 360.0,
+        target_dec_deg=-observation.target_dec_deg,
+    )
+    with pytest.raises(MoonZodiInvalidObservationError) as caught:
+        MoonZodiPhysicalModel().predict(
+            wave,
+            lsf,
+            invalid,
+            physical_to_fit_flux_scale=1.0e14,
+        )
+    error = caught.value
+    assert error.reason == "target_below_horizon"
+    assert error.observation == invalid
+    assert error.geometry.target_altitude_deg <= 0.0
+    assert np.isnan(error.geometry.target_airmass)
+    assert error.geometry.midpoint_utc
 
 
 def test_native_grid_and_precision_are_fail_fast():

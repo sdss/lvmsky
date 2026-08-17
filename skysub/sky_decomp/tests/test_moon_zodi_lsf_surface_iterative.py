@@ -11,13 +11,20 @@ import numpy as np
 import pytest
 
 from skysub import decompose_parallel
-from skysub.sky_decomp.result_io import load_moon_zodi_state
+from skysub.sky_decomp.result_io import (
+    INVALID_OBSERVATION_FIT_STATUS,
+    load_lsf_surface_state,
+    load_moon_zodi_state,
+)
 from skysub.sky_decomp.lsf_surface_iterative import LSFSurfaceIterativeConfig
 from skysub.sky_decomp.moon_zodi_lsf_surface_iterative import (
     MoonZodiLSFSurfaceIterativeResult,
     SkyDecompMoonZodiLSFSurfaceIterative,
 )
-from skysub.sky_decomp.moon_zodi_model import DEFAULT_DATA_ROOT, MoonZodiObservation
+from skysub.sky_decomp.moon_zodi_model import (
+    DEFAULT_DATA_ROOT,
+    MoonZodiObservation,
+)
 
 
 REFERENCE = Path(__file__).parent / "data" / "moon_zodi_predictor_reference_v1.npz"
@@ -91,6 +98,23 @@ def fitted_case():
         detector_lsf_fwhm=lsf,
     )
     return wave, lsf, observation, decomposer, result
+
+
+@pytest.fixture(scope="module")
+def invalid_case(fitted_case):
+    wave, lsf, observation, decomposer, _ = fitted_case
+    invalid_observation = replace(
+        observation,
+        target_ra_deg=(observation.target_ra_deg + 180.0) % 360.0,
+        target_dec_deg=-observation.target_dec_deg,
+    )
+    result = decomposer.fit(
+        np.zeros_like(wave),
+        np.ones_like(wave),
+        observation=invalid_observation,
+        detector_lsf_fwhm=lsf,
+    )
+    return invalid_observation, result
 
 
 def test_shared_correction_and_component_closure(fitted_case):
@@ -204,6 +228,128 @@ def test_fits_schema_roundtrip_thinning_and_named_o2(fitted_case, tmp_path):
             np.testing.assert_array_equal(reduced[name].data, original[name].data)
 
 
+def test_invalid_observation_result_is_same_schema_and_all_nan(
+    fitted_case,
+    invalid_case,
+):
+    _, _, _, decomposer, _ = fitted_case
+    observation, result = invalid_case
+    assert isinstance(result, MoonZodiLSFSurfaceIterativeResult)
+    assert result.fit_status == INVALID_OBSERVATION_FIT_STATUS
+    assert "reason=target_below_horizon" in result.fit_summary
+    assert tuple(result.components) == EXPECTED_COMPONENTS
+    for value in (
+        result.coef,
+        result.coef_err,
+        result.bestfit,
+        result.bestfit_lsf,
+        result.bestfit_lsf_sigma,
+        result.resid,
+        result.vector_o2,
+        *result.components.values(),
+    ):
+        assert np.all(np.isnan(value))
+    assert all(
+        np.all(np.isnan(coefficient))
+        for coefficient in result.lsf_state.coefficients.values()
+    )
+    assert result.moon_zodi_state.observation == observation
+    assert result.moon_zodi_state.geometry.target_altitude_deg <= 0.0
+    assert np.isnan(result.moon_zodi_state.geometry.target_airmass)
+    assert "invalid_observation" in result.moon_zodi_state.flags
+    assert decomposer._prediction_state is result.moon_zodi_state
+    assert decomposer.fit_status == INVALID_OBSERVATION_FIT_STATUS
+    assert np.all(np.isnan(decomposer.bestfit_lsf))
+
+
+def test_valid_fit_recovers_after_invalid_placeholder(fitted_case, invalid_case):
+    wave, lsf, observation, decomposer, _ = fitted_case
+    _ = invalid_case
+    recovered = decomposer.fit(
+        np.zeros_like(wave),
+        np.ones_like(wave),
+        observation=observation,
+        detector_lsf_fwhm=lsf,
+    )
+    assert recovered.fit_status != INVALID_OBSERVATION_FIT_STATUS
+    assert np.all(np.isfinite(recovered.bestfit_lsf))
+
+
+def test_decomposition_zeroes_only_moon_below_horizon(fitted_case):
+    _, original_lsf, original_observation, decomposer, _ = fitted_case
+    with np.load(REFERENCE, allow_pickle=False) as reference:
+        index = 0
+        lsf = np.asarray(reference["lsf"][index], dtype=np.float64)
+        observation = MoonZodiObservation(
+            int(reference["expnum"][index]),
+            str(reference["date_obs"][index]),
+            "sky_far",
+            float(reference["ra_deg"][index]),
+            float(reference["dec_deg"][index]),
+            900.0,
+            "assumed_900s",
+        )
+    decomposer._install_prediction(observation, lsf)
+    assert decomposer._prediction_state.geometry.moon_altitude_deg < 0.0
+    assert np.all(decomposer.physical_moon_prediction == 0.0)
+    assert np.max(decomposer.physical_zodi_prediction) > 0.0
+    assert "moon_zeroed_for_decomposition" in decomposer._prediction_state.flags
+
+    # Leave the shared module-scoped fixture in its original valid state.
+    decomposer._install_prediction(original_observation, original_lsf)
+
+
+def test_success_and_invalid_rows_share_one_fits_contract(
+    fitted_case,
+    invalid_case,
+    tmp_path,
+):
+    wave, _, _, _, valid = fitted_case
+    _, invalid = invalid_case
+    output = tmp_path / "mixed_validity.fits"
+    decompose_parallel.results_to_fits([valid, invalid], output)
+    with fits.open(output) as hdul:
+        assert [hdu.name for hdu in hdul] == EXPECTED_HDU_ORDER
+        assert len(hdul["META"].data) == 2
+        assert len(hdul["MZ_META"].data) == 2
+        assert hdul["META"].data[1]["fit_status"].strip() == (
+            INVALID_OBSERVATION_FIT_STATUS
+        )
+        for name in (
+            "BESTFIT",
+            "BESTFIT_LSF",
+            "FLUX_SIGMA_TOTAL",
+            "RESID",
+            "VECTOR_O2",
+            *(f"COMP_{component.upper()}" for component in EXPECTED_COMPONENTS),
+        ):
+            assert np.all(np.isnan(hdul[name].data[1]))
+        assert np.all(np.isnan(np.asarray(list(hdul["COEF"].data[1]))))
+        assert np.all(np.isnan(hdul["LSF_COEF"].data[1]))
+        assert hdul["MZ_META"].data[1]["target_altitude_deg"] <= 0.0
+        assert np.isnan(hdul["MZ_META"].data[1]["target_airmass"])
+        assert hdul["BESTFIT_LSF"].data.shape == (2, wave.size)
+    loaded_mz = load_moon_zodi_state(output, spectrum_index=1)
+    loaded_lsf = load_lsf_surface_state(output, spectrum_index=1)
+    assert "invalid_observation" in loaded_mz.flags
+    assert loaded_lsf.fit_status == INVALID_OBSERVATION_FIT_STATUS
+    assert all(
+        np.all(np.isnan(coefficient))
+        for coefficient in loaded_lsf.coefficients.values()
+    )
+
+
+def test_writer_rejects_non_nan_invalid_placeholder(invalid_case, tmp_path):
+    _, invalid = invalid_case
+    changed = copy.deepcopy(invalid)
+    changed.components["zodi"][0] = 0.0
+    with pytest.raises(ValueError, match="only NaN in component zodi"):
+        decompose_parallel.results_to_fits(
+            [changed],
+            tmp_path / "invalid_placeholder.fits",
+        )
+
+
 def test_writer_rejects_mixed_names_and_model_hashes(fitted_case, tmp_path):
     _, _, _, _, result = fitted_case
     with pytest.raises(ValueError, match="same concrete type"):
@@ -252,6 +398,46 @@ def test_batch_role_coordinate_and_lsf_contract(monkeypatch):
         "lsf-surface-iterative": "_lsf_surface_iterative",
         "moon-zodi-lsf-surface-iterative": "_moon_zodi_lsf_surface_iterative",
     }
+
+
+def test_batch_preserves_placeholder_and_propagates_unexpected_errors(monkeypatch):
+    dtype = [
+        ("expnum", "i8"),
+        ("date_obs", "U30"),
+        ("sci_ra", "f8"),
+        ("sci_dec", "f8"),
+        ("sky_near_ra", "f8"),
+        ("sky_near_dec", "f8"),
+        ("sky_far_ra", "f8"),
+        ("sky_far_dec", "f8"),
+    ]
+    meta = np.zeros(2, dtype=dtype)
+    meta[0] = (42, "2024-01-02T03:04:05", 1.0, 2.0, 3.0, 4.0, 5.0, 6.0)
+    meta[1] = (43, "2024-01-02T03:19:05", 1.5, 2.5, 3.5, 4.5, 5.5, 6.5)
+    sentinels = {42: object(), 43: object()}
+
+    class PlaceholderResult:
+        def fit(self, *_args, **kwargs):
+            return sentinels[kwargs["observation"].expnum]
+
+    monkeypatch.setattr(decompose_parallel, "_WORKER_DECOMPOSER", PlaceholderResult())
+    monkeypatch.setattr(decompose_parallel, "_WORKER_FACTOR", 1.0)
+    monkeypatch.setattr(decompose_parallel, "_WORKER_FIT_MODEL", decompose_parallel.MOON_ZODI_FIT_MODEL)
+    monkeypatch.setattr(decompose_parallel, "_WORKER_FLUX", {"sky2": np.ones((2, 2))})
+    monkeypatch.setattr(decompose_parallel, "_WORKER_LSF", {"sky2": np.ones((2, 2))})
+    monkeypatch.setattr(decompose_parallel, "_WORKER_META", meta)
+    monkeypatch.setattr(decompose_parallel, "_WORKER_PROGRESS_QUEUE", None)
+    kind, rows = decompose_parallel.fit_chunk_worker(("sky2", 0, 2))
+    assert kind == "sky2"
+    assert rows == [(0, sentinels[42]), (1, sentinels[43])]
+
+    class UnexpectedFailure(PlaceholderResult):
+        def fit(self, *_args, **_kwargs):
+            raise RuntimeError("unexpected implementation error")
+
+    monkeypatch.setattr(decompose_parallel, "_WORKER_DECOMPOSER", UnexpectedFailure())
+    with pytest.raises(RuntimeError, match="unexpected implementation error"):
+        decompose_parallel.fit_chunk_worker(("sky2", 0, 1))
 
 
 def test_runtime_data_roots_are_selected_by_fit_model(monkeypatch, tmp_path):

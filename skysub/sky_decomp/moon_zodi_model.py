@@ -227,6 +227,23 @@ class MoonZodiPrediction:
     state: MoonZodiState
 
 
+class MoonZodiInvalidObservationError(ValueError):
+    """Expected geometry rejection for an observation that cannot be modelled."""
+
+    def __init__(
+        self,
+        reason: str,
+        message: str,
+        *,
+        observation: MoonZodiObservation,
+        geometry: MoonZodiGeometry,
+    ) -> None:
+        super().__init__(message)
+        self.reason = str(reason)
+        self.observation = observation
+        self.geometry = geometry
+
+
 def _text(value: object) -> str:
     return value.decode().strip() if isinstance(value, bytes) else str(value).strip()
 
@@ -415,8 +432,29 @@ def compute_midpoint_geometry(
     altaz = AltAz(obstime=obstime, location=LCO, pressure=0 * u.hPa)
     target_altitude = float(target.transform_to(altaz).alt.deg)
     if target_altitude <= 0.0:
-        raise ValueError(
-            f"Moon/Zodi target is below the horizon: altitude={target_altitude:.3f} deg"
+        geometry = MoonZodiGeometry(
+            midpoint_utc=obstime.isot,
+            target_altitude_deg=target_altitude,
+            target_airmass=np.nan,
+            sun_altitude_deg=np.nan,
+            moon_altitude_deg=np.nan,
+            moon_airmass=np.nan,
+            moon_separation_deg=np.nan,
+            signed_phase_deg=np.nan,
+            moon_distance_km=np.nan,
+            sun_moon_distance_km=np.nan,
+            solar_elongation_deg=np.nan,
+            ecliptic_lon_relative_deg=np.nan,
+            ecliptic_latitude_deg=np.nan,
+            moon_velocity_kms=np.nan,
+            zodi_velocity_kms=np.nan,
+            zodi_b500=np.nan,
+        )
+        raise MoonZodiInvalidObservationError(
+            "target_below_horizon",
+            f"Moon/Zodi target is below the horizon: altitude={target_altitude:.3f} deg",
+            observation=observation,
+            geometry=geometry,
         )
 
     with solar_system_ephemeris.set(str(root / EPHEMERIS_ASSET)):
@@ -886,6 +924,60 @@ class MoonZodiPhysicalModel:
         )
         return MoonZodiPrediction(moon=moon, zodi=zodi, state=state)
 
+    def invalid_observation_state(
+        self,
+        wave_air_angstrom: np.ndarray,
+        observation: MoonZodiObservation,
+        error: MoonZodiInvalidObservationError,
+        *,
+        physical_to_fit_flux_scale: float,
+    ) -> MoonZodiState:
+        """Return provenance for one expected rejection without fabricating a fit."""
+        wave = np.asarray(wave_air_angstrom)
+        self.validate_wave(wave)
+        if error.observation != observation:
+            raise ValueError("Invalid-observation context does not match the observation")
+        if (
+            not np.isfinite(physical_to_fit_flux_scale)
+            or physical_to_fit_flux_scale <= 0.0
+        ):
+            raise ValueError("physical_to_fit_flux_scale must be positive and finite")
+        flags = [
+            "invalid_observation",
+            f"invalid_observation:{error.reason}",
+        ]
+        if observation.exposure_seconds_source == "assumed_900s":
+            flags.append("exposure_time_assumed")
+        return MoonZodiState(
+            schema_version=MODEL_SCHEMA_VERSION,
+            model_id=MODEL_ID,
+            formula_version=FORMULA_VERSION,
+            scientific_status=str(self.manifest["scientific_status"]),
+            source_session=str(self.manifest["source_session"]),
+            manifest_sha256=self.manifest_sha256,
+            checkpoint_sha256=str(self.manifest["source_checkpoint"]["sha256"]),
+            parameter_names=MODEL_PARAMETER_NAMES,
+            parameter_values=tuple(float(value) for value in self.parameter_values),
+            asset_records=self.asset_records,
+            observation=observation,
+            geometry=error.geometry,
+            feature_t=np.nan,
+            feature_m=np.nan,
+            feature_p=np.nan,
+            feature_u=np.nan,
+            feature_q=np.nan,
+            wave_n=int(wave.size),
+            wave_min=float(wave[0]),
+            wave_max=float(wave[-1]),
+            wave_sha256=wave_sha256(wave),
+            correction_scope=CORRECTION_SCOPE,
+            correction_degree=3,
+            correction_knots=(),
+            physical_to_fit_flux_scale=float(physical_to_fit_flux_scale),
+            predictor_seconds=np.nan,
+            flags=tuple(flags),
+        )
+
 
 __all__ = [
     "CORRECTION_SCOPE",
@@ -902,6 +994,7 @@ __all__ = [
     "MODEL_PARAMETER_NAMES",
     "MODEL_SCHEMA_VERSION",
     "MoonZodiGeometry",
+    "MoonZodiInvalidObservationError",
     "MoonZodiObservation",
     "MoonZodiPhysicalModel",
     "MoonZodiPrediction",

@@ -10,18 +10,21 @@ from pathlib import Path
 import numpy as np
 from scipy.interpolate import BSpline
 
-from .result_io import load_moon_zodi_state
+from .fit import LSF_CHANNELS
+from .result_io import INVALID_OBSERVATION_FIT_STATUS, load_moon_zodi_state
 from .lsf_surface_iterative import (
     LSFSurfaceIterativeConfig,
     LSFSurfaceIterativeResult,
     SkyDecompLSFSurfaceIterative,
     _FitRun,
+    fit_lsf_surface,
 )
 from .moon_zodi_model import (
     DEFAULT_DATA_DIR,
     DEFAULT_DATA_ROOT,
     DEFAULT_PALACE_DIFFUSE_SUFFIX,
     DEFAULT_PALACE_OH_SUFFIX,
+    MoonZodiInvalidObservationError,
     MoonZodiObservation,
     MoonZodiPhysicalModel,
     MoonZodiState,
@@ -123,6 +126,16 @@ class SkyDecompMoonZodiLSFSurfaceIterative(SkyDecompLSFSurfaceIterative):
         )
         moon = np.asarray(prediction.moon, dtype=np.float64)
         zodi = np.asarray(prediction.zodi, dtype=np.float64)
+        prediction_state = prediction.state
+        if prediction_state.geometry.moon_altitude_deg <= 0.0:
+            # The frozen predictor retains its trained below-horizon
+            # continuation. The decomposition policy is stricter: no lunar
+            # component is fitted below the local horizon, while Zodi remains.
+            moon = np.zeros_like(moon, dtype=np.float64)
+            prediction_state = replace(
+                prediction_state,
+                flags=prediction_state.flags + ("moon_zeroed_for_decomposition",),
+            )
         basis = self.moon_correction_basis
         matrix_moon = (basis * moon[:, None]).T
         matrix_zodi = (basis * zodi[:, None]).T
@@ -139,10 +152,153 @@ class SkyDecompMoonZodiLSFSurfaceIterative(SkyDecompLSFSurfaceIterative):
             id(self.matrix_moon): (matrix_moon, matrix_zodi),
         }
         self._prediction_state = replace(
-            prediction.state,
+            prediction_state,
             correction_degree=3,
             correction_knots=tuple(float(value) for value in self.moon_correction_knots),
         )
+
+    def _invalid_observation_result(
+        self,
+        observation: MoonZodiObservation,
+        error: MoonZodiInvalidObservationError,
+    ) -> MoonZodiLSFSurfaceIterativeResult:
+        """Create a same-schema NaN result for one expected geometry rejection."""
+        if not isinstance(error, MoonZodiInvalidObservationError):
+            raise TypeError("error must be a MoonZodiInvalidObservationError")
+        reason = f"{error.reason}: {error}"
+        state = self.physical_model.invalid_observation_state(
+            self.wave,
+            observation,
+            error,
+            physical_to_fit_flux_scale=self.physical_to_fit_flux_scale,
+        )
+        state = replace(
+            state,
+            correction_degree=3,
+            correction_knots=tuple(
+                float(value) for value in self.moon_correction_knots
+            ),
+        )
+
+        fallback = {}
+        for channel, lower, upper in LSF_CHANNELS:
+            mask = np.ones(self.wave.size, dtype=bool)
+            if lower is not None:
+                mask &= self.wave >= lower
+            if upper is not None:
+                mask &= self.wave < upper
+            fallback[channel] = self._default_channel_kernel(mask)
+        lsf_state = fit_lsf_surface(
+            self.wave,
+            np.zeros_like(self.wave),
+            np.zeros_like(self.wave),
+            np.zeros_like(self.wave),
+            np.zeros_like(self.wave),
+            fallback,
+            self.config,
+        )
+        for channel in lsf_state.coefficients:
+            lsf_state.coefficients[channel] = np.full_like(
+                lsf_state.coefficients[channel],
+                np.nan,
+                dtype=np.float64,
+            )
+            lsf_state.metrics[channel].update(
+                status="not_run_invalid_observation",
+                reason=reason,
+                n_valid_pixels=0,
+                chi2_red=np.nan,
+                rms_resid=np.nan,
+                center_pix_min=np.nan,
+                center_pix_median=np.nan,
+                center_pix_max=np.nan,
+                sigma_pix_min=np.nan,
+                sigma_pix_median=np.nan,
+                sigma_pix_max=np.nan,
+                runtime_sec=0.0,
+            )
+        lsf_state.fit_status = INVALID_OBSERVATION_FIT_STATUS
+        lsf_state.failure_reason = reason
+        lsf_state.final_continuum_status = "not_run_invalid_observation"
+        lsf_state.final_line_status = "not_run_invalid_observation"
+        self.lsf_surface_state = lsf_state
+
+        nan_wave = np.full(self.wave.shape, np.nan, dtype=np.float64)
+        nan_coefficient = np.full(len(self.design_names), np.nan, dtype=np.float64)
+        components = {
+            name: nan_wave.copy()
+            for name in ("moon", "zodi", "diffuse", "oh", "atom", "orc", "o2")
+        }
+        lsf_kernels = {
+            channel: np.full(lsf_state.tap_offsets.size, np.nan, dtype=np.float64)
+            for channel in lsf_state.coefficients
+        }
+        result = MoonZodiLSFSurfaceIterativeResult(
+            coef=nan_coefficient.copy(),
+            coef_err=nan_coefficient.copy(),
+            bestfit=nan_wave.copy(),
+            resid=nan_wave.copy(),
+            resid_level=np.nan,
+            fit_status=INVALID_OBSERVATION_FIT_STATUS,
+            fit_summary=f"status={INVALID_OBSERVATION_FIT_STATUS} | reason={reason}",
+            reduced_chi2=np.nan,
+            fit_elapsed_sec=np.nan,
+            components=components,
+            design_names=list(self.design_names),
+            t_o2=np.nan,
+            t_o2_err=np.nan,
+            r2=np.nan,
+            rms_resid=np.nan,
+            peak_memory_mb=np.nan,
+            o2_fit_status="not_run_invalid_observation",
+            o2_fit_summary=reason,
+            o2_fit_elapsed_sec=np.nan,
+            o2_valid_frac=np.nan,
+            lsf_kernels=lsf_kernels,
+            lsf_metrics=lsf_state.metrics,
+            bestfit_lsf=nan_wave.copy(),
+            moon_knots=self.moon_knots_used.copy(),
+            moon_boosted_pixels=np.array([], dtype=np.float64),
+            vector_o2=nan_wave.copy(),
+            o2_prefit_amp=np.nan,
+            bestfit_lsf_sigma=nan_wave.copy(),
+            lsf_state=lsf_state,
+            moon_zodi_state=state,
+        )
+        self._prediction_state = state
+        self.physical_moon_prediction = nan_wave.copy()
+        self.physical_zodi_prediction = nan_wave.copy()
+        self.vector_moon = nan_wave.copy()
+        self.matrix_moon = np.full_like(self.matrix_moon, np.nan, dtype=np.float64)
+        self.matrix_moon_hr = self.matrix_moon.copy()
+        self.design_matrix = self._assemble_design_matrix()
+        self._moon_zodi_matrix_pairs = {}
+        self.coef = result.coef
+        self.coef_err = result.coef_err
+        self.bestfit = result.bestfit
+        self.bestfit_lsf = result.bestfit_lsf
+        self.vector_o2 = result.vector_o2
+        self.fit_status = result.fit_status
+        self.fit_summary = result.fit_summary
+        self.t_o2 = result.t_o2
+        self.t_o2_err = result.t_o2_err
+        self.o2_prefit_amp = result.o2_prefit_amp
+        self.r2 = result.r2
+        self.rms_resid = result.rms_resid
+        self.peak_memory_mb = result.peak_memory_mb
+        self.o2_fit_status = result.o2_fit_status
+        self.o2_fit_summary = result.o2_fit_summary
+        self.o2_fit_elapsed_sec = result.o2_fit_elapsed_sec
+        self.o2_valid_frac = result.o2_valid_frac
+        self.lsf_kernels = result.lsf_kernels
+        self.lsf_metrics = result.lsf_metrics
+        self.stage_metrics = ()
+        self.skyline_mask = np.array([], dtype=bool)
+        self.continuum_weights = np.array([], dtype=np.float64)
+        self.channel_noise = {}
+        self.final_continuum = nan_wave.copy()
+        self.final_line_model = nan_wave.copy()
+        return result
 
     def _assemble_refined_matrices(self) -> dict[str, np.ndarray]:
         moon = self._convolve_matrix_channelwise(
@@ -306,7 +462,16 @@ class SkyDecompMoonZodiLSFSurfaceIterative(SkyDecompLSFSurfaceIterative):
         tracemalloc.reset_peak()
         started = time.perf_counter()
         self._set_lsf_state(None)
-        self._install_prediction(observation, lsf_value)
+        try:
+            self._install_prediction(observation, lsf_value)
+        except MoonZodiInvalidObservationError as error:
+            if trace_started:
+                tracemalloc.stop()
+            return self._invalid_observation_result(observation, error)
+        except Exception:
+            if trace_started:
+                tracemalloc.stop()
+            raise
         self._prefit_o2(flux_value, ivar_value)
         seed, skyline_mask, run = self._run_iterations(flux_value, ivar_value)
         return self._finalize_result(

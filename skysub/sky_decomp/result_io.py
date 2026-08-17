@@ -16,6 +16,7 @@ if TYPE_CHECKING:
 
 LSF_HDU_NAMES = ("LSF_COEF", "LSF_KNOTS", "LSF_META")
 MOON_ZODI_HDU_NAMES = ("MZ_MODEL", "MZ_ASSETS", "MZ_KNOTS", "MZ_META")
+INVALID_OBSERVATION_FIT_STATUS = "skipped_invalid_observation"
 CHANNEL_NAMES = tuple(channel for channel, _, _ in LSF_CHANNELS)
 
 STATE_CONFIG_COLUMNS = (
@@ -518,6 +519,7 @@ def _validate_result_batch(results):
 
     lsf_signature = None
     for index, result in enumerate(results):
+        invalid_observation = result.fit_status == INVALID_OBSERVATION_FIT_STATUS
         if tuple(result.design_names) != design_names:
             raise ValueError(f"Result {index} has different ordered design_names")
         if tuple(result.components) != component_keys:
@@ -541,10 +543,55 @@ def _validate_result_batch(results):
             if np.asarray(component).shape != (n_wave,):
                 raise ValueError(f"Result {index} component {name} has an incompatible shape")
 
+        if invalid_observation:
+            nan_arrays = (
+                "coef",
+                "coef_err",
+                "bestfit",
+                "bestfit_lsf",
+                "bestfit_lsf_sigma",
+                "resid",
+                "vector_o2",
+            )
+            for name in nan_arrays:
+                if not np.all(np.isnan(np.asarray(getattr(result, name), dtype=float))):
+                    raise ValueError(
+                        f"Invalid-observation result {index} must store only NaN in {name}"
+                    )
+            for name, component in result.components.items():
+                if not np.all(np.isnan(np.asarray(component, dtype=float))):
+                    raise ValueError(
+                        "Invalid-observation result "
+                        f"{index} must store only NaN in component {name}"
+                    )
+            nan_scalars = (
+                "resid_level",
+                "reduced_chi2",
+                "fit_elapsed_sec",
+                "t_o2",
+                "t_o2_err",
+                "r2",
+                "rms_resid",
+                "peak_memory_mb",
+                "o2_fit_elapsed_sec",
+                "o2_valid_frac",
+                "o2_prefit_amp",
+            )
+            for name in nan_scalars:
+                if not np.isnan(float(getattr(result, name))):
+                    raise ValueError(
+                        "Invalid-observation result "
+                        f"{index} must store NaN in scalar {name}"
+                    )
+            if "reason=" not in str(result.fit_summary):
+                raise ValueError(
+                    f"Invalid-observation result {index} must preserve a rejection reason"
+                )
+
         o2_indices = [
             position for position, name in enumerate(design_names) if name == "O2_b01"
         ]
-        if o2_indices:
+        if o2_indices and not invalid_observation:
             if len(o2_indices) != 1:
                 raise ValueError("O2_b01 must occur exactly once in design_names")
             expected_o2 = float(result.coef[o2_indices[0]]) * np.asarray(result.vector_o2)
@@ -557,6 +604,13 @@ def _validate_result_batch(results):
 
         state = getattr(result, "lsf_state", None)
         if state is not None:
+            if invalid_observation and any(
+                not np.all(np.isnan(np.asarray(value, dtype=float)))
+                for value in state.coefficients.values()
+            ):
+                raise ValueError(
+                    f"Invalid-observation result {index} must store NaN LSF coefficients"
+                )
             signature = (
                 state.schema_version,
                 tuple(state.tap_offsets),
@@ -587,6 +641,12 @@ def _validate_result_batch(results):
             raise ValueError("Moon/Zodi results require exactly one named O2_b01 coefficient")
         validate_moon_zodi_states([result.moon_zodi_state for result in results])
         for index, result in enumerate(results):
+            if result.fit_status == INVALID_OBSERVATION_FIT_STATUS:
+                if "invalid_observation" not in result.moon_zodi_state.flags:
+                    raise ValueError(
+                        f"Invalid-observation result {index} lacks its Moon/Zodi state flag"
+                    )
+                continue
             reconstructed = sum(
                 (np.asarray(result.components[name]) for name in expected_components),
                 np.zeros(n_wave, dtype=np.float64),
@@ -702,6 +762,7 @@ def results_to_fits(results, filename):
 
 
 __all__ = [
+    "INVALID_OBSERVATION_FIT_STATUS",
     "LSF_HDU_NAMES",
     "MOON_ZODI_HDU_NAMES",
     "build_lsf_hdus",
