@@ -14,6 +14,7 @@ from skysub.sky_decomp import moon_zodi_model
 from skysub.sky_decomp.moon_zodi_model import (
     DEFAULT_DATA_DIR,
     DEFAULT_DATA_ROOT,
+    DEFAULT_PALACE_OH_SUFFIX,
     MODEL_ID,
     NATIVE_GRID_SHA256,
     MoonZodiInvalidObservationError,
@@ -61,10 +62,33 @@ def _normalized_max(actual: np.ndarray, expected: np.ndarray) -> float:
 def test_bundle_checksums_and_manifest_contract():
     bundle = validate_decomposition_data_root(str(DEFAULT_DATA_ROOT))
     assert bundle["bundle_id"] == "sky_decomp_moon_zodi_lsf_surface_iterative_v1"
+    palace = bundle["palace_contract"]
+    assert DEFAULT_PALACE_OH_SUFFIX == "_moon_zodi_oh_flat_family_v1"
+    assert palace["oh_suffix"] == DEFAULT_PALACE_OH_SUFFIX
+    oh_asset = next(
+        asset
+        for asset in palace["assets"]
+        if Path(asset["path"]).name.startswith("pmd_popmodel_OH_")
+    )
+    assert Path(oh_asset["path"]).name == (
+        "pmd_popmodel_OH_moon_zodi_oh_flat_family_v1.dat"
+    )
+    assert oh_asset["sha256"] == (
+        "b3496eae819919e191f423bfe4376f91fb0f856f76c9fe0693c314fc3825614f"
+    )
+    assert oh_asset["source_endpoint_iteration"] == 30000
+    assert oh_asset["changed_column"] == "Aij only"
+    assert oh_asset["all_non_aij_columns_elementwise_equal_to_palace_default"] is True
+    assert oh_asset["preserved_measurable_group_quantity"] == "sum(Aij * gi)"
+    assert oh_asset["mapped_measurable_rows"] == 11_379
+    assert oh_asset["changed_aij_rows"] == 11_373
     model = MoonZodiPhysicalModel()
     assert model.manifest["model_id"] == MODEL_ID
     assert model.manifest["scientific_status"] == (
         "diagnostic_only_decomposition_nonregression_failed"
+    )
+    assert model.manifest["training_selection"]["palace_oh_suffix"] == (
+        "_joint_v2_updated"
     )
     assert len(model.parameter_values) == 12
     assert dict((name, digest) for name, digest, _ in model.asset_records) == EXPECTED_ASSETS

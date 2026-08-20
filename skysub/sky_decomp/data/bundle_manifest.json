@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "bundle_id": "sky_decomp_moon_zodi_lsf_surface_iterative_v1",
+  "runtime_method": "SkyDecompMoonZodiLSFSurfaceIterative",
+  "moon_zodi_manifest": "moon_zodi/model_manifest.json",
+  "palace_contract": {
+    "oh_suffix": "_moon_zodi_oh_flat_family_v1",
+    "diffuse_suffix": "_joint_native_adam_invsky_p2_10000iter",
+    "assets": [
+      {
+        "path": "palace/PMD/pmd_popmodel_OH_moon_zodi_oh_flat_family_v1.dat",
+        "sha256": "b3496eae819919e191f423bfe4376f91fb0f856f76c9fe0693c314fc3825614f",
+        "source": "PALACE v1.0 pmd_popmodel_OH.dat with flat-family OH weights learned by experiments_moon_zodi_oh_flat_family_adam_v1",
+        "source_endpoint_iteration": 30000,
+        "export_assessment": "skysub/experiments_moon_zodi_updated_oh_skydecomp_v1/outputs/palace_default_vs_flat_family_current_v1/assessment_summary.json",
+        "assessment_status": "diagnostic_failed_declared_holdout_gates",
+        "known_failed_gate": "holdout_B_OI_5577_night_median_non_regression: 7.291631703188319 > 1.1",
+        "rows": 22058,
+        "mapped_measurable_rows": 11379,
+        "changed_aij_rows": 11373,
+        "changed_column": "Aij only",
+        "all_non_aij_columns_elementwise_equal_to_palace_default": true,
+        "preserved_measurable_group_quantity": "sum(Aij * gi)",
+        "maximum_target_weight_abs_error": 9.992007221626409e-16,
+        "maximum_measurable_group_mass_relative_error": 2.4718722305565264e-15,
+        "hitran_decoder": "N_upper = ID[10:12]; N_lower = N_upper - branch_delta"
+      },
+      {
+        "path": "palace/PMD/pmd_refcont_joint_native_adam_invsky_p2_10000iter.dat",
+        "sha256": "dba983057f3a710d4c12a8df6e3e9930db04937b4ecb8a2d93b92c54d2b815e2",
+        "source": "PALACE v1.0 pmd_refcont.dat with the frozen native-LVM joint diffuse correction"
+      },
+      {
+        "path": "palace/PMD/pmd_intdata_atom.dat",
+        "sha256": "a208957dd86ca8691672e509352538acca120408c3e7dd893b74097c3cf6be6d",
+        "source": "PALACE v1.0 supplementary atomic-line reference table"
+      },
+      {
+        "path": "palace/PMD/pmd_intmodel_Orc.dat",
+        "sha256": "587838718c946667ac0faf903f4a725bc777ef9460cf91a557ec77c39b9c3277",
+        "source": "PALACE v1.0 supplementary oxygen-recombination table"
+      },
+      {
+        "path": "palace/PMD/pmd_popmodel_O2.dat",
+        "sha256": "147c0ae244bf6af3c8c70d4b889857651a9956384e4436b0892e3664691701cb",
+        "source": "PALACE v1.0 supplementary O2 population-model table"
+      }
+    ]
+  },
+  "legacy_solar_reference": {
+    "path": "Spectre_HR_LATMOS_Meftah_V1_350_1000nm.txt",
+    "sha256": "d141e880a3486c039610bcd8de2b6b08930796de6588857ba643c493fbd687bd",
+    "runtime_required_by_new_method": false,
+    "purpose": "Unchanged source used by the historical SkyDecomp solar-Moon basis and by the derived Moon/Zodi NPZ. It is copied here for a complete, inspectable data bundle; historical default paths remain unchanged."
+  }
+}

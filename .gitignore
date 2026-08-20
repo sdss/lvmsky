@@ -65,6 +65,7 @@ sky_decomp_results_*.fits
 lvmsframe_*
 *.dat
 *.npz
+!skysub/sky_decomp/tests/data/lsf_surface_iterative_row837_n5_golden.npz
 !skysub/sky_decomp/data/Spectre_HR_LATMOS_Meftah_V1_350_1000nm.txt
 !skysub/sky_decomp/data/moon_zodi/eso_skycalc_rolo_moon_albedo.dat
 !skysub/sky_decomp/data/moon_zodi/eso_skycalc_leinert_zodiacal_light.dat
@@ -75,6 +76,7 @@ lvmsframe_*
 !skysub/sky_decomp/data/palace/PMD/pmd_intmodel_Orc.dat
 !skysub/sky_decomp/data/palace/PMD/pmd_popmodel_O2.dat
 !skysub/sky_decomp/data/palace/PMD/pmd_popmodel_OH_joint_v2_updated.dat
+!skysub/sky_decomp/data/palace/PMD/pmd_popmodel_OH_moon_zodi_oh_flat_family_v1.dat
 !skysub/sky_decomp/data/palace/PMD/pmd_refcont_joint_native_adam_invsky_p2_10000iter.dat
 !skysub/sky_decomp/tests/data/moon_zodi_predictor_reference_v1.npz
 .DS_Store
