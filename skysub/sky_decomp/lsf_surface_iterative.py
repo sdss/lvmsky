@@ -1114,9 +1114,15 @@ def _nominal_lsf_state(
 class SkyDecompLSFSurfaceIterative(SkyDecomp):
     """Iteratively refine continuum, smooth LSF, and emission-line amplitudes."""
 
-    _CONTINUUM_KEYS = ("moon", "diffuse")
     _LINE_KEYS = ("oh", "atom", "orc", "o2")
     _SOLVED = {"Solved", "AlmostSolved"}
+
+    @property
+    def _CONTINUUM_KEYS(self) -> tuple[str, ...]:
+        """Continuum block order.  Grows to include ``zodi`` when split_zodi=True."""
+        if getattr(self, "split_zodi", False):
+            return ("moon", "zodi", "diffuse")
+        return ("moon", "diffuse")
 
     def __init__(
         self,
@@ -1137,6 +1143,12 @@ class SkyDecompLSFSurfaceIterative(SkyDecomp):
         self.channel_noise: dict[str, float] = {}
         self.final_continuum = np.array([], dtype=float)
         self.final_line_model = np.array([], dtype=float)
+        # Amplitude-prior state carried across the internal continuum solves;
+        # populated by ``fit`` before delegating to ``_run_iterations``.
+        self._moon_amp_prior: float | None = None
+        self._zodi_amp_prior: float | None = None
+        self._moon_amp_prior_lambda: float = 0.0
+        self._zodi_amp_prior_lambda: float = 0.0
         super().__init__(*args, **kwargs)
 
     @property
@@ -1299,7 +1311,10 @@ class SkyDecompLSFSurfaceIterative(SkyDecomp):
         components: dict[str, np.ndarray],
     ) -> np.ndarray:
         """Return the additive continuum represented by the public components."""
-        return components["moon"] + components["diffuse"]
+        total = components["moon"] + components["diffuse"]
+        if "zodi" in components:
+            total = total + components["zodi"]
+        return total
 
     @staticmethod
     def _relative_change(new: np.ndarray, old: np.ndarray) -> float:
@@ -1363,12 +1378,26 @@ class SkyDecompLSFSurfaceIterative(SkyDecomp):
         )
         design = self._stack_matrices(run.matrices, self._CONTINUUM_KEYS)
         n_moon = run.matrices["moon"].shape[0]
+        # Continuum stack order: moon [, zodi], diffuse.  Zodi occupies the block
+        # immediately after moon when split_zodi is on.
+        if getattr(self, "split_zodi", False) and "zodi" in run.matrices and run.matrices["zodi"].shape[0] > 0:
+            n_zodi = run.matrices["zodi"].shape[0]
+            zodi_slice_local = slice(n_moon, n_moon + n_zodi)
+            diffuse_slice_local = slice(n_moon + n_zodi, design.shape[0])
+        else:
+            zodi_slice_local = None
+            diffuse_slice_local = slice(n_moon, design.shape[0])
         fit = self._fit_design(
             design,
             flux - run.line_model,
             weights,
             moon_slice=slice(0, n_moon),
-            diffuse_slice=slice(n_moon, design.shape[0]),
+            diffuse_slice=diffuse_slice_local,
+            zodi_slice=zodi_slice_local,
+            moon_amp_prior=self._moon_amp_prior,
+            zodi_amp_prior=self._zodi_amp_prior,
+            moon_amp_prior_lambda=self._moon_amp_prior_lambda,
+            zodi_amp_prior_lambda=self._zodi_amp_prior_lambda,
         )
         if str(fit["status"]) not in self._SOLVED:
             return fit, None, None, None, weights, channel_noise
@@ -1387,6 +1416,7 @@ class SkyDecompLSFSurfaceIterative(SkyDecomp):
     ) -> tuple[dict[str, object], np.ndarray, _FitRun]:
         """Run the nominal seed, refinement transactions, and final closure."""
         # Nominal joint seed.
+        split_zodi = getattr(self, "split_zodi", False)
         matrices = self._matrix_bundle(
             self.matrix_oh,
             self.matrix_moon,
@@ -1394,11 +1424,11 @@ class SkyDecompLSFSurfaceIterative(SkyDecomp):
             self.matrix_atom,
             self.matrix_orc,
             self.matrix_o2,
+            matrix_zodi=self.matrix_zodi if split_zodi else None,
         )
-        full_design = self._stack_matrices(
-            matrices,
-            ("oh", "moon", "diffuse", "atom", "orc", "o2"),
-        )
+        full_keys = (("oh", "moon", "zodi", "diffuse", "atom", "orc", "o2")
+                     if split_zodi else ("oh", "moon", "diffuse", "atom", "orc", "o2"))
+        full_design = self._stack_matrices(matrices, full_keys)
         slices = self._component_slices(matrices)
         seed = self._fit_design(
             full_design,
@@ -1406,6 +1436,11 @@ class SkyDecompLSFSurfaceIterative(SkyDecomp):
             ivar,
             moon_slice=slices["moon"],
             diffuse_slice=slices["diffuse"],
+            zodi_slice=slices.get("zodi"),
+            moon_amp_prior=self._moon_amp_prior,
+            zodi_amp_prior=self._zodi_amp_prior,
+            moon_amp_prior_lambda=self._moon_amp_prior_lambda,
+            zodi_amp_prior_lambda=self._zodi_amp_prior_lambda,
         )
         seed_coefficient = np.asarray(seed["coef"], dtype=float)
         seed_coef_err = np.asarray(
@@ -1691,6 +1726,7 @@ class SkyDecompLSFSurfaceIterative(SkyDecomp):
             + _sigma_comps["atom"] ** 2
             + _sigma_comps["orc"] ** 2
             + _sigma_comps["o2"] ** 2
+            + (_sigma_comps["zodi"] ** 2 if "zodi" in _sigma_comps else 0.0)
         )
         continuum = self._continuum_from_components(components)
         line_model = (
@@ -1820,6 +1856,10 @@ class SkyDecompLSFSurfaceIterative(SkyDecomp):
         ivar: np.ndarray,
         *,
         verbose: bool = False,
+        moon_amp_prior: float | None = None,
+        zodi_amp_prior: float | None = None,
+        moon_amp_prior_lambda: float = 0.0,
+        zodi_amp_prior_lambda: float = 0.0,
     ) -> LSFSurfaceIterativeResult:
         """Run the approved continuum -> LSF -> lines refinement sequence."""
         flux = np.asarray(flux, dtype=float)
@@ -1834,6 +1874,13 @@ class SkyDecompLSFSurfaceIterative(SkyDecomp):
         tracemalloc.reset_peak()
         started = time.perf_counter()
         self._set_lsf_state(None)
+        # Publish amp-prior targets so the seed + continuum solves can forward
+        # them to ``_fit_design``; ``_run_iterations`` and ``_solve_continuum``
+        # read these instance attributes.
+        self._moon_amp_prior = moon_amp_prior
+        self._zodi_amp_prior = zodi_amp_prior
+        self._moon_amp_prior_lambda = float(moon_amp_prior_lambda)
+        self._zodi_amp_prior_lambda = float(zodi_amp_prior_lambda)
         self._prefit_o2(flux, ivar)
         seed, skyline_mask, run = self._run_iterations(flux, ivar)
 

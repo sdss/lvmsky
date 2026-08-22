@@ -494,6 +494,7 @@ def test_batch_role_coordinate_and_lsf_contract(monkeypatch):
     assert decompose_parallel.FIT_MODEL_SUFFIXES == {
         "baseline": "",
         "lsf-surface-iterative": "_lsf_surface_iterative",
+        "lsf-surface-iterative-split-zodi": "_lsf_surface_iterative_split_zodi",
         "moon-zodi-lsf-surface-iterative": "_moon_zodi_lsf_surface_iterative",
     }
 
