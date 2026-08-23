@@ -1,0 +1,13 @@
+{
+  "k_moon": 9.86701419856099,
+  "k_zodi": 7.143886754382233,
+  "moon_ref_amp": 275.6591987886158,
+  "zodi_ref_amp": 99.56113474211212,
+  "moon_smooth_gate_k": 100.0,
+  "zodi_smooth_gate_k": 0.0,
+  "moon_amp_prior_lambda": 0.0,
+  "zodi_amp_prior_lambda": 0.0,
+  "n_calibration_rows": 1721,
+  "moon_smooth_lambda_base": 0.1,
+  "zodi_smooth_lambda_base": 0.1
+}

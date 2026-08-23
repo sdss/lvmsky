@@ -126,6 +126,7 @@ def init_worker(
     moon_zodi_data_root=None,
     n_zodi_spline_knots=SPLIT_ZODI_N_KNOTS_DEFAULT,
     zodi_smooth_lambda=SPLIT_ZODI_SMOOTH_LAMBDA_DEFAULT,
+    moon_zodi_priors_bundle=None,
 ):
     """Initialise one SkyDecomp instance per worker process."""
     global \
@@ -137,7 +138,10 @@ def init_worker(
         _WORKER_META, \
         _WORKER_PROGRESS_QUEUE, \
         _WORKER_FIT_MODEL, \
-        _WORKER_EXPOSURE_SECONDS
+        _WORKER_EXPOSURE_SECONDS, \
+        _WORKER_PRIORS_BUNDLE
+
+    _WORKER_PRIORS_BUNDLE = moon_zodi_priors_bundle
 
     _clamp_native_threads(1)
 
@@ -172,6 +176,9 @@ def init_worker(
             "sky1": np.asarray(_WORKER_HDU["LSF_SKY_NEAR"].data),
             "sky2": np.asarray(_WORKER_HDU["LSF_SKY_FAR"].data),
         }
+        _WORKER_META = _WORKER_HDU["META"].data
+    elif fit_model == SPLIT_ZODI_FIT_MODEL and moon_zodi_priors_bundle is not None:
+        _WORKER_LSF = {}
         _WORKER_META = _WORKER_HDU["META"].data
     else:
         _WORKER_LSF = {}
@@ -335,12 +342,78 @@ def _moon_zodi_observation(kind, row_index):
     )
 
 
+def _split_zodi_prior_kwargs_for_row(kind: str, row_idx: int) -> dict:
+    """Look up per-row split_zodi prior overrides from ``_WORKER_PRIORS_BUNDLE``.
+
+    Returns an empty dict when no priors bundle is loaded, so the fit call
+    reduces to the legacy signature. When a bundle is loaded and this row's
+    geometry has not been computed yet, computes it lazily inside the worker
+    (parallelized across workers) and caches the result. Applies the
+    calibrated slopes to produce the actual `fit` kwargs.
+    """
+    bundle = _WORKER_PRIORS_BUNDLE
+    if bundle is None:
+        return {}
+    cache = bundle["arm_cache"].get(kind)
+    if cache is None:
+        return {}
+
+    if not cache["computed"][row_idx]:
+        # Lazy per-row geometry compute.
+        obs = _moon_zodi_observation(kind, row_idx)
+        from sky_decomp.moon_zodi_priors import (
+            compute_geometry_proxies,
+            resolve_row_targets,
+        )
+        proxies = compute_geometry_proxies([obs], data_dir=bundle["data_root"])
+        moon_prox = float(proxies["moon_amp_proxy"][0])
+        zodi_prox = float(proxies["zodi_b500"][0])
+        targets = resolve_row_targets(
+            moon_proxy=moon_prox,
+            zodi_proxy=zodi_prox,
+            calibration=bundle["calibration"],
+        )
+        cache["moon_amp_prior"][row_idx] = (
+            targets.moon_amp_prior if targets.moon_amp_prior is not None else np.nan
+        )
+        cache["zodi_amp_prior"][row_idx] = (
+            targets.zodi_amp_prior if targets.zodi_amp_prior is not None else np.nan
+        )
+        cache["moon_smooth_lambda_override"][row_idx] = (
+            targets.moon_smooth_lambda_override
+            if targets.moon_smooth_lambda_override is not None
+            else np.nan
+        )
+        cache["zodi_smooth_lambda_override"][row_idx] = (
+            targets.zodi_smooth_lambda_override
+            if targets.zodi_smooth_lambda_override is not None
+            else np.nan
+        )
+        cache["computed"][row_idx] = True
+
+    kw = {}
+    ma = cache["moon_amp_prior"][row_idx]
+    if np.isfinite(ma):
+        kw["moon_amp_prior"] = float(ma)
+        kw["moon_amp_prior_lambda"] = float(bundle["moon_amp_prior_lambda"])
+    za = cache["zodi_amp_prior"][row_idx]
+    if np.isfinite(za):
+        kw["zodi_amp_prior"] = float(za)
+        kw["zodi_amp_prior_lambda"] = float(bundle["zodi_amp_prior_lambda"])
+    msl = cache["moon_smooth_lambda_override"][row_idx]
+    if np.isfinite(msl):
+        kw["moon_smooth_lambda_override"] = float(msl)
+    zsl = cache["zodi_smooth_lambda_override"][row_idx]
+    if np.isfinite(zsl):
+        kw["zodi_smooth_lambda_override"] = float(zsl)
+    return kw
+
+
 def fit_chunk_worker(args):
     """Fit one chunk of spectra using the worker-local SkyDecomp instance."""
     global _WORKER_DECOMPOSER, _WORKER_FACTOR, _WORKER_PROGRESS_QUEUE, _WORKER_FIT_MODEL
     if _WORKER_DECOMPOSER is None:
         raise RuntimeError("Worker SkyDecomp has not been initialised.")
-
     kind, idx0, idx1 = args
     flux_chunk = np.asarray(_WORKER_FLUX[kind][idx0:idx1], dtype=np.float64)
     out = []
@@ -362,10 +435,12 @@ def fit_chunk_worker(args):
                 verbose=False,
             )
         elif _WORKER_FIT_MODEL == SPLIT_ZODI_FIT_MODEL:
+            prior_kwargs = _split_zodi_prior_kwargs_for_row(kind, idx)
             result = _WORKER_DECOMPOSER.fit(
                 flux_row,
                 ivar_row,
                 verbose=False,
+                **prior_kwargs,
             )
         elif _WORKER_FIT_MODEL == "moon-zodi-lsf-surface-iterative":
             # Preserve invalid source pixels; zero IVAR excludes them without
@@ -435,6 +510,50 @@ def _iter_chunk_tasks(n_rows, chunk_size):
             yield (kind, i0, i1)
 
 
+def _load_moon_zodi_priors_bundle(
+    *,
+    calibration_path: Path,
+    data_file: str | Path,
+    n_rows: int,
+    moon_zodi_data_root: Path | None,
+) -> dict:
+    """Package a moon/zodi priors bundle for worker consumption.
+
+    Loads the calibration JSON on the main process; the actual per-row
+    geometry proxies (KS moon proxy + Leinert B500) are computed lazily
+    inside each worker on the rows it processes, which parallelises the
+    astropy SkyCoord + ephemeris calls that dominate the precompute cost.
+    """
+    from sky_decomp.moon_zodi_priors import MoonZodiPriorCalibration
+    calibration = MoonZodiPriorCalibration.from_json(calibration_path)
+    print(f"  moon_zodi_priors: loaded {calibration_path}")
+    print(f"    k_moon={calibration.k_moon:.4g}, k_zodi={calibration.k_zodi:.4g}, "
+          f"moon_ref_amp={calibration.moon_ref_amp:.3g}, zodi_ref_amp={calibration.zodi_ref_amp:.3g}, "
+          f"moon_smooth_gate_k={calibration.moon_smooth_gate_k}, "
+          f"zodi_smooth_gate_k={calibration.zodi_smooth_gate_k}")
+    if moon_zodi_data_root is None:
+        raise ValueError(
+            "moon_zodi_priors requires a resolvable moon_zodi data root; "
+            "pass --moon-zodi-data-root or accept the default palace layout."
+        )
+    arm_cache = {}
+    for kind in ("sci", "sky1", "sky2"):
+        arm_cache[kind] = {
+            "computed": np.zeros(n_rows, dtype=bool),
+            "moon_amp_prior": np.full(n_rows, np.nan, dtype=np.float64),
+            "zodi_amp_prior": np.full(n_rows, np.nan, dtype=np.float64),
+            "moon_smooth_lambda_override": np.full(n_rows, np.nan, dtype=np.float64),
+            "zodi_smooth_lambda_override": np.full(n_rows, np.nan, dtype=np.float64),
+        }
+    return {
+        "calibration": calibration,
+        "data_root": str(moon_zodi_data_root),
+        "moon_amp_prior_lambda": float(calibration.moon_amp_prior_lambda),
+        "zodi_amp_prior_lambda": float(calibration.zodi_amp_prior_lambda),
+        "arm_cache": arm_cache,
+    }
+
+
 def run(
     data_file,
     palace_dir,
@@ -456,6 +575,7 @@ def run(
     moon_zodi_data_root=None,
     n_zodi_spline_knots=SPLIT_ZODI_N_KNOTS_DEFAULT,
     zodi_smooth_lambda=SPLIT_ZODI_SMOOTH_LAMBDA_DEFAULT,
+    moon_zodi_priors_path=None,
 ):
     base_dir, resolved_moon_zodi_data_root = resolve_runtime_data_roots(
         fit_model,
@@ -490,6 +610,35 @@ def run(
               f"zodi_smooth_lambda={zodi_smooth_lambda}")
     print(f"  pin_workers={pin_workers}, diagnose_threads={diagnose_threads}")
     print(f"  base_dir={base_dir}")
+
+    moon_zodi_priors_bundle = None
+    if moon_zodi_priors_path is not None:
+        if fit_model != SPLIT_ZODI_FIT_MODEL:
+            raise ValueError(
+                f"--moon-zodi-priors is only supported when "
+                f"--fit-model={SPLIT_ZODI_FIT_MODEL}."
+            )
+        priors_data_root = resolved_moon_zodi_data_root
+        if priors_data_root is None and moon_zodi_data_root is not None:
+            candidate = Path(moon_zodi_data_root).expanduser().resolve()
+            if (candidate / "moon_zodi").is_dir():
+                priors_data_root = candidate
+            elif candidate.is_dir() and (candidate.name == "moon_zodi"):
+                priors_data_root = candidate
+        if priors_data_root is None:
+            candidate = base_dir / "moon_zodi"
+            if not candidate.is_dir():
+                raise ValueError(
+                    f"Could not locate moon_zodi assets for --moon-zodi-priors; "
+                    f"tried {candidate}. Pass --moon-zodi-data-root explicitly."
+                )
+            priors_data_root = candidate
+        moon_zodi_priors_bundle = _load_moon_zodi_priors_bundle(
+            calibration_path=moon_zodi_priors_path,
+            data_file=data_file,
+            n_rows=n_rows,
+            moon_zodi_data_root=priors_data_root,
+        )
 
     n_tasks = int(np.ceil(n_rows / chunk_size)) * 3
     results = {kind: [None] * n_rows for kind in ("sci", "sky1", "sky2")}
@@ -539,6 +688,7 @@ def run(
             ),
             int(n_zodi_spline_knots),
             float(zodi_smooth_lambda),
+            moon_zodi_priors_bundle,
         ),
     ) as executor:
         pbar = tqdm(
@@ -876,6 +1026,18 @@ def main():
         ),
     )
     parser.add_argument(
+        "--moon-zodi-priors",
+        default=None,
+        help=(
+            "Path to a calibration JSON produced by "
+            "`skysub/calibrate_moon_zodi_priors.py`. When set (and "
+            f"--fit-model={SPLIT_ZODI_FIT_MODEL}), each row's fit is nudged toward "
+            "geometry-derived moon and zodi amplitude targets and the moon "
+            "spline curvature penalty is gated by the KS moon-brightness "
+            "proxy so it goes flat when the moon should be near zero."
+        ),
+    )
+    parser.add_argument(
         "--limit",
         type=int,
         default=None,
@@ -957,6 +1119,7 @@ def main():
             moon_zodi_data_root=args.moon_zodi_data_root,
             n_zodi_spline_knots=args.n_zodi_spline_knots,
             zodi_smooth_lambda=args.zodi_smooth_lambda,
+            moon_zodi_priors_path=args.moon_zodi_priors,
         )
 
         extract_meta_and_coef_products(
