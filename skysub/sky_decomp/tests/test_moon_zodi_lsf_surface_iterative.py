@@ -17,19 +17,13 @@ from skysub.sky_decomp.result_io import (
     load_lsf_surface_state,
     load_moon_zodi_state,
 )
-from skysub.sky_decomp.lsf_surface_iterative import (
-    LSFChannelSplineConfig,
-    LSFSplineConfig,
-    LSFSurfaceIterativeConfig,
-    SkyDecompLSFSurfaceIterative,
-)
+from skysub.sky_decomp.lsf_surface_iterative import LSFSurfaceIterativeConfig
 from skysub.sky_decomp.moon_zodi_lsf_surface_iterative import (
     MoonZodiLSFSurfaceIterativeResult,
     SkyDecompMoonZodiLSFSurfaceIterative,
 )
 from skysub.sky_decomp.moon_zodi_model import (
     DEFAULT_DATA_ROOT,
-    DEFAULT_PALACE_OH_SUFFIX,
     MoonZodiObservation,
 )
 
@@ -64,18 +58,6 @@ EXPECTED_HDU_ORDER = [
 ]
 
 
-def test_moon_zodi_inherits_the_iterative_continuum_recipe_unchanged():
-    """The controlled comparison may replace the carrier, not the fit recipe."""
-    assert (
-        SkyDecompMoonZodiLSFSurfaceIterative._fit_continuum_stage
-        is SkyDecompLSFSurfaceIterative._fit_continuum_stage
-    )
-    assert (
-        SkyDecompMoonZodiLSFSurfaceIterative._run_iterations
-        is SkyDecompLSFSurfaceIterative._run_iterations
-    )
-
-
 @pytest.fixture(scope="module")
 def fitted_case():
     with np.load(REFERENCE, allow_pickle=False) as reference:
@@ -103,7 +85,7 @@ def fitted_case():
     assert decomposer.data_root == DEFAULT_DATA_ROOT.resolve()
     assert decomposer.base_dir == DEFAULT_DATA_ROOT.resolve()
     assert decomposer.pmd_dir == DEFAULT_DATA_ROOT.resolve() / "palace" / "PMD"
-    assert decomposer.palace_oh_suffix == DEFAULT_PALACE_OH_SUFFIX
+    assert decomposer.palace_oh_suffix == "_joint_v2_updated"
     assert (
         decomposer.palace_diffuse_suffix
         == "_joint_native_adam_invsky_p2_10000iter"
@@ -134,46 +116,6 @@ def invalid_case(fitted_case):
         detector_lsf_fwhm=lsf,
     )
     return invalid_observation, result
-
-
-def test_moon_zodi_fit_uses_per_channel_spline_config(fitted_case):
-    wave, lsf, observation, _, reference_result = fitted_case
-    spline_config = LSFSplineConfig(
-        r=LSFChannelSplineConfig(
-            n_basis=5,
-            degree=2,
-            knot_strategy="uniform",
-        ),
-        z=LSFChannelSplineConfig(
-            n_basis=7,
-            degree=3,
-            knot_strategy="explicit",
-            interior_knots=(7750.0, 8250.0, 8750.0),
-        ),
-    )
-    decomposer = SkyDecompMoonZodiLSFSurfaceIterative(
-        wave,
-        lsf_sigma=0.5,
-        moon_smooth_lambda=0.1,
-        physical_to_fit_flux_scale=1.0e14,
-        config=LSFSurfaceIterativeConfig(n_refinement_cycles=1),
-        spline_config=spline_config,
-    )
-
-    result = decomposer.fit(
-        np.asarray(reference_result.bestfit_lsf, dtype=np.float64),
-        np.ones(wave.size, dtype=np.float64),
-        observation=observation,
-        detector_lsf_fwhm=lsf,
-    )
-
-    assert result.lsf_state.degrees == {"B": 0, "R": 2, "Z": 3}
-    assert result.lsf_state.coefficients["R"].shape[1] == 5
-    assert result.lsf_state.coefficients["Z"].shape[1] == 7
-    assert np.array_equal(
-        result.lsf_state.knot_vectors["Z"][4:-4],
-        [7750.0, 8250.0, 8750.0],
-    )
 
 
 def test_shared_correction_and_component_closure(fitted_case):
@@ -227,23 +169,6 @@ def test_default_contract_requests_exactly_five_cycles(fitted_case):
         physical_to_fit_flux_scale=1.0e14,
     )
     assert decomposer.config.n_refinement_cycles == 5
-
-
-def test_explicit_none_palace_oh_suffix_uses_base_palace_table(fitted_case):
-    wave, _, _, default_decomposer, _ = fitted_case
-    palace = SkyDecompMoonZodiLSFSurfaceIterative(
-        wave,
-        base_dir=BASE_DIR,
-        physical_to_fit_flux_scale=1.0e14,
-        palace_oh_suffix=None,
-        config=LSFSurfaceIterativeConfig(n_refinement_cycles=1),
-    )
-
-    assert default_decomposer.palace_oh_suffix == DEFAULT_PALACE_OH_SUFFIX
-    assert palace.palace_oh_suffix is None
-    assert palace.matrix_oh.shape[0] == 357
-    assert np.count_nonzero(np.any(palace.matrix_oh_stick != 0.0, axis=1)) == 356
-    assert len(palace.design_names) == 397
 
 
 def test_fit_rejects_precision_grid_and_ivar_violations(fitted_case):

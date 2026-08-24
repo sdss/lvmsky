@@ -4,26 +4,13 @@
   "runtime_method": "SkyDecompMoonZodiLSFSurfaceIterative",
   "moon_zodi_manifest": "moon_zodi/model_manifest.json",
   "palace_contract": {
-    "oh_suffix": "_moon_zodi_oh_flat_family_v1",
+    "oh_suffix": "_joint_v2_updated",
     "diffuse_suffix": "_joint_native_adam_invsky_p2_10000iter",
     "assets": [
       {
-        "path": "palace/PMD/pmd_popmodel_OH_moon_zodi_oh_flat_family_v1.dat",
-        "sha256": "b3496eae819919e191f423bfe4376f91fb0f856f76c9fe0693c314fc3825614f",
-        "source": "PALACE v1.0 pmd_popmodel_OH.dat with flat-family OH weights learned by experiments_moon_zodi_oh_flat_family_adam_v1",
-        "source_endpoint_iteration": 30000,
-        "export_assessment": "skysub/experiments_moon_zodi_updated_oh_skydecomp_v1/outputs/palace_default_vs_flat_family_current_v1/assessment_summary.json",
-        "assessment_status": "diagnostic_failed_declared_holdout_gates",
-        "known_failed_gate": "holdout_B_OI_5577_night_median_non_regression: 7.291631703188319 > 1.1",
-        "rows": 22058,
-        "mapped_measurable_rows": 11379,
-        "changed_aij_rows": 11373,
-        "changed_column": "Aij only",
-        "all_non_aij_columns_elementwise_equal_to_palace_default": true,
-        "preserved_measurable_group_quantity": "sum(Aij * gi)",
-        "maximum_target_weight_abs_error": 9.992007221626409e-16,
-        "maximum_measurable_group_mass_relative_error": 2.4718722305565264e-15,
-        "hitran_decoder": "N_upper = ID[10:12]; N_lower = N_upper - branch_delta"
+        "path": "palace/PMD/pmd_popmodel_OH_joint_v2_updated.dat",
+        "sha256": "b0e2b763dc08c81b513fe51eed1505ff9982dcd89d975f8153e668e740ff5c65",
+        "source": "PALACE v1.0 pmd_popmodel_OH.dat with the repository's frozen joint-v2 updated OH weights"
       },
       {
         "path": "palace/PMD/pmd_refcont_joint_native_adam_invsky_p2_10000iter.dat",
