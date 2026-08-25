@@ -105,6 +105,8 @@ SPLIT_ZODI_N_KNOTS_DEFAULT = 3
 SPLIT_ZODI_SMOOTH_LAMBDA_DEFAULT = 1.0e-1
 SPLIT_ZODI_MOON_ALBEDO_PHASE_DEG = 30.0
 SPLIT_ZODI_COLOR_EXPONENT = 0.26
+# Moon_bs interior-knot count; matches SkyDecomp.__init__ default in fit.py.
+MOON_N_KNOTS_DEFAULT = 25
 
 
 def init_worker(
@@ -124,6 +126,7 @@ def init_worker(
     palace_diffuse_suffix=None,
     exposure_seconds=900.0,
     moon_zodi_data_root=None,
+    n_spline_knots=MOON_N_KNOTS_DEFAULT,
     n_zodi_spline_knots=SPLIT_ZODI_N_KNOTS_DEFAULT,
     zodi_smooth_lambda=SPLIT_ZODI_SMOOTH_LAMBDA_DEFAULT,
     moon_zodi_priors_bundle=None,
@@ -214,6 +217,7 @@ def init_worker(
             palace_diffuse_suffix=palace_diffuse_suffix,
             moon_smooth_lambda=0.1,
             moon_interline_boost=0.0,
+            n_spline_knots=int(n_spline_knots),
             config=LSFSurfaceIterativeConfig(
                 n_refinement_cycles=n_refinement_cycles,
             ),
@@ -233,6 +237,7 @@ def init_worker(
             palace_diffuse_suffix=palace_diffuse_suffix,
             moon_smooth_lambda=0.1,
             moon_interline_boost=0.0,
+            n_spline_knots=int(n_spline_knots),
             split_zodi=True,
             n_zodi_spline_knots=int(n_zodi_spline_knots),
             zodi_smooth_lambda=float(zodi_smooth_lambda),
@@ -573,6 +578,7 @@ def run(
     palace_diffuse_suffix=None,
     exposure_seconds=900.0,
     moon_zodi_data_root=None,
+    n_spline_knots=MOON_N_KNOTS_DEFAULT,
     n_zodi_spline_knots=SPLIT_ZODI_N_KNOTS_DEFAULT,
     zodi_smooth_lambda=SPLIT_ZODI_SMOOTH_LAMBDA_DEFAULT,
     moon_zodi_priors_path=None,
@@ -605,6 +611,9 @@ def run(
     print(f"  exposure_seconds_fallback={exposure_seconds}")
     if fit_model == MOON_ZODI_FIT_MODEL:
         print(f"  moon_zodi_data_root={str(resolved_moon_zodi_data_root)!r}")
+    if fit_model in ("lsf-surface-iterative", SPLIT_ZODI_FIT_MODEL):
+        print(f"  n_spline_knots={n_spline_knots} "
+              f"(Moon_bs basis = {int(n_spline_knots) + 4})")
     if fit_model == SPLIT_ZODI_FIT_MODEL:
         print(f"  n_zodi_spline_knots={n_zodi_spline_knots}, "
               f"zodi_smooth_lambda={zodi_smooth_lambda}")
@@ -686,6 +695,7 @@ def run(
                 if resolved_moon_zodi_data_root is None
                 else str(resolved_moon_zodi_data_root)
             ),
+            int(n_spline_knots),
             int(n_zodi_spline_knots),
             float(zodi_smooth_lambda),
             moon_zodi_priors_bundle,
@@ -1008,6 +1018,16 @@ def main():
         ),
     )
     parser.add_argument(
+        "--n-spline-knots",
+        type=int,
+        default=MOON_N_KNOTS_DEFAULT,
+        help=(
+            f"Interior B-spline knots for Moon_bs when --fit-model is "
+            f"lsf-surface-iterative or {SPLIT_ZODI_FIT_MODEL} "
+            f"(default: {MOON_N_KNOTS_DEFAULT}; Moon_bs basis = knots + 4)."
+        ),
+    )
+    parser.add_argument(
         "--n-zodi-spline-knots",
         type=int,
         default=SPLIT_ZODI_N_KNOTS_DEFAULT,
@@ -1117,6 +1137,7 @@ def main():
             palace_diffuse_suffix=args.palace_diffuse_suffix,
             exposure_seconds=args.exposure_seconds,
             moon_zodi_data_root=args.moon_zodi_data_root,
+            n_spline_knots=args.n_spline_knots,
             n_zodi_spline_knots=args.n_zodi_spline_knots,
             zodi_smooth_lambda=args.zodi_smooth_lambda,
             moon_zodi_priors_path=args.moon_zodi_priors,
