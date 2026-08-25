@@ -715,6 +715,43 @@ def results_to_fits(results, filename):
             fits.ImageHDU(stack("vector_o2"), name="VECTOR_O2"),
         ]
     )
+
+    def _stack_cov_block(attribute):
+        blocks = [getattr(result, attribute, None) for result in results]
+        if all(b is None for b in blocks):
+            return None
+        # Uniform shape check: any present block dictates (n_block, n_block).
+        template = next(b for b in blocks if b is not None)
+        template = np.asarray(template, dtype=float)
+        if template.ndim != 2 or template.shape[0] != template.shape[1]:
+            raise ValueError(
+                f"{attribute} must be a square 2D matrix per row; "
+                f"got shape {template.shape}")
+        n_block = int(template.shape[0])
+        # A 1x1 block adds no information beyond the corresponding COEF_ERR
+        # entry, so skip writing the HDU in that degenerate case (moon-zodi
+        # physical model has n_moon=n_zodi=1).
+        if n_block <= 1:
+            return None
+        out = np.full((len(results), n_block, n_block), np.nan, dtype=float)
+        for i, block in enumerate(blocks):
+            if block is None:
+                continue
+            arr = np.asarray(block, dtype=float)
+            if arr.shape != (n_block, n_block):
+                raise ValueError(
+                    f"{attribute} shape mismatch on result {i}: "
+                    f"expected {(n_block, n_block)}, got {arr.shape}")
+            out[i] = arr
+        return out
+
+    for attr, hdu_name in (
+        ("coef_cov_moon", "COEF_COV_MOON"),
+        ("coef_cov_zodi", "COEF_COV_ZODI"),
+    ):
+        arr = _stack_cov_block(attr)
+        if arr is not None:
+            hdul.append(fits.ImageHDU(arr, name=hdu_name))
     for key in comp_keys:
         hdul.append(
             fits.ImageHDU(

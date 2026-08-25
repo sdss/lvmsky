@@ -826,6 +826,9 @@ def extract_meta_and_coef_products(
             ]
             if "COEF_ERR" in hdul_dec:
                 compact_hdus.append(_copy_hdu_with_name(hdul_dec["COEF_ERR"], "COEF_ERR"))
+            for cov_name in ("COEF_COV_MOON", "COEF_COV_ZODI"):
+                if cov_name in hdul_dec:
+                    compact_hdus.append(_copy_hdu_with_name(hdul_dec[cov_name], cov_name))
             lsf_extensions = ("LSF_COEF", "LSF_KNOTS", "LSF_META")
             present = [name in hdul_dec for name in lsf_extensions]
             if any(present) and not all(present):

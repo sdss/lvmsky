@@ -296,6 +296,17 @@ class SkyDecompResult:
     # LSFSurfaceIterativeResult can still add positional fields after us.
     zodi_names: list[str] = field(default_factory=list, kw_only=True)
     zodi_knots: np.ndarray = field(default_factory=lambda: np.array([], float), kw_only=True)
+    # Full posterior covariance sub-matrices for the moon and (optionally) zodi
+    # B-spline blocks -- 2D arrays with shape (n_moon, n_moon) / (n_zodi, n_zodi)
+    # in the same physical units as ``coef``. Entries corresponding to inactive
+    # (boundary-zero) coefficients are ``NaN`` (no symmetric interval defined).
+    # These carry the off-diagonal correlations that ``coef_err`` (= sqrt of the
+    # diagonal) discards; downstream code that needs the joint uncertainty on
+    # any linear combination of moon or zodi coefficients (e.g. total moon
+    # amplitude, PCA scores) should use these matrices instead of assuming
+    # independence.  ``None`` when the block was not present in the solve.
+    coef_cov_moon: np.ndarray | None = field(default=None, kw_only=True)
+    coef_cov_zodi: np.ndarray | None = field(default=None, kw_only=True)
 
 
 class SkyDecomp:
@@ -625,6 +636,8 @@ class SkyDecomp:
             bestfit_lsf_sigma=bestfit_lsf_sigma,
             zodi_names=list(self.zodi_names),
             zodi_knots=self.zodi_knots_used.copy(),
+            coef_cov_moon=refined.get("coef_cov_moon"),
+            coef_cov_zodi=refined.get("coef_cov_zodi"),
         )
 
     @staticmethod
@@ -708,7 +721,8 @@ class SkyDecomp:
         source_local_index: list[int],
         reduced_chi2: float,
         per_column_chi2: np.ndarray | None = None,
-    ) -> np.ndarray:
+        cov_block_slices: dict[str, slice] | None = None,
+    ) -> np.ndarray | tuple[np.ndarray, dict[str, np.ndarray]]:
         """Active-set posterior 1σ uncertainty for a nonnegative WLS solve.
 
         Notes
@@ -743,6 +757,13 @@ class SkyDecomp:
         and it is what the routine reports.  Equivalently, this is the
         classical Cramér–Rao unconstrained covariance of the sub-model that
         contains only the active coefficients.
+
+        Smoothness prior. ``H`` above is the *regularised* Fisher information,
+        i.e. it already includes the ``λ LᵀL`` term added at solve time
+        (`` _fit_design`` line "p_dense_local[..] += 2·smooth_λ·D²ᵀD² ").  So
+        the σ reported here reflects both the data likelihood and the
+        smoothness prior on adjacent B-spline coefficients; no separate
+        Bayesian tightening step is needed.
 
         Undoing the internal scaling. What is stored in the QP is the dense
         matrix
@@ -787,14 +808,35 @@ class SkyDecomp:
         coefficients that are close to zero: a small perturbation of the data
         can flip a boundary coefficient into the active set. A bootstrap or
         profile-likelihood analysis is more faithful in that regime but not
-        needed for the calibration MLP downstream. Off-diagonal correlations
-        of the active sub-block are computed but discarded to keep the
-        FITS-persisted product one-dimensional; if the MLP starts using
-        vector uncertainties this routine can be extended trivially.
+        needed for the calibration MLP downstream.
+
+        Joint covariance blocks (2026-08-25). When ``cov_block_slices`` is
+        supplied -- a mapping ``{name: slice}`` selecting one or more
+        contiguous coefficient ranges (typically ``{'moon': moon_slice,
+        'zodi': zodi_slice}``) -- the routine also assembles the full active-
+        set covariance restricted to each named block and returns it as a 2D
+        matrix (n_block × n_block) alongside the usual 1D ``coef_err``.  Off-
+        diagonal correlations are computed with the same column-scale-undo
+        and per-column-χ² inflation logic as the diagonal (off-diagonal
+        inflation uses ``sqrt(inflate[i] * inflate[j])`` so the correlation
+        matrix is preserved and the diagonal reproduces the vector ``coef_err``).
+        Inactive-coefficient rows and columns are ``NaN``.  Return type is
+        ``(coef_err, {name: cov_2d})`` in this case; when
+        ``cov_block_slices`` is None (default) the routine returns just
+        ``coef_err`` for backwards compatibility.
         """
         n_par = int(coef.size)
         coef_err = np.full(n_par, np.nan, dtype=float)
+        want_blocks = cov_block_slices is not None
+        if want_blocks:
+            cov_blocks = {
+                name: np.full(
+                    (sl.stop - sl.start, sl.stop - sl.start), np.nan, dtype=float)
+                for name, sl in cov_block_slices.items()
+            }
         if n_par == 0:
+            if want_blocks:
+                return coef_err, cov_blocks
             return coef_err
 
         active_tol = 1e-8 * float(max(np.max(coef), 1.0))
@@ -853,6 +895,29 @@ class SkyDecomp:
                 np.inf,
             )
             coef_err[solve_indices_arr] = np.sqrt(var_a)
+
+            if want_blocks:
+                # Materialise the physical-unit covariance for this solve group
+                # (small square matrix; only done here in the block path).  This
+                # applies the same column-scale-undo and χ² inflation as the
+                # diagonal, so the sqrt of its diagonal reproduces coef_err.
+                inflate_row = inflate_arr[solve_indices_arr]
+                scale_row = inv_col * ds_solve * np.sqrt(inflate_row)
+                cov_a_phys = (scale_row[:, None] * scale_row[None, :]) * cov_a
+                for name, sl in cov_block_slices.items():
+                    block_mask = (
+                        (solve_indices_arr >= sl.start)
+                        & (solve_indices_arr < sl.stop)
+                    )
+                    if not block_mask.any():
+                        continue
+                    block_local = solve_indices_arr[block_mask] - sl.start
+                    block_source = np.flatnonzero(block_mask)
+                    sub = cov_a_phys[np.ix_(block_source, block_source)]
+                    cov_blocks[name][np.ix_(block_local, block_local)] = sub
+
+        if want_blocks:
+            return coef_err, cov_blocks
         return coef_err
 
     def _fit_design(
@@ -1115,7 +1180,12 @@ class SkyDecomp:
         per_column_chi2 = self._per_column_chi2_from_residuals(
             design_matrix, resid, ivar, good, fallback=reduced_chi2,
         )
-        coef_err = self._coef_err_active_set(
+        cov_block_slices: dict[str, slice] = {}
+        if moon_slice is not None and (moon_slice.stop - moon_slice.start) > 0:
+            cov_block_slices["moon"] = moon_slice
+        if zodi_slice is not None and (zodi_slice.stop - zodi_slice.start) > 0:
+            cov_block_slices["zodi"] = zodi_slice
+        _err_ret = self._coef_err_active_set(
             coef,
             source_p,
             source_col_scale,
@@ -1123,10 +1193,18 @@ class SkyDecomp:
             source_local_index,
             reduced_chi2,
             per_column_chi2=per_column_chi2,
+            cov_block_slices=cov_block_slices or None,
         )
+        if cov_block_slices:
+            coef_err, cov_blocks = _err_ret
+        else:
+            coef_err = _err_ret
+            cov_blocks = {}
         return {
             "coef": coef,
             "coef_err": coef_err,
+            "coef_cov_moon": cov_blocks.get("moon"),
+            "coef_cov_zodi": cov_blocks.get("zodi"),
             "status": status,
             "bestfit": bestfit,
             "resid": resid,
@@ -1251,6 +1329,10 @@ class SkyDecomp:
             "orc": _matrix_sigma("orc"),
             "o2": _matrix_sigma("o2"),
         }
+        sigmas["zodi"] = (
+            _matrix_sigma("zodi") if "zodi" in sl
+            else np.zeros_like(sigmas["moon"])
+        )
         return sigmas
 
     def _build_lsf_source(self, coef: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -1943,6 +2025,11 @@ def reconstruct_component_spectra(
     moon_interline_red_min: float = 7454.0,
     moon_interline_exclusion_a: float = 3.0,
     moon_interline_line_flux_threshold: float = 0.0,
+    split_zodi: bool = False,
+    n_zodi_spline_knots: int = 3,
+    moon_albedo_asset_path: str | Path | None = None,
+    moon_albedo_fiducial_phase_deg: float = 30.0,
+    zodi_color_exponent: float = 0.26,
 ) -> dict[str, np.ndarray]:
     """Reconstruct component spectra from decomposition coefficients.
 
@@ -1990,12 +2077,20 @@ def reconstruct_component_spectra(
         Normalized threshold in [0, 1] applied to line-signal strength before
         building exclusion windows. Only pixels above this threshold are treated
         as line centers for exclusion.
+    split_zodi, n_zodi_spline_knots, moon_albedo_asset_path,
+    moon_albedo_fiducial_phase_deg, zodi_color_exponent
+        When ``split_zodi=True``, add a separate Zodi_bs block to the design
+        matrix (moon carries ROLO albedo × solar, zodi carries a Leinert
+        reddening × solar). Must match the settings used when the decomposition
+        was fit; the returned dict then also contains a ``"zodi"`` key and
+        ``sigma["zodi"]`` when ``coef_err`` is provided.
 
     Returns
     -------
     dict[str, np.ndarray]
         Component spectra with keys: `oh`, `moon`, `ho2`, `feo`, `o2ac`,
-        `diffuse`, `atom`, `orc`, `o2`, and `total`.
+        `diffuse`, `atom`, `orc`, `o2`, and `total`. When ``split_zodi=True``,
+        `zodi` is also present.
     """
     model = SkyDecomp(
         wave,
@@ -2009,6 +2104,11 @@ def reconstruct_component_spectra(
         moon_interline_red_min=moon_interline_red_min,
         moon_interline_exclusion_a=moon_interline_exclusion_a,
         moon_interline_line_flux_threshold=moon_interline_line_flux_threshold,
+        split_zodi=split_zodi,
+        n_zodi_spline_knots=n_zodi_spline_knots,
+        moon_albedo_asset_path=moon_albedo_asset_path,
+        moon_albedo_fiducial_phase_deg=moon_albedo_fiducial_phase_deg,
+        zodi_color_exponent=zodi_color_exponent,
     )
 
     coef_arr = np.asarray(coef, float).ravel()
@@ -2031,6 +2131,7 @@ def reconstruct_component_spectra(
         model.matrix_atom,
         model.matrix_orc,
         model.matrix_o2,
+        matrix_zodi=model.matrix_zodi if split_zodi else None,
     )
     n_expected = sum(m.shape[0] for m in mats.values())
     if coef_arr.size != n_expected:
@@ -2042,6 +2143,7 @@ def reconstruct_component_spectra(
     comps["total"] = (
         comps["oh"]
         + comps["moon"]
+        + comps["zodi"]
         + comps["diffuse"]
         + comps["atom"]
         + comps["orc"]
@@ -2059,6 +2161,7 @@ def reconstruct_component_spectra(
         comps["sigma_total"] = np.sqrt(
             sigma_comps["oh"] ** 2
             + sigma_comps["moon"] ** 2
+            + sigma_comps["zodi"] ** 2
             + sigma_comps["diffuse"] ** 2
             + sigma_comps["atom"] ** 2
             + sigma_comps["orc"] ** 2

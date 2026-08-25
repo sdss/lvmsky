@@ -138,6 +138,12 @@ class _FitRun:
     solver_status: str
     continuum_status: str = "not_run"
     line_status: str = "not_run"
+    # Persisted covariance sub-blocks captured from the final continuum-stage
+    # ``_fit_design`` return (2D arrays sized (n_moon, n_moon) and
+    # (n_zodi, n_zodi)).  ``None`` when the block was not present in the
+    # solve.  These are what get written to disk as ``COEF_COV_*`` HDUs.
+    coef_cov_moon: np.ndarray | None = None
+    coef_cov_zodi: np.ndarray | None = None
 
 
 def _wave_fingerprint(wave: np.ndarray) -> tuple[int, float, float, str]:
@@ -1600,6 +1606,8 @@ class SkyDecompLSFSurfaceIterative(SkyDecomp):
             run.matrices = matrices
             run.continuum_coefficient = candidate_coefficient
             run.continuum_coef_err = candidate_coef_err
+            run.coef_cov_moon = continuum_fit.get("coef_cov_moon")
+            run.coef_cov_zodi = continuum_fit.get("coef_cov_zodi")
             run.line_coefficient = candidate_line_coefficient
             run.line_coef_err = candidate_line_coef_err
             run.continuum = candidate_continuum
@@ -1679,6 +1687,8 @@ class SkyDecompLSFSurfaceIterative(SkyDecomp):
                     )
                     run.continuum_coefficient = candidate_coefficient
                     run.continuum_coef_err = candidate_coef_err
+                    run.coef_cov_moon = continuum_fit.get("coef_cov_moon")
+                    run.coef_cov_zodi = continuum_fit.get("coef_cov_zodi")
                     run.line_coefficient = candidate_line_coefficient
                     run.line_coef_err = candidate_line_coef_err
                     run.continuum = candidate_continuum
@@ -1848,6 +1858,8 @@ class SkyDecompLSFSurfaceIterative(SkyDecomp):
             o2_prefit_amp=float(self.o2_prefit_amp),
             bestfit_lsf_sigma=bestfit_lsf_sigma,
             lsf_state=self.lsf_surface_state,
+            coef_cov_moon=run.coef_cov_moon,
+            coef_cov_zodi=run.coef_cov_zodi,
         )
 
     def fit(
