@@ -1,20 +1,24 @@
 """Moon_bs knot-count probe.
 
-Runs SkyDecompLSFSurfaceIterative(split_zodi=True) on a small bright-moon
+Runs SkyDecompLSFSurfaceIterative(split_zodi=True) on a small moon-regime
 sample from moon_zodi_spline2/*_every10.fits, sweeping n_spline_knots in
 {11, 15, 25}. Reports for each config:
   - flux-space pRMSE per row (median across sample)
   - median per-row |coef_moon| and median sigma_moon (SNR proxy)
-  - median adjacent-knot correlation across the sample (was 0.964 at n=25)
+  - median adjacent-knot correlation across the sample
   - runtime
 
-Bright-moon-only sample (moon_alt > 30 deg, fli > 0.85) so the moon
-component is unambiguous and we test purely the spline's representational
-capacity, not moon<->zodi identifiability. Skips amp priors to keep the
-probe self-contained.
+Two regimes:
+  bright  moon_alt > 30 deg AND moon_fli > 0.85    -- unambiguous moon
+  faint   moon_alt < -5 deg                        -- moon below horizon;
+                                                      Moon_bs SHOULD be near
+                                                      zero and stable across
+                                                      knot counts.
+Select with --regime {bright,faint}; default = bright.
 """
 from __future__ import annotations
 
+import argparse
 import sys
 import time
 from pathlib import Path
@@ -49,19 +53,24 @@ def _load_wave_and_meta():
     return wave, meta
 
 
-def _pick_bright_moon_rows(meta, n):
+def _pick_rows_by_regime(meta, n, regime):
     moon_alt = np.asarray(meta["moon_alt"], dtype=np.float64)
     moon_fli = np.asarray(meta["moon_fli"], dtype=np.float64) \
         if "moon_fli" in meta.colnames else None
     if moon_fli is None:
         moon_phase = np.asarray(meta["moon_phase"], dtype=np.float64)
         moon_fli = 0.5 * (1.0 - np.cos(np.deg2rad(moon_phase)))
-    mask = np.isfinite(moon_alt) & np.isfinite(moon_fli) \
-        & (moon_alt > 30.0) & (moon_fli > 0.85)
+    finite = np.isfinite(moon_alt) & np.isfinite(moon_fli)
+    if regime == "bright":
+        mask = finite & (moon_alt > 30.0) & (moon_fli > 0.85)
+    elif regime == "faint":
+        mask = finite & (moon_alt < -5.0)
+    else:
+        raise ValueError(f"unknown regime {regime!r}")
     candidates = np.flatnonzero(mask)
-    print(f"bright-moon candidate rows: {candidates.size}")
+    print(f"regime={regime!r} candidate rows: {candidates.size}")
     if candidates.size == 0:
-        raise RuntimeError("No bright-moon rows found in this every10 file")
+        raise RuntimeError(f"No rows found for regime={regime!r}")
     rng = np.random.default_rng(42)
     n = int(min(n, candidates.size))
     return np.sort(rng.choice(candidates, size=n, replace=False))
@@ -114,10 +123,15 @@ def _fit_row(decomp, obs_native, sigma_native):
 
 
 def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--regime", choices=("bright", "faint"), default="bright")
+    ap.add_argument("--n-rows", type=int, default=N_ROWS_TO_TEST)
+    args = ap.parse_args()
+
     wave, meta = _load_wave_and_meta()
     print(f"WAVE_A: {wave.size} pixels, {wave[0]:.1f} -> {wave[-1]:.1f} A")
-    rows = _pick_bright_moon_rows(meta, N_ROWS_TO_TEST)
-    print(f"picked {rows.size} bright-moon rows: {rows.tolist()}")
+    rows = _pick_rows_by_regime(meta, args.n_rows, args.regime)
+    print(f"picked {rows.size} {args.regime}-moon rows: {rows.tolist()}")
     flux_sci, lsf_sci, sigma_sci = _load_row_arrays(rows)
 
     summary_rows = []
@@ -173,6 +187,7 @@ def main():
 
         _c_abs = np.abs(moon_coef_matrix)
         _peak = np.nanmax(_c_abs, axis=1)
+        med_peak_abs_coef = float(np.nanmedian(_peak[np.isfinite(_peak)]))
         _min_sigma = np.min(np.where(moon_sigma_matrix > 0,
                                        moon_sigma_matrix, np.inf), axis=1)
         _min_sigma_finite = np.where(np.isfinite(_min_sigma), _min_sigma,
@@ -201,23 +216,26 @@ def main():
             med_flux_pRMSE=med_prmse,
             p95_flux_pRMSE=p95_prmse,
             med_peak_SNR=med_peak_snr,
+            med_peak_abs_coef=med_peak_abs_coef,
             med_adj_abs_corr=med_adj_abs_corr,
             n_pairs_corr_gt_090=n_high_corr,
             n_pairs=int(adj_corrs_valid.size),
         ))
         print(f"  {K:>2d} knots ({n_basis:>2d} basis): "
               f"med_pRMSE={med_prmse:.3g}, "
+              f"peak_|coef|={med_peak_abs_coef:.3g}, "
               f"peak_SNR={med_peak_snr:.2f}, "
               f"med_adj_|corr|={med_adj_abs_corr:.3f}, "
               f"{n_high_corr}/{adj_corrs_valid.size} pairs > 0.90")
 
     print("\n=== SUMMARY ===")
     print("n_knots  n_basis  n_ok  time_s   med_pRMSE  p95_pRMSE   "
-          "peak_SNR  adj_|corr|  n>0.90")
+          "peak|coef|   peak_SNR  adj_|corr|  n>0.90")
     for s in summary_rows:
         print(f"{s['n_moon_knots']:>7d}  {s['n_moon_basis']:>7d}  "
               f"{s['n_rows_fit']:>4d}  {s['elapsed_s']:>6.1f}  "
               f"{s['med_flux_pRMSE']:>10.4g}  {s['p95_flux_pRMSE']:>10.4g}  "
+              f"{s['med_peak_abs_coef']:>10.4g}  "
               f"{s['med_peak_SNR']:>8.2f}  {s['med_adj_abs_corr']:>10.3f}  "
               f"{s['n_pairs_corr_gt_090']:>3d}/{s['n_pairs']:>3d}")
 
