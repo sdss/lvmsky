@@ -1,17 +1,33 @@
-# Naive baselines vs the ML model on the same night-held-out test split (§11.1).
+# Naive baselines vs the ML model on the night-held-out test split.
 #
-#   B0  copy_near        hat{c} = coef_near                                (no physics)
-#   B1  near_geo         hat{c} = em_near * G_sci                          (near arm re-projected onto sci geometry)
-#   B2  mean_geo         hat{c} = 0.5 * (em_near + em_far) * G_sci         (geometry-corrected symmetric average)
-#   ML_default           coef_pred_det (single-seed model)
-#   ML_ensemble          arithmetic-mean of the 4-seed ensemble (if multi-seed cell has run)
+# Metric:
+#   sRMSE_g(r) = sqrt( mean_{j in g} (pred[r, j] - true[r, j])**2 )
+#   sRMSE_g    = mean_r sRMSE_g(r)   (also report median_r for outlier robustness)
 #
-# em_arm = coef_arm / G_arm; G_arm = airglow_geometry_scale(ctx_arm).  G_arm is exactly 1 for
-# the moon and other non-airglow groups, so B1's moon prediction reduces to `coef_near` and
-# B2's moon prediction is the plain arithmetic mean of the two sky arms.
+# sRMSE is a per-spectrum per-group figure of merit: it asks "how well does
+# variant X reproduce group g on each row" and then averages over rows.
+# Unlike eRMSE (per-column RMSE, averaged over columns), sRMSE gives each
+# spectrum equal weight regardless of how many coefficients the group has.
+# That kills the pathology where the ~400 OH columns drown out the moon+zodi
+# groups the ML is actually predicting.
+#
+# Baselines:
+#   B0  copy_near   hat{c} = coef_near                             (no physics)
+#   B1  near_geo    hat{c} = em_near * G_sci                       (near arm re-projected onto sci geometry)
+#   B2  mean_geo    hat{c} = 0.5*(em_near + em_far) * G_sci        (geometry-corrected symmetric average)
+#   ML_default      coef_pred_det (ensemble mean)
+#
+# em_arm = coef_arm / G_arm; G_arm = airglow_geometry_scale(ctx_arm). G_arm is
+# exactly 1 for moon/zodi, so B1's moon prediction reduces to coef_near_moon
+# and B2's moon prediction is the plain arithmetic mean of the two sky arms.
+#
+# Row-subset regimes (masks on ctx_sci):
+#   all           entire test set
+#   moon_up       moon_alt > 0
+#   moon_down     moon_alt <= 0
+#   close_zodi    |ecl_beta_deg| < 20  (near the ecliptic plane -> zodi bright)
 
 required = ['filtered_triplet', 'compress_geom_kwargs', '_group_indices_compress',
-            'mlp_artifacts', 'cmp_df', '_metric_row',
             'coef_near_all', 'coef_far_all', 'coef_sci_all',
             'ctx_near_all', 'ctx_far_all', 'ctx_sci_all',
             'test_idx', 'coef_pred_det']
@@ -35,94 +51,119 @@ _em_near = _coef_near_te / _G_near
 _em_far  = _coef_far_te  / _G_far
 
 _all_preds = {
-    'B0_copy_near': np.clip(_coef_near_te,                       0.0, None).astype(np.float32),
-    'B1_near_geo':  np.clip(_em_near * _G_sci,                   0.0, None).astype(np.float32),
-    'B2_mean_geo':  np.clip(0.5 * (_em_near + _em_far) * _G_sci, 0.0, None).astype(np.float32),
-    # ML_default is the 4-seed ensemble prediction (see trainer cell + §12, 2026-08-11).
-    'ML_default':   np.asarray(coef_pred_det, dtype=np.float32),
+    'B0_copy_near': np.clip(_coef_near_te,                       0.0, None).astype(np.float64),
+    'B1_near_geo':  np.clip(_em_near * _G_sci,                   0.0, None).astype(np.float64),
+    'B2_mean_geo':  np.clip(0.5 * (_em_near + _em_far) * _G_sci, 0.0, None).astype(np.float64),
+    'ML_default':   np.asarray(coef_pred_det, dtype=np.float64),
 }
+_y_te = _coef_sci_te.astype(np.float64)
 
-_y_te = _coef_sci_te.astype(np.float32)
+# --- Row-subset masks (built from sci-arm context) ---
+_ctx_names_ll = list(filtered_triplet['ctx_names'])
+_ma_col = _ctx_names_ll.index('moon_alt') if 'moon_alt' in _ctx_names_ll else None
+_eb_col = _ctx_names_ll.index('ecl_beta_deg') if 'ecl_beta_deg' in _ctx_names_ll else None
 
-# 2026-08-16: sigma-aware _metric_row -> mean/median/total WRMSE columns.
-_sig_te = (coef_err_sci_all[test_idx].astype(np.float32)
-           if 'coef_err_sci_all' in globals() else None)
-_floor_te = (dict(DEFAULT_COEF_ERR_SIGMA_FLOOR_BY_GROUP)
-              if 'DEFAULT_COEF_ERR_SIGMA_FLOOR_BY_GROUP' in globals() else None)
-_rows = [{'variant': name,
-          **_metric_row(_y_te, pred, name,
-                        sigma=_sig_te,
-                        group_indices=_group_indices_compress,
-                        floor_by_group=_floor_te)}
-         for name, pred in _all_preds.items()]
-_summary_df = pd.DataFrame(_rows)
-
-print('=' * 78)
-print(f'Naive baselines vs ML on test split ({_te_bl.size} rows, {_y_te.shape[1]} coefficients)')
-print('=' * 78)
-print(_summary_df.to_string(index=False, float_format=lambda v: f'{v:.6g}'))
-
-# Per-group mean coefficient bias.
-_bias_rows = []
-for gname, idx in _group_indices_compress.items():
-    idx = np.asarray(idx, dtype=int)
-    _mean_true = float(np.mean(_y_te[:, idx]))
-    row = {'group': gname, 'n': int(idx.size), 'mean_true': _mean_true}
-    for name, pred in _all_preds.items():
-        row[f'bias_{name}_%'] = (
-            100.0 * (float(np.mean(pred[:, idx])) - _mean_true)
-            / max(abs(_mean_true), 1e-30))
-    _bias_rows.append(row)
-print()
-print('Per-group mean coefficient bias on test rows (positive = over-predict, %):')
-print(pd.DataFrame(_bias_rows).to_string(index=False, float_format=lambda v: f'{v:.3g}'))
-
-# Per-group mean per-coefficient RMSE.
-_rmse_group_rows = []
-for gname, idx in _group_indices_compress.items():
-    idx = np.asarray(idx, dtype=int)
-    row = {'group': gname, 'n': int(idx.size)}
-    for name, pred in _all_preds.items():
-        _rmse_j = np.sqrt(np.mean(
-            (pred[:, idx].astype(np.float64) - _y_te[:, idx].astype(np.float64)) ** 2,
-            axis=0))
-        row[f'eRMSE_{name}'] = float(np.mean(_rmse_j))
-    _rmse_group_rows.append(row)
-print()
-print('Per-group mean per-coefficient eRMSE (lower is better):')
-print(pd.DataFrame(_rmse_group_rows).to_string(index=False, float_format=lambda v: f'{v:.4g}'))
-
-# Verdict against the best naive baseline.
-# 2026-08-14 update: use median_eRMSE as the primary merit metric because
-# mean_eRMSE is dominated by a small coefficient tail.
-_bl_rows = _summary_df[~_summary_df['variant'].str.startswith('ML_')].copy()
-_ml_row  = _summary_df[_summary_df['variant'] == 'ML_default'].iloc[0]
-_best_bl = _bl_rows.sort_values(['median_eRMSE', 'mean_eRMSE']).iloc[0]
-
-_ml_med_rmse = float(_ml_row['median_eRMSE'])
-_best_bl_med_rmse = float(_best_bl['median_eRMSE'])
-_gain_med_pct = 100.0 * (_best_bl_med_rmse - _ml_med_rmse) / max(_best_bl_med_rmse, 1e-30)
-
-_ml_mean_rmse = float(_ml_row['mean_eRMSE'])
-_best_bl_mean_rmse = float(_best_bl['mean_eRMSE'])
-_gain_mean_pct = 100.0 * (_best_bl_mean_rmse - _ml_mean_rmse) / max(_best_bl_mean_rmse, 1e-30)
-
-print()
-print(f"Best naive baseline (by median_eRMSE): {_best_bl['variant']!r}")
-print(f"  median_eRMSE={_best_bl_med_rmse:.4g}, mean_eRMSE={_best_bl_mean_rmse:.4g}, "
-      f"median_corr={float(_best_bl['median_corr']):.4f}")
-print("ML default:")
-print(f"  median_eRMSE={_ml_med_rmse:.4g}, mean_eRMSE={_ml_mean_rmse:.4g}, "
-      f"median_corr={float(_ml_row['median_corr']):.4f}")
-print(f'ML improvement over best baseline: median_eRMSE {_gain_med_pct:+.1f}%  '
-      f'(mean_eRMSE context: {_gain_mean_pct:+.1f}%)')
-
-if _ml_med_rmse < _best_bl_med_rmse:
-    print('Verdict (median_eRMSE-primary): the network earns its complexity on this test set.')
-elif abs(_gain_med_pct) < 2.0:
-    print('Verdict (median_eRMSE-primary): ML and best baseline are within noise; '
-          'check per-group eRMSE and outlier-tail diagnostics for practical differences.')
+_masks = {'all': np.ones(_te_bl.size, dtype=bool)}
+if _ma_col is not None:
+    _moon_alt_te = _ctx_sci_te[:, _ma_col]
+    _masks['moon_up']   = _moon_alt_te > 0.0
+    _masks['moon_down'] = _moon_alt_te <= 0.0
 else:
-    print('Verdict (median_eRMSE-primary): the best naive baseline beats the ML model. '
-          'Either the model overfits, the loss overfocuses a difficult tail, or '
-          'the compressor discards directions the baseline preserves.')
+    print('  (moon_alt not in ctx_names -> skipping moon_up/moon_down regimes)')
+if _eb_col is not None:
+    _abs_eb_te = np.abs(_ctx_sci_te[:, _eb_col])
+    _masks['close_zodi'] = _abs_eb_te < 20.0
+else:
+    print('  (ecl_beta_deg not in ctx_names -> skipping close_zodi regime)')
+
+
+def _srmse_per_group(y_true, y_pred, group_indices, row_mask):
+    """Return {group: (mean_sRMSE, median_sRMSE, n_row)} on the masked rows."""
+    y_true = np.asarray(y_true, dtype=np.float64)
+    y_pred = np.asarray(y_pred, dtype=np.float64)
+    _r = np.asarray(row_mask, dtype=bool)
+    out = {}
+    for gname, idx in group_indices.items():
+        idx = np.asarray(idx, dtype=int)
+        _resid_g = (y_pred[_r][:, idx] - y_true[_r][:, idx]) ** 2
+        _row_rms = np.sqrt(np.mean(_resid_g, axis=1))
+        out[gname] = (float(np.mean(_row_rms)),
+                      float(np.median(_row_rms)),
+                      int(_r.sum()))
+    return out
+
+
+_group_names = list(_group_indices_compress.keys())
+
+print('=' * 90)
+print(f'Naive baselines vs ML on test split ({_te_bl.size} rows, '
+      f'{_y_te.shape[1]} coefficients, {len(_group_names)} groups)')
+print('sRMSE_g(r) = sqrt(mean_{j in g} (pred[r,j] - true[r,j])**2); reported = mean_r.')
+print('=' * 90)
+
+for regime, mask in _masks.items():
+    _n = int(mask.sum())
+    print()
+    print(f'--- regime: {regime}  (n_rows = {_n}) ---')
+    if _n == 0:
+        print('  (empty subset)')
+        continue
+    _rows_out = []
+    for name, pred in _all_preds.items():
+        _per_g = _srmse_per_group(_y_te, pred, _group_indices_compress, mask)
+        row = {'variant': name}
+        for g in _group_names:
+            row[g] = _per_g[g][0]
+        _rows_out.append(row)
+    _df = pd.DataFrame(_rows_out).set_index('variant')
+    print(_df.to_string(float_format=lambda v: f'{v:.4g}'))
+
+    print('  ML vs best naive baseline per group '
+          '(pct gain positive = ML wins over the best non-ML variant):')
+    for g in _group_names:
+        _col = _df[g]
+        _ml = float(_col.loc['ML_default'])
+        _bl_col = _col.drop('ML_default')
+        _best_bl_name = _bl_col.idxmin()
+        _best_bl_val = float(_bl_col.min())
+        _winner = 'ML' if _ml <= _best_bl_val else _best_bl_name
+        _gain_pct = 100.0 * (_best_bl_val - _ml) / max(_best_bl_val, 1e-30)
+        print(f'    {g:<12s} winner={_winner:<12s}  ML={_ml:.4g}  '
+              f'best_naive={_best_bl_name}:{_best_bl_val:.4g}  gain={_gain_pct:+.1f}%')
+
+# Group-equal aggregate on the full test set: mean over groups of the per-variant
+# per-group mean sRMSE.  Each group counts once, so moon+zodi are not drowned out
+# by the 400-column OH block.
+print()
+print('=' * 90)
+print('Group-equal aggregate on the full test set '
+      '(mean over groups of the per-variant per-group mean sRMSE):')
+print('=' * 90)
+_agg_rows = []
+for name, pred in _all_preds.items():
+    _per_g = _srmse_per_group(_y_te, pred, _group_indices_compress, _masks['all'])
+    _agg_rows.append({
+        'variant': name,
+        'group_equal_sRMSE': float(np.mean([_per_g[g][0] for g in _group_names])),
+    })
+_all_df = pd.DataFrame(_agg_rows).set_index('variant')
+print(_all_df.to_string(float_format=lambda v: f'{v:.5g}'))
+
+_bl_only = _all_df.drop('ML_default')
+_best = _bl_only['group_equal_sRMSE'].idxmin()
+_best_v = float(_bl_only['group_equal_sRMSE'].loc[_best])
+_ml_v = float(_all_df['group_equal_sRMSE'].loc['ML_default'])
+_gain_pct = 100.0 * (_best_v - _ml_v) / max(_best_v, 1e-30)
+print()
+print(f"Best naive baseline (group-equal aggregate): {_best!r} = {_best_v:.5g}")
+print(f"ML_default (group-equal aggregate):          {_ml_v:.5g}")
+print(f"ML improvement over best naive: {_gain_pct:+.1f}%")
+if _ml_v < _best_v:
+    print('Verdict (group-equal sRMSE): the network earns its complexity.')
+elif abs(_gain_pct) < 2.0:
+    print('Verdict (group-equal sRMSE): ML and best baseline within noise; '
+          'inspect per-group / per-regime tables above.')
+else:
+    print('Verdict (group-equal sRMSE): the best naive baseline beats the ML model. '
+          'Check moon/zodi rows in the per-regime tables to see whether the loss '
+          'is defeated in the physically relevant regimes.')

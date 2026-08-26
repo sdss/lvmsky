@@ -417,6 +417,34 @@ class Diagnostics:
         """
         return self._run('wrmse_vs_ctx_scatter')
 
+    def residual_ctx_attribution(self) -> dict:
+        """Notebook cell id=residual-ctx-attribution.  Body lives in ``diagnostics_cells/residual_ctx_attribution.py``.
+
+        Returns the persistent exec-globals dict for inspection.
+        """
+        return self._run('residual_ctx_attribution')
+
+    def sky_arm_disagreement_floor(self) -> dict:
+        """Notebook cell id=sky-arm-disagreement-floor.  Body lives in ``diagnostics_cells/sky_arm_disagreement_floor.py``.
+
+        Returns the persistent exec-globals dict for inspection.
+        """
+        return self._run('sky_arm_disagreement_floor')
+
+    def wavelength_residual_atlas(self) -> dict:
+        """Notebook cell id=wavelength-residual-atlas.  Body lives in ``diagnostics_cells/wavelength_residual_atlas.py``.
+
+        Returns the persistent exec-globals dict for inspection.
+        """
+        return self._run('wavelength_residual_atlas')
+
+    def ensemble_spread_calibration(self) -> dict:
+        """Notebook cell id=ensemble-spread-calibration.  Body lives in ``diagnostics_cells/ensemble_spread_calibration.py``.
+
+        Returns the persistent exec-globals dict for inspection.
+        """
+        return self._run('ensemble_spread_calibration')
+
 
     # ------------------------------------------------------------------
     # Hand-written overrides that accept per-call arguments.
