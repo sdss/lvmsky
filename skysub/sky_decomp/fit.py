@@ -57,26 +57,6 @@ Bump `zodi_smooth_lambda` (~1e-1) when using a small zodi knot count (K≤3);
 a tighter zodi penalty makes the fitted zodi cleanly follow the red-slope
 `zodi_color` envelope instead of picking up locally blue features.
 
-Amplitude priors (opt-in)
-~~~~~~~~~~~~~~~~~~~~~~~~~
-`SkyDecomp.fit(...)` and `SkyDecompLSFSurfaceIterative.fit(...)` accept
-
-    moon_amp_prior, moon_amp_prior_lambda
-    zodi_amp_prior, zodi_amp_prior_lambda
-
-which add a quadratic penalty
-
-    λ * (Σ_k c_k * ∫ B_k(λ) dλ  -  target)²
-
-to the QP normal equations.  Anchor `moon_amp_prior` to a moon-brightness
-proxy (e.g. `moon_fli * max(0, sin(moon_alt)) * (Rayleigh + Aerosol)(sep)`
-times a globally-calibrated scale) and `zodi_amp_prior` to Leinert `B(500)`
-at the observed ecliptic geometry (see the identifiability notebook for the
-calibration protocol).  Both default to off (`target=None`, `λ=0.0`) and
-were shown to be unnecessary for basic identifiability once the `diffuse`
-family is available to absorb the flat baseline; they help most at
-moon-down + zodi-rich rows where the fit residual is ambiguous.
-
 Recommended settings
 ~~~~~~~~~~~~~~~~~~~~
 Validated on the p40_p70 every10 corpus (100-row phase-stratified sample):
@@ -87,8 +67,6 @@ Validated on the p40_p70 every10 corpus (100-row phase-stratified sample):
     zodi_smooth_lambda    = 1e-1
     moon_albedo_fiducial_phase_deg = 30.0
     zodi_color_exponent   = 0.26
-    moon_amp_prior_lambda = 1e-4     (optional)
-    zodi_amp_prior_lambda = 1e-4     (optional)
 
 Backwards compatibility
 ~~~~~~~~~~~~~~~~~~~~~~~
@@ -399,12 +377,6 @@ class SkyDecomp:
         self.zodi_knots_used = np.array([], float)
         self.moon_albedo_shape = np.ones_like(self.wave)
         self.zodi_color_shape = np.ones_like(self.wave)
-        # Integrated basis weights for amplitude priors (populated in _build_zodi/_build_moon).
-        self.moon_amp_weights = np.array([], float)
-        self.zodi_amp_weights = np.array([], float)
-
-        # Cached per-wavelength grid spacing (used by amp-prior integrated weights).
-        self._dw = np.gradient(self.wave)
         # Cached second-difference operators for the moon / zodi curvature penalties;
         # populated in _build_moon / _build_zodi.  Shape is (n_par - 2, n_par).
         self._d2_moon = np.zeros((0, 0), dtype=float)
@@ -419,10 +391,6 @@ class SkyDecomp:
         *,
         verbose: bool = False,
         n_lsf_refits: int = 1,
-        moon_amp_prior: float | None = None,
-        zodi_amp_prior: float | None = None,
-        moon_amp_prior_lambda: float = 0.0,
-        zodi_amp_prior_lambda: float = 0.0,
     ) -> SkyDecompResult:
         flux = np.asarray(flux, float)
         ivar = np.asarray(ivar, float)
@@ -454,10 +422,6 @@ class SkyDecomp:
             moon_slice=comp_slices["moon"],
             diffuse_slice=comp_slices["diffuse"],
             zodi_slice=comp_slices.get("zodi"),
-            moon_amp_prior=moon_amp_prior,
-            zodi_amp_prior=zodi_amp_prior,
-            moon_amp_prior_lambda=moon_amp_prior_lambda,
-            zodi_amp_prior_lambda=zodi_amp_prior_lambda,
         )
         self.bestfit = first["bestfit"]
         refined = first
@@ -490,10 +454,6 @@ class SkyDecomp:
                 moon_slice=comp_slices["moon"],
                 diffuse_slice=comp_slices["diffuse"],
                 zodi_slice=comp_slices.get("zodi"),
-                moon_amp_prior=moon_amp_prior,
-                zodi_amp_prior=zodi_amp_prior,
-                moon_amp_prior_lambda=moon_amp_prior_lambda,
-                zodi_amp_prior_lambda=zodi_amp_prior_lambda,
             )
             iter_logs.append(
                 {
@@ -929,10 +889,6 @@ class SkyDecomp:
         moon_slice: slice | None = None,
         diffuse_slice: slice | None = None,
         zodi_slice: slice | None = None,
-        moon_amp_prior: float | None = None,
-        zodi_amp_prior: float | None = None,
-        moon_amp_prior_lambda: float = 0.0,
-        zodi_amp_prior_lambda: float = 0.0,
     ) -> dict[str, object]:
         """Weighted nonnegative least-squares fit of one design matrix.
 
@@ -999,12 +955,6 @@ class SkyDecomp:
             w_vec: np.ndarray,
             moon_slice_local: slice | None,
             zodi_slice_local: slice | None = None,
-            moon_prior_target_local: float | None = None,
-            zodi_prior_target_local: float | None = None,
-            moon_prior_lambda_local: float = 0.0,
-            zodi_prior_lambda_local: float = 0.0,
-            moon_amp_weights_local: np.ndarray | None = None,
-            zodi_amp_weights_local: np.ndarray | None = None,
         ) -> tuple[np.ndarray, str, float, np.ndarray, np.ndarray, float]:
             aw = a_mat * w_vec[:, None]
             yw = y_vec * w_vec
@@ -1040,32 +990,8 @@ class SkyDecomp:
                     d2z_scaled = d2z / col_scale[i0z:i1z][None, :]
                     p_dense_local[i0z:i1z, i0z:i1z] += 2.0 * self.zodi_smooth_lambda * (d2z_scaled.T @ d2z_scaled)
 
-            # Amplitude prior on the moon spline: penalty lambda * (Σ w_i c_i - target)^2.
-            # In scaled coords (c_scaled = c * col_scale), effective weights become w_i / col_scale_i.
-            # Contributes 2*lambda * (w_scl w_scl^T) to P and -2*lambda*target * w_scl to q.
-            q_extra = np.zeros(n_par_local, dtype=np.float64)
-            if (moon_prior_lambda_local > 0.0 and moon_prior_target_local is not None
-                    and moon_amp_weights_local is not None and moon_slice_local is not None):
-                i0m = moon_slice_local.start or 0
-                i1m = moon_slice_local.stop or i0m
-                n_m = i1m - i0m
-                if n_m == moon_amp_weights_local.size:
-                    w_scl = np.zeros(n_par_local, dtype=np.float64)
-                    w_scl[i0m:i1m] = moon_amp_weights_local / col_scale[i0m:i1m] / data_scale
-                    p_dense_local += 2.0 * moon_prior_lambda_local * np.outer(w_scl, w_scl)
-                    q_extra += -2.0 * moon_prior_lambda_local * (moon_prior_target_local / data_scale) * w_scl
-            if (zodi_prior_lambda_local > 0.0 and zodi_prior_target_local is not None
-                    and zodi_amp_weights_local is not None and zodi_slice_local is not None):
-                i0z2 = zodi_slice_local.start or 0
-                i1z2 = zodi_slice_local.stop or i0z2
-                n_z = i1z2 - i0z2
-                if n_z == zodi_amp_weights_local.size:
-                    w_scl_z = np.zeros(n_par_local, dtype=np.float64)
-                    w_scl_z[i0z2:i1z2] = zodi_amp_weights_local / col_scale[i0z2:i1z2] / data_scale
-                    p_dense_local += 2.0 * zodi_prior_lambda_local * np.outer(w_scl_z, w_scl_z)
-                    q_extra += -2.0 * zodi_prior_lambda_local * (zodi_prior_target_local / data_scale) * w_scl_z
-
-            q_local = -(aw.T @ yw) + q_extra
+            # Amplitude priors were removed 2026-08-26; ecliptic split alone carries identifiability.
+            q_local = -(aw.T @ yw)
             p_local = sp.csc_matrix((p_dense_local + p_dense_local.T) / 2.0)
             p_local = sp.triu(p_local).tocsc()
             a_con = -sp.eye(n_par_local, format="csc")
@@ -1102,12 +1028,6 @@ class SkyDecomp:
         ) = _solve_nonnegative_weighted(
             a, y, base_w, moon_slice,
             zodi_slice_local=zodi_slice,
-            moon_prior_target_local=moon_amp_prior,
-            zodi_prior_target_local=zodi_amp_prior,
-            moon_prior_lambda_local=moon_amp_prior_lambda,
-            zodi_prior_lambda_local=zodi_amp_prior_lambda,
-            moon_amp_weights_local=self.moon_amp_weights,
-            zodi_amp_weights_local=self.zodi_amp_weights,
         )
 
         # Track whichever solve produced the FINAL value of each coefficient,
@@ -1153,10 +1073,6 @@ class SkyDecomp:
                 boosted_w,
                 moon_slice_local,
                 zodi_slice_local=None,
-                moon_prior_target_local=None,
-                zodi_prior_target_local=None,
-                moon_prior_lambda_local=0.0,
-                zodi_prior_lambda_local=0.0,
             )
             coef[target_cols_arr] = coef_target
             for local_pos_i, global_col in enumerate(target_cols_arr):
@@ -1450,8 +1366,6 @@ class SkyDecomp:
         matrix_moon = (envelope[:, None] * matrix_bspl).T
         self.matrix_moon_hr = (envelope_hr[:, None] * matrix_bspl).T
         moon_names = [f"Moon_bs{i:02d}" for i in range(matrix_moon.shape[0])]
-        # Integrated basis weights over wave for amplitude prior on Σ c × ∫ B(λ) dλ.
-        self.moon_amp_weights = (matrix_moon * self._dw[None, :]).sum(axis=1)
         # Precompute the moon curvature penalty operator once (depends only on n_par).
         self._d2_moon = _build_d2_operator(matrix_moon.shape[0])
         return matrix_moon, moon_names
@@ -1478,7 +1392,7 @@ class SkyDecomp:
         tabulated = np.exp(poly + opp) / 0.87
         wave_nm = self.wave / 10.0
         albedo = np.interp(wave_nm, coefs[:, 0], tabulated)
-        # Normalise to unit median so amplitude priors and Moon_bs coefficient magnitudes
+        # Normalise to unit median so Moon_bs coefficient magnitudes
         # stay comparable to the current (no-albedo) fit-time scale.
         med = float(np.nanmedian(albedo))
         return (albedo / med).astype(float) if np.isfinite(med) and med > 0 else albedo
@@ -1510,7 +1424,6 @@ class SkyDecomp:
         # HR twin: identical for now; LSF refit convolves it channelwise if used.
         self.matrix_zodi_hr = matrix_zodi.copy()
         zodi_names = [f'Zodi_bs{i:02d}' for i in range(matrix_zodi.shape[0])]
-        self.zodi_amp_weights = (matrix_zodi * self._dw[None, :]).sum(axis=1)
         # Precompute the zodi curvature penalty operator (depends only on n_par).
         self._d2_zodi = _build_d2_operator(matrix_zodi.shape[0])
         return matrix_zodi, zodi_names

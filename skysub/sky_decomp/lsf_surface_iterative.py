@@ -1149,12 +1149,6 @@ class SkyDecompLSFSurfaceIterative(SkyDecomp):
         self.channel_noise: dict[str, float] = {}
         self.final_continuum = np.array([], dtype=float)
         self.final_line_model = np.array([], dtype=float)
-        # Amplitude-prior state carried across the internal continuum solves;
-        # populated by ``fit`` before delegating to ``_run_iterations``.
-        self._moon_amp_prior: float | None = None
-        self._zodi_amp_prior: float | None = None
-        self._moon_amp_prior_lambda: float = 0.0
-        self._zodi_amp_prior_lambda: float = 0.0
         super().__init__(*args, **kwargs)
 
     @property
@@ -1400,10 +1394,6 @@ class SkyDecompLSFSurfaceIterative(SkyDecomp):
             moon_slice=slice(0, n_moon),
             diffuse_slice=diffuse_slice_local,
             zodi_slice=zodi_slice_local,
-            moon_amp_prior=self._moon_amp_prior,
-            zodi_amp_prior=self._zodi_amp_prior,
-            moon_amp_prior_lambda=self._moon_amp_prior_lambda,
-            zodi_amp_prior_lambda=self._zodi_amp_prior_lambda,
         )
         if str(fit["status"]) not in self._SOLVED:
             return fit, None, None, None, weights, channel_noise
@@ -1443,10 +1433,6 @@ class SkyDecompLSFSurfaceIterative(SkyDecomp):
             moon_slice=slices["moon"],
             diffuse_slice=slices["diffuse"],
             zodi_slice=slices.get("zodi"),
-            moon_amp_prior=self._moon_amp_prior,
-            zodi_amp_prior=self._zodi_amp_prior,
-            moon_amp_prior_lambda=self._moon_amp_prior_lambda,
-            zodi_amp_prior_lambda=self._zodi_amp_prior_lambda,
         )
         seed_coefficient = np.asarray(seed["coef"], dtype=float)
         seed_coef_err = np.asarray(
@@ -1868,12 +1854,6 @@ class SkyDecompLSFSurfaceIterative(SkyDecomp):
         ivar: np.ndarray,
         *,
         verbose: bool = False,
-        moon_amp_prior: float | None = None,
-        zodi_amp_prior: float | None = None,
-        moon_amp_prior_lambda: float = 0.0,
-        zodi_amp_prior_lambda: float = 0.0,
-        moon_smooth_lambda_override: float | None = None,
-        zodi_smooth_lambda_override: float | None = None,
     ) -> LSFSurfaceIterativeResult:
         """Run the approved continuum -> LSF -> lines refinement sequence."""
         flux = np.asarray(flux, dtype=float)
@@ -1888,41 +1868,19 @@ class SkyDecompLSFSurfaceIterative(SkyDecomp):
         tracemalloc.reset_peak()
         started = time.perf_counter()
         self._set_lsf_state(None)
-        # Publish amp-prior targets so the seed + continuum solves can forward
-        # them to ``_fit_design``; ``_run_iterations`` and ``_solve_continuum``
-        # read these instance attributes.
-        self._moon_amp_prior = moon_amp_prior
-        self._zodi_amp_prior = zodi_amp_prior
-        self._moon_amp_prior_lambda = float(moon_amp_prior_lambda)
-        self._zodi_amp_prior_lambda = float(zodi_amp_prior_lambda)
-        # Per-row smoothness override: temporarily replace instance attributes
-        # for the duration of this fit call. Restored in the finally block so
-        # a re-entrant caller (worker reused across many rows) never sees a
-        # stale gated value.
-        _saved_moon_lambda = self.moon_smooth_lambda
-        _saved_zodi_lambda = getattr(self, "zodi_smooth_lambda", 0.0)
-        if moon_smooth_lambda_override is not None:
-            self.moon_smooth_lambda = float(moon_smooth_lambda_override)
-        if zodi_smooth_lambda_override is not None and hasattr(self, "zodi_smooth_lambda"):
-            self.zodi_smooth_lambda = float(zodi_smooth_lambda_override)
-        try:
-            self._prefit_o2(flux, ivar)
-            seed, skyline_mask, run = self._run_iterations(flux, ivar)
+        self._prefit_o2(flux, ivar)
+        seed, skyline_mask, run = self._run_iterations(flux, ivar)
 
-            return self._finalize_result(
-                run,
-                seed,
-                flux,
-                ivar,
-                skyline_mask,
-                started,
-                trace_started,
-                verbose,
-            )
-        finally:
-            self.moon_smooth_lambda = _saved_moon_lambda
-            if hasattr(self, "zodi_smooth_lambda"):
-                self.zodi_smooth_lambda = _saved_zodi_lambda
+        return self._finalize_result(
+            run,
+            seed,
+            flux,
+            ivar,
+            skyline_mask,
+            started,
+            trace_started,
+            verbose,
+        )
 
 
 __all__ = [

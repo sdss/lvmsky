@@ -41,6 +41,7 @@ EXPECTED_HDU_ORDER = [
     "FLUX_SIGMA_TOTAL",
     "RESID",
     "VECTOR_O2",
+    "COEF_COV_MOON",
     "COMP_MOON",
     "COMP_ZODI",
     "COMP_DIFFUSE",

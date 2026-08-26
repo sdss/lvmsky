@@ -83,3 +83,4 @@ lvmsframe_*
 *.cpython-*.pyc
 .vscode/
 Kp*.txt
+scratch/*

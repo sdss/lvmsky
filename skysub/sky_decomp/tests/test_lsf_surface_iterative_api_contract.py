@@ -154,6 +154,8 @@ def test_dataclass_field_order_and_defaults():
         "bestfit_lsf_sigma",
         "zodi_names",
         "zodi_knots",
+        "coef_cov_moon",
+        "coef_cov_zodi",
         "lsf_state",
     )
 
@@ -195,9 +197,7 @@ def test_public_callable_signatures():
         "(self, *args, config=None, **kwargs)"
     )
     assert _signature_without_annotations(iterative.SkyDecompLSFSurfaceIterative.fit) == (
-        "(self, flux, ivar, *, verbose=False, moon_amp_prior=None, "
-        "zodi_amp_prior=None, moon_amp_prior_lambda=0.0, "
-        "zodi_amp_prior_lambda=0.0)"
+        "(self, flux, ivar, *, verbose=False)"
     )
 
 
