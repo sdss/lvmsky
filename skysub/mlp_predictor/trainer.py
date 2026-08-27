@@ -1203,6 +1203,10 @@ def train_compressed_group_mlp(
             'zodi_head_extra_dims': tuple(int(v) for v in zodi_head_extra_dims),
             'continuum_head_extra_dims': tuple(int(v) for v in continuum_head_extra_dims),
             'continuum_branch_dims': tuple(int(v) for v in continuum_branch_dims),
+            'zodi_ctx_restriction': (tuple(str(x) for x in zodi_ctx_restriction)
+                                     if zodi_ctx_restriction else None),
+            'continuum_ctx_restriction': (tuple(str(x) for x in continuum_ctx_restriction)
+                                          if continuum_ctx_restriction else None),
             'moon_zodi_ctx_restriction': (tuple(str(x) for x in moon_zodi_ctx_restriction)
                                           if moon_zodi_ctx_restriction else None),
             'moon_zodi_branch_dims': tuple(int(v) for v in moon_zodi_branch_dims),
