@@ -102,29 +102,19 @@ def _build_model_from_config(cfg: Mapping[str, Any], *, n_input_score: int,
         n_score=int(n_input_score), n_ctx=int(n_ctx),
         group_score_dims=dict(group_score_dims),
         ctx_names=list(ctx_names),
-        encoder_dims=tuple(int(v) for v in cfg.get("encoder_dims", (384, 192))),
-        ctx_dims=tuple(int(v) for v in cfg.get("ctx_dims", (64,))),
-        trunk_dims=tuple(int(v) for v in cfg.get("trunk_dims", (320, 160))),
-        head_dim=int(cfg.get("head_dim", 192)),
-        head_extra_dims=tuple(int(v) for v in cfg.get("head_extra_dims", ())),
-        zodi_head_extra_dims=tuple(int(v) for v in cfg.get("zodi_head_extra_dims", ())),
-        continuum_head_extra_dims=tuple(int(v) for v in cfg.get("continuum_head_extra_dims", ())),
-        continuum_branch_dims=tuple(int(v) for v in cfg.get("continuum_branch_dims", (64, 32))),
-        moon_zodi_ctx_restriction=cfg.get("moon_zodi_ctx_restriction"),
-        moon_zodi_branch_dims=tuple(int(v) for v in cfg.get("moon_zodi_branch_dims", (128, 64))),
-        moon_zodi_moon_head_extra_dims=tuple(int(v) for v in cfg.get("moon_zodi_moon_head_extra_dims", (64,))),
-        moon_zodi_zodi_head_extra_dims=tuple(int(v) for v in cfg.get("moon_zodi_zodi_head_extra_dims", (32,))),
-        moon_zodi_mode=str(cfg.get("moon_zodi_mode", "additive")),
-        moon_zodi_coupling_dims=tuple(int(v) for v in cfg.get("moon_zodi_coupling_dims", (64, 32))),
-        drop_vanrhijn_from_context=bool(cfg.get("drop_vanrhijn_from_context", False)),
-        blend_init_alpha=float(cfg.get("blend_init_alpha", 0.7)),
-        blend_use_direct=(str(cfg.get("blend_optim", "direct")).lower()
-                          in ("direct", "prefit_freeze", "prefit_warmstart")),
-        moon_alt_conditional_alpha=bool(cfg.get("moon_alt_conditional_alpha", False)),
-        alpha_ctx_features=cfg.get("alpha_ctx_features"),
-        alpha_ctx_groups=cfg.get("alpha_ctx_groups"),
-        zodi_ctx_restriction=cfg.get("zodi_ctx_restriction"),
-        continuum_ctx_restriction=cfg.get("continuum_ctx_restriction"),
+        encoder_dims=tuple(int(v) for v in cfg["encoder_dims"]),
+        ctx_dims=tuple(int(v) for v in cfg["ctx_dims"]),
+        trunk_dims=tuple(int(v) for v in cfg["trunk_dims"]),
+        head_dim=int(cfg["head_dim"]),
+        zodi_head_extra_dims=tuple(int(v) for v in cfg["zodi_head_extra_dims"]),
+        continuum_head_extra_dims=tuple(int(v) for v in cfg["continuum_head_extra_dims"]),
+        continuum_branch_dims=tuple(int(v) for v in cfg["continuum_branch_dims"]),
+        moon_zodi_coupling_dims=tuple(int(v) for v in cfg["moon_zodi_coupling_dims"]),
+        blend_init_alpha=float(cfg["blend_init_alpha"]),
+        alpha_ctx_features=cfg["alpha_ctx_features"],
+        zodi_ctx_restriction=cfg["zodi_ctx_restriction"],
+        continuum_ctx_restriction=cfg["continuum_ctx_restriction"],
+        moon_zodi_ctx_restriction=cfg["moon_zodi_ctx_restriction"],
     )
 
 
@@ -163,19 +153,6 @@ def load_ensemble(path: str | Path, *, device: str | None = None,
     ctx_names = list(payload["ctx_names"])
     group_score_dims = dict(payload["group_score_dims"])
     n_input_score = int(payload["n_input_score"])
-
-    # Backwards-compat: ensembles saved before 2026-08-27 did not persist
-    # `zodi_ctx_restriction` / `continuum_ctx_restriction` in their config
-    # dict.  Recover them from the state_dict's `zodi_ctx_idx` /
-    # `continuum_ctx_idx` buffers when present so the rebuild picks up the
-    # same isolated branches the training run used.
-    if payload["member_state_dicts"]:
-        _sd0 = payload["member_state_dicts"][0]
-        for _key, _cfg_key in (("zodi_ctx_idx", "zodi_ctx_restriction"),
-                                ("continuum_ctx_idx", "continuum_ctx_restriction")):
-            if cfg.get(_cfg_key) is None and _key in _sd0:
-                _idx = _sd0[_key].detach().cpu().numpy().astype(int).tolist()
-                cfg[_cfg_key] = tuple(str(ctx_names[i]).strip().lower() for i in _idx)
 
     members: list[dict] = []
     for sd in payload["member_state_dicts"]:

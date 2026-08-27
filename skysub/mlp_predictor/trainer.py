@@ -1,19 +1,17 @@
 """Ensemble trainer + inference for the compressed dual-encoder group-head MLP.
 
-Extracted from cell ``18659296`` of the split-zodi notebook:
-- ``DEFAULT_COEF_ERR_SIGMA_FLOOR_BY_GROUP`` : per-group sigma floors
-  (fraction of per-column median finite sigma) used by the coef-err
-  weighted training loss.
-- ``train_compressed_group_mlp`` : trains one seed of the compressed
-  dual-encoder + group-head model.  Big function (~1150 lines) kept in
-  one piece so its many implicit invariants stay adjacent to the code
-  that maintains them.
-- ``predict_sci_coefficients_default`` : ensemble-mean inference in
-  compressed-score space with clip-to-upper-bound.
-- ``default_dual_group_config`` : the deployed 10-seed config.
-- ``Trainer`` : thin orchestration class wrapping the notebook's
-  ensemble loop (config resolution, flux-MSE basis matrix precompute,
-  seed loop, per-seed test metric report).
+Trimmed 2026-08-27 to the deployed split-zodi pipeline.  Removed knobs that
+were disabled in the shipped ``mlp_ensemble_split_zodi_current.pt`` config:
+
+- ``block_cov_loss_groups`` / ``relative_mse_groups`` (loss variants not used)
+- ``high_airmass_boost`` / ``moon_down_ecliptic_boost`` (never enabled)
+- ``blend_optim`` modes other than ``'direct'`` (dead)
+- ``moon_alt_conditional_alpha`` (dead)
+- ``coef_err_row_ceiling_factor`` (dead)
+- ``use_coef_err_weights=False`` fallback (deployed always True)
+- ``drop_vanrhijn_from_context``, ``head_extra_dims`` (dead)
+- ``moon_zodi_mode='shared_branch'`` and its ``moon_zodi_branch_dims`` etc.
+- ``flux_mse_eps_frac`` (deployed = 0; the epsilon math is a no-op)
 """
 
 from __future__ import annotations
@@ -46,20 +44,15 @@ from .ml_utils import (
 )
 from .model import DualEncoderGroupHeadMLPCompressed
 
-# Aliases so the extracted function body works verbatim without dropping the leading underscore.
-_moon_phase_deg_from_ctx = moon_phase_deg_from_ctx
-_set_reproducibility = set_reproducibility
-
 DEFAULT_COEF_ERR_SIGMA_FLOOR_BY_GROUP = {
-    'zodi': 0.05,
     # Per-group floors on the relative sigma (fraction of the per-column
-    # median finite sigma).  These were set on 2026-08-16 from the sigma /
-    # weight diagnostic (§7): moon / continuum / ionospheric have
-    # well-behaved tails and take the historical 5% floor; mesospheric
-    # (403 lines) and atomic have p99 / p50 ratios of 10^3-10^6 in
-    # compressed-score space, so they need a 20% floor to keep
-    # w_p99 / w_median below ~30 per column.
+    # median finite sigma).  Set on 2026-08-16 from the sigma / weight
+    # diagnostic (§7): moon / continuum / ionospheric take the historical
+    # 5% floor; mesospheric (403 lines) and atomic have p99 / p50 sigma
+    # ratios of 10^3-10^6 in compressed-score space, so they need a 20%
+    # floor to keep w_p99 / w_median below ~30 per column.
     'moon': 0.05,
+    'zodi': 0.05,
     'continuum': 0.05,
     'mesospheric': 0.20,
     'ionospheric': 0.05,
@@ -71,92 +64,37 @@ def train_compressed_group_mlp(
     filtered, compressors, group_indices, geom_kwargs,
     split_indices=None,
     n_epochs=50, batch_size=256, lr=7e-4,
-    encoder_dims=(384, 192), ctx_dims=(64,),
+    encoder_dims=(768, 384), ctx_dims=(96,),
     trunk_dims=(320, 160), head_dim=192,
-    head_extra_dims=(),
-    zodi_head_extra_dims=(),
+    zodi_head_extra_dims=(32,),
+    continuum_head_extra_dims=(64,),
+    continuum_branch_dims=(128, 64),
+    moon_zodi_coupling_dims=(64, 32),
     weight_decay=1e-4, grad_clip=1.0, patience=4,
-    seed=42, drop_vanrhijn_from_context=False,
+    seed=42,
     moon_group_weight=1.0,
     zodi_group_weight=1.0,
     continuum_group_weight=1.0,
     mesospheric_group_weight=1.0,
     ionospheric_group_weight=1.0,
     blend_init_alpha=0.7,
-    blend_optim='direct',
-    moon_alt_conditional_alpha=False,
-    zodi_ctx_restriction=None,
-    continuum_ctx_restriction=None,
-    continuum_head_extra_dims=(),
-    continuum_branch_dims=(64, 32),
-    moon_zodi_ctx_restriction=None,
-    moon_zodi_branch_dims=(128, 64),
-    moon_zodi_moon_head_extra_dims=(64,),
-    moon_zodi_zodi_head_extra_dims=(32,),
-    moon_zodi_mode='additive',
-    moon_zodi_coupling_dims=(64, 32),
-    alpha_ctx_features=None,
-    alpha_ctx_groups=None,
-    # 2026-08-25: opt-in covariance-aware loss for moon and/or zodi.  Empty
-    # tuple keeps the existing per-element weighted Huber loss (backwards
-    # compat).  Setting e.g. ('moon',) precomputes Sigma_scaled^-1 per row
-    # from filtered_triplet['coef_cov_moon_sci'] (persisted by fit.py) and
-    # replaces the diagonal-weighted loss on that group with the block
-    # Mahalanobis form L_g = r^T Sigma^-1 r / n_g, scaled to match the
-    # diagonal loss on train rows at init so downstream group weights
-    # (moon_group_weight, ...) keep their meaning.  Requires the group's
-    # compressor to be per-element (no PCA); moon and zodi both are.
-    # 2026-08-25b: default flipped to () after relative_mse_groups
-    # became the preferred loss-magnitude fix for moon/zodi (see below).
-    block_cov_loss_groups=(),
-    # 2026-08-25b: opt-in relative-error MSE per group. Per group g in this
-    # tuple the loss becomes L_g(row) = ||pred_raw - true_raw||^2 /
-    # (||true_raw||^2 + eps_g^2) on the RobustScaler-undone score vector,
-    # where eps_g^2 = (relative_mse_eps_frac)^2 * median_train||true_raw||^2.
-    # Takes precedence over block_cov_loss_groups for the same group.
-    # Rationale: COEF_ERR sigma is ~30x too large so 1/sigma^2 weighting
-    # misweights low- vs high-flux rows; relative MSE couples the loss to
-    # target amplitude directly.
-    relative_mse_groups=(),
-    relative_mse_eps_frac=0.05,
-    # 2026-08-25c: opt-in per-pixel flux MSE for moon and/or zodi.  Takes
-    # precedence over relative_mse_groups and block_cov_loss_groups.
-    # ``flux_basis_matrices`` is a dict {group: (n_coef_g, n_wave_ds)}
-    # numpy array carrying the pre-LSF spline basis matrix (from
-    # ``SkyDecompLSFSurfaceIterative.matrix_moon`` / ``matrix_zodi``).
-    # ``flux_geom_sc_sci`` is (n_row, n_coef) with the per-row per-coef
-    # geometry scale from ``airglow_geometry_scale(ctx_sci, ...)``.  The
-    # torch inverse compressor runs sqrt-inverse + per-group PCA-inverse
-    # + destandardise + geometry, mirroring ``inverse_group_compressor``.
+    alpha_ctx_features=("moon_up_smooth", "ecl_beta_deg", "airmass"),
+    zodi_ctx_restriction=(),
+    continuum_ctx_restriction=(),
+    moon_zodi_ctx_restriction=(),
+    # 2026-08-25c per-pixel flux MSE for moon and/or zodi (deployed default).
     flux_mse_groups=(),
-    flux_mse_eps_frac=0.0,
     flux_basis_matrices=None,
     flux_geom_sc_sci=None,
-    high_airmass_boost=1.0,
-    # 2026-08-21: per-regime row-weight boosts for the two rare-but-important
-    # sky regimes identified by the row-741-vs-830 diagnostic (see §12).  All
-    # default to 1.0 (disabled); flip in default_dual_group_config to enable.
-    moon_down_ecliptic_boost=1.0,
-    moon_down_ecliptic_beta_deg=15.0,
+    # 2026-08-21 tight-mask bright-moon row boost (Phase A'').
     bright_moon_close_boost=1.0,
     bright_moon_close_fli_min=0.85,
     bright_moon_close_sep_max_deg=45.0,
-    # 2026-08-21b: physics-informed continuous zodi-asymmetry boost.
-    # Multiplier = 1 + K * moon_down_gate(moon_alt) * max(0, log10(zodi_v_sci/zodi_v_far)).
-    # 0.0 = disabled (additive convention).
-    # New (2026-08-16): heteroscedastic-Gaussian loss weighting from the
-    # decomposition COEF_ERR (§7 of the top methods cell).  The floor is
-    # now per group; the mesospheric and atomic groups need a larger floor
-    # because their p99/p50 sigma ratio is 10^3-10^6 (§7 diagnostic).
-    use_coef_err_weights=True,
+    # Heteroscedastic-Gaussian loss weighting from decomposition COEF_ERR.
     coef_err_sigma_floor_rel=None,
-    # 2026-08-24: per-group row-ceiling on sigma. sigma_eff = min(sigma,
-    # beta_g * col_median_sigma[j]) per column j. beta_g dict per group
-    # (or scalar for all).  None = disabled (default). Breaks the
-    # sigma ~ |coef| scaling which under-weights bright-moon rows.
-    coef_err_row_ceiling_factor=None,
 ):
-    _set_reproducibility(seed)
+    """Train one seed of the compressed dual-encoder group-head MLP."""
+    set_reproducibility(seed)
 
     ctx_near = np.asarray(filtered['ctx_near'], dtype=np.float32)
     ctx_far = np.asarray(filtered['ctx_far'], dtype=np.float32)
@@ -165,7 +103,7 @@ def train_compressed_group_mlp(
     if split_indices is not None:
         train_idx, val_idx, test_idx = split_indices
     else:
-        _moon_phase_col = _moon_phase_deg_from_ctx(filtered)
+        _moon_phase_col = moon_phase_deg_from_ctx(filtered)
         train_idx, val_idx, test_idx = split_indices_by_moon_phase(
             filtered['obstime_mjd'], _moon_phase_col, seed=seed)
     train_idx = np.asarray(train_idx, dtype=int)
@@ -191,7 +129,7 @@ def train_compressed_group_mlp(
           f'(uncompressed was {coef_near.shape[1]}); per-group scores: '
           + ', '.join(f'{g}={n}' for g, n in group_score_dims.items()))
 
-    # Per-group multiplier m_g on top of 1/sqrt(n_g_score); defaults to 1.0.
+    # Per-group multiplier m_g on top of 1/sqrt(n_g_score).
     _group_multipliers = {'moon': float(moon_group_weight),
                           'zodi': float(zodi_group_weight),
                           'continuum': float(continuum_group_weight),
@@ -230,175 +168,99 @@ def train_compressed_group_mlp(
     # -----------------------------------------------------------------
     # Per-element inverse-variance weights from decomposition COEF_ERR.
     # Propagate through the compressor with a first-order Jacobian, then
-    # divide out the score_scaler scale so the weights live in the same
-    # scaled-score space as `sci_s`; finally clip to a per-column floor
-    # (frac of median finite sigma) and normalise so E_train[w_pe] = 1
-    # per column.  Missing/boundary sigmas fall through to the floor.
-    # See §7 of the top methods cell for the derivation.
+    # divide out the score_scaler scale so weights live in the same
+    # scaled-score space as sci_s; clip to per-column floor and normalise
+    # so E_train[w_pe] = 1 per column.  Missing/boundary sigmas fall
+    # through to the floor.  See §7 of the methods cell for derivation.
     coef_err_sci_local = np.asarray(
         filtered.get('coef_err_sci', np.full_like(coef_sci, np.nan)),
         dtype=np.float64,
     )
     _n_finite_err = int(np.sum(np.isfinite(coef_err_sci_local)))
     _n_total_err = int(coef_err_sci_local.size)
-    _weights_enabled = bool(use_coef_err_weights) and _n_finite_err > 0
-    if _weights_enabled:
-        _sigma_scores_sci, _sigma_slices_sci = compress_coef_err_to_score_sigma(
-            coef_sci, coef_err_sci_local, ctx_sci,
-            compressors, geom_kwargs, group_indices,
-        )
-        assert _sigma_slices_sci == score_slices, 'sigma slices disagree with score slices'
-        _scale_ = np.asarray(getattr(score_scaler, 'scale_',
-                                    np.ones(n_input_score)),
-                             dtype=np.float64)
-        _scale_ = np.where(_scale_ > 0.0, _scale_, 1.0)
-        _sigma_scaled = _sigma_scores_sci / _scale_[None, :]
-        _finite = np.where(np.isfinite(_sigma_scaled) & (_sigma_scaled > 0.0),
-                           _sigma_scaled, np.nan)
-        _floor_col = np.nanmedian(_finite, axis=0)
-        _floor_col = np.where(np.isfinite(_floor_col) & (_floor_col > 0.0),
-                              _floor_col, 1.0)
-        # Resolve per-group floors: accept scalar (broadcast), dict
-        # (per-group), or None (built-in DEFAULT_COEF_ERR_SIGMA_FLOOR_BY_GROUP).
-        _floor_arg = coef_err_sigma_floor_rel
-        if _floor_arg is None:
-            _floor_arg = DEFAULT_COEF_ERR_SIGMA_FLOOR_BY_GROUP
-        if isinstance(_floor_arg, dict):
-            _floor_by_group = {str(k): float(v) for k, v in _floor_arg.items()}
-        else:
-            _floor_by_group = {g: float(_floor_arg) for g in score_slices}
-        _floor_rel_col = np.ones(_floor_col.shape[0], dtype=np.float64)
-        _missing_groups = []
-        for _g, (_lo, _hi) in score_slices.items():
-            if _g not in _floor_by_group:
-                _missing_groups.append(_g)
-                _fr = 0.05
-            else:
-                _fr = _floor_by_group[_g]
-            _floor_rel_col[_lo:_hi] = _fr
-        if _missing_groups:
-            print(f'  warning: coef_err_sigma_floor_rel missing groups '
-                  f'{_missing_groups}; using fallback 0.05 for each.')
-        _floor_col = _floor_rel_col * _floor_col
-        _sigma_scaled = np.where(_sigma_scaled > 0.0, _sigma_scaled,
-                                 _floor_col[None, :])
-        _sigma_scaled = np.maximum(_sigma_scaled, _floor_col[None, :])
-        if coef_err_row_ceiling_factor is not None:
-            if isinstance(coef_err_row_ceiling_factor, dict):
-                _ceil_by_group = {str(k): float(v)
-                                  for k, v in coef_err_row_ceiling_factor.items()}
-            else:
-                _ceil_by_group = {g: float(coef_err_row_ceiling_factor)
-                                  for g in score_slices}
-            _col_med_sigma = np.nanmedian(_sigma_scaled[train_idx], axis=0)
-            _col_med_sigma = np.where(np.isfinite(_col_med_sigma)
-                                      & (_col_med_sigma > 0.0),
-                                      _col_med_sigma, 1.0)
-            _col_ceil = np.full(_sigma_scaled.shape[1], np.inf, dtype=np.float64)
-            for _g, (_lo, _hi) in score_slices.items():
-                _bg = _ceil_by_group.get(_g)
-                if _bg is not None and np.isfinite(_bg) and _bg > 0.0:
-                    _col_ceil[_lo:_hi] = float(_bg) * _col_med_sigma[_lo:_hi]
-            _n_capped = int(np.sum(_sigma_scaled[train_idx]
-                                    > _col_ceil[None, :]))
-            _sigma_scaled = np.minimum(_sigma_scaled, _col_ceil[None, :])
-            _ceil_report = ', '.join(
-                f'{g}=x{_ceil_by_group.get(g, np.inf):.2g}'
-                for g in score_slices)
-            print(f'Per-group sigma row-ceiling: {_ceil_report}')
-            print(f'  fraction of train coef-cells capped: '
-                  f'{_n_capped / max(_sigma_scaled[train_idx].size, 1):.3%}')
-        w_pe_np = 1.0 / (_sigma_scaled ** 2)
-        _wcm = np.mean(w_pe_np[train_idx], axis=0)
-        _wcm = np.where(_wcm > 0.0, _wcm, 1.0)
-        w_pe_np = (w_pe_np / _wcm[None, :]).astype(np.float32)
-        _floor_report = ', '.join(f'{g}={_floor_by_group.get(g, 0.05):.3g}'
-                                  for g in score_slices)
-        print(
-            f'Per-element loss weights from coef_err_sci: '
-            f'finite fraction={_n_finite_err / max(_n_total_err, 1):.3f} in native space, '
-            f'compressed w median={float(np.median(w_pe_np[train_idx])):.3f}, '
-            f'1-99% = [{float(np.percentile(w_pe_np[train_idx], 1)):.2f}, '
-            f'{float(np.percentile(w_pe_np[train_idx], 99)):.2f}]'
-        )
-        print(f'  per-group floor_rel: {_floor_report}')
-        # Save the resolved dict so the artifact/config can round-trip it.
-        _resolved_floor_by_group = {g: float(_floor_by_group.get(g, 0.05))
-                                    for g in score_slices}
-    else:
-        # Uniform per-element weights: reduces to the previous unweighted loss.
-        w_pe_np = np.ones_like(sci_s, dtype=np.float32)
-        print('Per-element loss weights: disabled '
-              '(use_coef_err_weights=False or no finite COEF_ERR); '
-              'compressed_loss falls back to the unweighted SmoothL1.')
+    if _n_finite_err == 0:
+        raise RuntimeError(
+            'coef_err_sci is entirely non-finite; the deployed pipeline requires '
+            'the pipeline COEF_ERR HDU to be present.')
+    _sigma_scores_sci, _sigma_slices_sci = compress_coef_err_to_score_sigma(
+        coef_sci, coef_err_sci_local, ctx_sci,
+        compressors, geom_kwargs, group_indices,
+    )
+    assert _sigma_slices_sci == score_slices, 'sigma slices disagree with score slices'
+    _scale_ = np.asarray(getattr(score_scaler, 'scale_',
+                                 np.ones(n_input_score)),
+                         dtype=np.float64)
+    _scale_ = np.where(_scale_ > 0.0, _scale_, 1.0)
+    _sigma_scaled = _sigma_scores_sci / _scale_[None, :]
+    _finite = np.where(np.isfinite(_sigma_scaled) & (_sigma_scaled > 0.0),
+                       _sigma_scaled, np.nan)
+    _floor_col = np.nanmedian(_finite, axis=0)
+    _floor_col = np.where(np.isfinite(_floor_col) & (_floor_col > 0.0),
+                          _floor_col, 1.0)
+    _floor_arg = coef_err_sigma_floor_rel or DEFAULT_COEF_ERR_SIGMA_FLOOR_BY_GROUP
+    _floor_by_group = {str(k): float(v) for k, v in _floor_arg.items()}
+    _floor_rel_col = np.ones(_floor_col.shape[0], dtype=np.float64)
+    _missing_groups = []
+    for _g, (_lo, _hi) in score_slices.items():
+        _fr = _floor_by_group.get(_g)
+        if _fr is None:
+            _missing_groups.append(_g)
+            _fr = 0.05
+        _floor_rel_col[_lo:_hi] = _fr
+    if _missing_groups:
+        print(f'  warning: coef_err_sigma_floor_rel missing groups '
+              f'{_missing_groups}; using fallback 0.05 for each.')
+    _floor_col = _floor_rel_col * _floor_col
+    _sigma_scaled = np.where(_sigma_scaled > 0.0, _sigma_scaled,
+                             _floor_col[None, :])
+    _sigma_scaled = np.maximum(_sigma_scaled, _floor_col[None, :])
+    w_pe_np = 1.0 / (_sigma_scaled ** 2)
+    _wcm = np.mean(w_pe_np[train_idx], axis=0)
+    _wcm = np.where(_wcm > 0.0, _wcm, 1.0)
+    w_pe_np = (w_pe_np / _wcm[None, :]).astype(np.float32)
+    _floor_report = ', '.join(f'{g}={_floor_by_group.get(g, 0.05):.3g}'
+                              for g in score_slices)
+    print(
+        f'Per-element loss weights from coef_err_sci: '
+        f'finite fraction={_n_finite_err / max(_n_total_err, 1):.3f} in native space, '
+        f'compressed w median={float(np.median(w_pe_np[train_idx])):.3f}, '
+        f'1-99% = [{float(np.percentile(w_pe_np[train_idx], 1)):.2f}, '
+        f'{float(np.percentile(w_pe_np[train_idx], 99)):.2f}]'
+    )
+    print(f'  per-group floor_rel: {_floor_report}')
+    _resolved_floor_by_group = {g: float(_floor_by_group.get(g, 0.05))
+                                for g in score_slices}
 
     ctx_near_n = np.clip(ctx_scaler.transform(ctx_near), -25.0, 25.0).astype(np.float32)
     ctx_far_n = np.clip(ctx_scaler.transform(ctx_far), -25.0, 25.0).astype(np.float32)
     ctx_sci_n = np.clip(ctx_scaler.transform(ctx_sci), -25.0, 25.0).astype(np.float32)
 
-    # Row weights: boost rare-but-important regimes so training sees them
-    # proportional to deployment relevance rather than raw frequency.  Boosts
-    # multiply and the final vector is normalized so the mean training weight
-    # = 1.  See §12 (2026-08-12) for the earlier ablation that rejected
-    # high-F10.7 boosts; 2026-08-21 added moon_down_ecliptic + bright_moon_close
-    # boosts for the two failure modes identified in the row-741-vs-830
-    # diagnostic (moon-down on-ecliptic zodi red slope + bright-moon
-    # extreme-blue).  All boosts default to 1.0 (disabled).
+    # Row weights: bright-moon-close boost only.  See §12 for the rationale
+    # behind rejecting the high_airmass and moon_down_ecliptic boosts.
     _ctx_names_local = list(filtered['ctx_names'])
     _row_weights_np = np.ones(ctx_sci.shape[0], dtype=np.float32)
-
-    def _apply_row_boost(_mask, _factor, _label):
-        nonlocal _row_weights_np
-        _mask = np.asarray(_mask, dtype=bool)
-        _factor = float(_factor)
-        _n_all = int(_mask.sum())
-        _n_tr = int(_mask[train_idx].sum())
-        _n_va = int(_mask[val_idx].sum())
-        if _factor <= 1.0 or _n_all == 0:
-            if _factor > 1.0:
-                print(f'Row weights: {_label} requested (x{_factor:.2f}) but '
-                      f'no rows match; skipping.')
-            return
-        _row_weights_np = np.where(_mask, _row_weights_np * _factor,
-                                    _row_weights_np).astype(np.float32)
-        print(f'Row weights: {_label} x{_factor:.2f}  '
-              f'n_all={_n_all}, n_train={_n_tr}, n_val={_n_va}')
-
-    if 'airmass' in _ctx_names_local:
-        _ai = _ctx_names_local.index('airmass')
-        _apply_row_boost(ctx_sci[:, _ai] > 1.5, high_airmass_boost, 'airmass>1.5')
-
     _has_ma = 'moon_alt' in _ctx_names_local
-    _has_eb = 'ecl_beta_deg' in _ctx_names_local
-    if _has_ma and _has_eb:
-        _ma = ctx_sci[:, _ctx_names_local.index('moon_alt')]
-        _eb = ctx_sci[:, _ctx_names_local.index('ecl_beta_deg')]
-        _mask_mde = (_ma < 0.0) & (np.abs(_eb) < float(moon_down_ecliptic_beta_deg))
-        _apply_row_boost(_mask_mde, moon_down_ecliptic_boost,
-                         f'moon_down + |ecl_beta|<{float(moon_down_ecliptic_beta_deg):.0f}')
-    elif float(moon_down_ecliptic_boost) > 1.0:
-        print('Row weights: moon_down_ecliptic boost requested but '
-              'moon_alt or ecl_beta_deg missing from ctx; skipping.')
-
     _has_ms = 'moon_sep' in _ctx_names_local
     _has_pc = ('moon_phase_sin' in _ctx_names_local
                and 'moon_phase_cos' in _ctx_names_local)
-    if _has_ma and _has_ms and _has_pc:
+    if _has_ma and _has_ms and _has_pc and float(bright_moon_close_boost) > 1.0:
         _ma = ctx_sci[:, _ctx_names_local.index('moon_alt')]
         _ms = ctx_sci[:, _ctx_names_local.index('moon_sep')]
         _pc = ctx_sci[:, _ctx_names_local.index('moon_phase_cos')]
-        # moon_fli = (1 - cos(phase))/2 (fill-illumination convention).
         _fli = np.clip(0.5 * (1.0 - _pc), 0.0, 1.0)
         _mask_bmc = ((_ma > 0.0)
                      & (_fli >= float(bright_moon_close_fli_min))
                      & (_ms <= float(bright_moon_close_sep_max_deg)))
-        _apply_row_boost(_mask_bmc, bright_moon_close_boost,
-                         f'bright_moon (fli>={float(bright_moon_close_fli_min):.2f}, '
-                         f'sep<={float(bright_moon_close_sep_max_deg):.0f}, alt>0)')
-    elif float(bright_moon_close_boost) > 1.0:
-        print('Row weights: bright_moon_close boost requested but '
-              'moon_alt/moon_sep/moon_phase_{sin,cos} missing from ctx; skipping.')
-
+        _factor = float(bright_moon_close_boost)
+        _n_all = int(_mask_bmc.sum())
+        if _n_all > 0:
+            _row_weights_np = np.where(_mask_bmc, _row_weights_np * _factor,
+                                       _row_weights_np).astype(np.float32)
+            print(f'Row weights: bright_moon (fli>={float(bright_moon_close_fli_min):.2f}, '
+                  f'sep<={float(bright_moon_close_sep_max_deg):.0f}, alt>0) '
+                  f'x{_factor:.2f}  n_all={_n_all}, '
+                  f'n_train={int(_mask_bmc[train_idx].sum())}, '
+                  f'n_val={int(_mask_bmc[val_idx].sum())}')
     _train_mean_w = float(np.mean(_row_weights_np[train_idx]))
     if _train_mean_w > 1e-9 and abs(_train_mean_w - 1.0) > 1e-6:
         _row_weights_np = (_row_weights_np / _train_mean_w).astype(np.float32)
@@ -407,163 +269,10 @@ def train_compressed_group_mlp(
               f'post-norm max={float(np.max(_row_weights_np[train_idx])):.3f}).')
 
     # ------------------------------------------------------------------
-    # Block-Mahalanobis loss precomputation.
-    # For each configured block group g, build Sigma_scaled_inv[r] per row
-    # by propagating the persisted native COEF_COV block through the
-    # diagonal per-element Jacobian implied by _sigma_scaled / sigma_native.
-    # ------------------------------------------------------------------
-    _block_cov_inv_by_group = {}
-    _block_cov_scale_by_group = {}
-    if block_cov_loss_groups:
-        _sigma_native_sci_bc = np.abs(
-            np.asarray(filtered['coef_err_sci'], dtype=np.float64))
-        for _g_bc in block_cov_loss_groups:
-            _key_bc = f'coef_cov_{_g_bc}_sci'
-            _cov_native_bc = filtered.get(_key_bc)
-            if _cov_native_bc is None:
-                print(f'  [block-cov-loss] {_g_bc}: no {_key_bc} in filtered; '
-                      f'skipping (diagonal Huber will apply).')
-                continue
-            _gidx_bc = np.asarray(group_indices[_g_bc], dtype=int)
-            _lo_bc, _hi_bc = score_slices[_g_bc]
-            _n_g_bc = int(_hi_bc - _lo_bc)
-            if _n_g_bc != _gidx_bc.size:
-                print(f'  [block-cov-loss] {_g_bc}: PCA-compressed group not '
-                      f'supported (n_score={_n_g_bc} != n_native='
-                      f'{_gidx_bc.size}); skipping.')
-                continue
-            _n_row_bc = int(coef_sci.shape[0])
-            _cov_inv_g = np.zeros((_n_row_bc, _n_g_bc, _n_g_bc), dtype=np.float32)
-            _sigma_scaled_g = _sigma_scaled[:, _lo_bc:_hi_bc]
-            _sigma_native_g = _sigma_native_sci_bc[:, _gidx_bc]
-            _J_g = _sigma_scaled_g / np.maximum(_sigma_native_g, 1e-30)
-            _n_active_row = np.zeros(_n_row_bc, dtype=np.int32)
-            _n_success = 0
-            _quad_train = []
-            for _r_bc in range(_n_row_bc):
-                _cov_native_r = np.asarray(_cov_native_bc[_r_bc], dtype=np.float64)
-                _diag_native = np.diagonal(_cov_native_r)
-                _active_bc = np.isfinite(_diag_native) & (_diag_native > 0.0)
-                if _active_bc.sum() < 2:
-                    _n_active_row[_r_bc] = 0
-                    continue
-                _J_r = _J_g[_r_bc]
-                _cov_scaled_full = (_J_r[:, None] * _J_r[None, :]) * _cov_native_r
-                _idx_active = np.flatnonzero(_active_bc)
-                _sub = _cov_scaled_full[np.ix_(_idx_active, _idx_active)]
-                _sub = 0.5 * (_sub + _sub.T) + 1e-12 * np.eye(_sub.shape[0])
-                try:
-                    _inv_sub = np.linalg.pinv(_sub)
-                except np.linalg.LinAlgError:
-                    continue
-                _cov_inv_g[_r_bc][np.ix_(_idx_active, _idx_active)] = (
-                    _inv_sub.astype(np.float32))
-                _n_active_row[_r_bc] = int(_active_bc.sum())
-                _n_success += 1
-                # Baseline quadratic form on truth vs zero (for scale match):
-                # for a well-calibrated Sigma, E[c^T Sigma^-1 c] = n_active
-                # under H0.  On real data we use the median TRUE quadratic
-                # over train rows to match the diagonal loss magnitude.
-                if _r_bc < 8 or (train_idx is not None and _r_bc in train_idx):
-                    _true_r = _sigma_scaled_g[_r_bc]
-                    # Placeholder; actual scale matching done after loop.
-            # Scale-matching: on train rows, compute
-            #   median( c^T Sigma^-1 c / n_active )   where c = truth in scaled score.
-            # We rescale Sigma^-1 so this median equals the median of the
-            # per-row diagonal loss  mean_k( w_pe_g * (c_k)^2 )  on train rows,
-            # so switching to Mahalanobis leaves the overall scale of the
-            # group's contribution roughly unchanged.
-            _true_scaled = sci_s[:, _lo_bc:_hi_bc]  # score-space TRUE (scaled)
-            _train_mask_bc = np.zeros(_n_row_bc, dtype=bool)
-            _train_mask_bc[np.asarray(train_idx, dtype=int)] = True
-            _train_mask_bc &= (_n_active_row > 1)
-            _idx_tr_bc = np.flatnonzero(_train_mask_bc)
-            _tr_maha = np.empty(_idx_tr_bc.size, dtype=np.float64)
-            for _i_bc, _r_bc in enumerate(_idx_tr_bc):
-                _t = _true_scaled[_r_bc]
-                _M = _cov_inv_g[_r_bc]
-                _tr_maha[_i_bc] = float(_t @ (_M @ _t)) / max(int(_n_active_row[_r_bc]), 1)
-            _tr_diag = np.mean(
-                w_pe_np[_idx_tr_bc, _lo_bc:_hi_bc]
-                * (_true_scaled[_idx_tr_bc] ** 2), axis=1)
-            _med_maha = float(np.nanmedian(_tr_maha)) if _tr_maha.size else 1.0
-            _med_diag = float(np.nanmedian(_tr_diag)) if _tr_diag.size else 1.0
-            if _med_maha > 0 and _med_diag > 0:
-                _scale = _med_diag / _med_maha
-            else:
-                _scale = 1.0
-            _cov_inv_g *= np.float32(_scale)
-            _block_cov_inv_by_group[_g_bc] = _cov_inv_g
-            _block_cov_scale_by_group[_g_bc] = float(_scale)
-            print(f'  [block-cov-loss] {_g_bc}: precomputed Sigma_scaled^-1 for '
-                  f'{_n_success}/{_n_row_bc} rows ({_n_g_bc}x{_n_g_bc} per row); '
-                  f'median n_active={int(np.median(_n_active_row[_n_active_row>0]))}, '
-                  f'scale-match factor={_scale:.4g}  '
-                  f'(median diag={_med_diag:.4g}, median Mahalanobis={_med_maha:.4g}).')
-
-    # ------------------------------------------------------------------
-    # 2026-08-25b: relative-MSE precomputation for moon / zodi.
-    # Undo the RobustScaler per group so the loss lives in unscaled score
-    # space:
-    #   L_g(row) = ||pred_raw - true_raw||^2 / (||true_raw||^2 + eps_g^2)
-    # where eps_g^2 = (relative_mse_eps_frac)^2 * median_train||true_raw||^2.
-    # A scale-match factor brings the per-row relative loss onto the same
-    # magnitude as the diagonal Huber term it replaces (median truth-vs-zero
-    # convention, matching block_cov_loss_groups above).
-    # ------------------------------------------------------------------
-    _rel_mse_state_by_group = {}
-    if relative_mse_groups:
-        _center_ = np.asarray(getattr(score_scaler, 'center_',
-                                      getattr(score_scaler, 'mean_',
-                                              np.zeros(n_input_score))),
-                              dtype=np.float64)
-        for _g_rm in relative_mse_groups:
-            if _g_rm not in score_slices:
-                print(f'  [relative-mse] {_g_rm}: not in score_slices; skipping.')
-                continue
-            _lo_rm, _hi_rm = score_slices[_g_rm]
-            _sc_rm = _scale_[_lo_rm:_hi_rm]
-            _mu_rm = _center_[_lo_rm:_hi_rm]
-            _t_scaled_tr = sci_s[train_idx, _lo_rm:_hi_rm].astype(np.float64)
-            _t_raw_tr = _t_scaled_tr * _sc_rm[None, :] + _mu_rm[None, :]
-            _norm2_tr = np.nansum(_t_raw_tr ** 2, axis=1)
-            _n2_ok = _norm2_tr[np.isfinite(_norm2_tr) & (_norm2_tr > 0.0)]
-            _median_norm2 = float(np.median(_n2_ok)) if _n2_ok.size else 1.0
-            _eps_sq_rm = ((float(relative_mse_eps_frac) ** 2)
-                          * max(_median_norm2, 1e-30))
-            # Scale-match on truth-vs-zero (matches block-cov convention).
-            _tr_rel = _norm2_tr / (_norm2_tr + _eps_sq_rm)
-            _tr_diag_rm = np.nanmean(
-                w_pe_np[train_idx, _lo_rm:_hi_rm]
-                * (sci_s[train_idx, _lo_rm:_hi_rm].astype(np.float64) ** 2),
-                axis=1)
-            _med_rel = float(np.nanmedian(_tr_rel)) if _tr_rel.size else 1.0
-            _med_diag_rm = (float(np.nanmedian(_tr_diag_rm))
-                            if _tr_diag_rm.size else 1.0)
-            if _med_rel > 0 and _med_diag_rm > 0:
-                _scale_rm = _med_diag_rm / _med_rel
-            else:
-                _scale_rm = 1.0
-            _rel_mse_state_by_group[_g_rm] = {
-                'scale': _sc_rm.astype(np.float32),
-                'center': _mu_rm.astype(np.float32),
-                'eps_sq': float(_eps_sq_rm),
-                'scale_match': float(_scale_rm),
-            }
-            print(f'  [relative-mse] {_g_rm}: n_score={_hi_rm - _lo_rm}, '
-                  f'median ||target_raw||^2={_median_norm2:.4g}, '
-                  f'eps^2={_eps_sq_rm:.4g} '
-                  f'(eps_frac={float(relative_mse_eps_frac):.3f}), '
-                  f'scale-match factor={_scale_rm:.4g}  '
-                  f'(median diag={_med_diag_rm:.4g}, median rel={_med_rel:.4g}).')
-
-    # ------------------------------------------------------------------
-    # 2026-08-25c: per-pixel flux MSE precomputation for moon / zodi.
+    # Per-pixel flux MSE precomputation for moon / zodi (deployed default).
     # For each group g, undo the compressor + geometry to recover native
-    # coefs, then A_g @ c gives flux.  Loss = mean_lambda((f_pred - f_true)^2)
+    # coefs; A_g @ c gives flux.  Loss = mean_lambda((f_pred - f_true)^2)
     # per row, scale-matched to the diagonal Huber magnitude on train rows.
-    # Assumes n_kept == n_full for the group (holds for moon+zodi in this
-    # notebook — see compressor cell); asserts otherwise.
     # ------------------------------------------------------------------
     _flux_mse_state_by_group = {}
     if flux_mse_groups and flux_basis_matrices is not None and flux_geom_sc_sci is not None:
@@ -600,7 +309,6 @@ def train_compressed_group_mlp(
             _sc_fm = _scale_[_lo_fm:_hi_fm]
             _mu_fm = _center_[_lo_fm:_hi_fm]
             _sc_sci_g_np = np.asarray(flux_geom_sc_sci[:, _gidx_fm], dtype=np.float32)
-            # Scale-match on train rows: median flux^2 vs median diagonal Huber.
             _c_true_train = coef_sci[train_idx][:, _gidx_fm].astype(np.float64)
             _flux_true_train = _c_true_train @ _A_g.astype(np.float64)
             _row_flux_norm_train = np.mean(_flux_true_train ** 2, axis=1)
@@ -632,10 +340,7 @@ def train_compressed_group_mlp(
                   f'scale-match={_scale_match_fm:.4g} '
                   f'(median diag={_med_diag_fm:.4g}).')
 
-    # Moon_alt sign per row (physical ctx_sci). 0 = moon down (alt<=0), 1 = up.
-    _moon_alt_idx_local = _ctx_names_local.index('moon_alt')
-    _moon_alt_sign_all = (ctx_sci[:, _moon_alt_idx_local] > 0.0).astype(np.int64)
-
+    # Device selection.
     if torch.cuda.is_available():
         device = 'cuda'
     elif getattr(torch.backends, 'mps', None) is not None and torch.backends.mps.is_available():
@@ -645,22 +350,7 @@ def train_compressed_group_mlp(
 
     # 2026-08-24: skip DataLoader for the ~O(10MB) in-memory training set.
     # Move all tensors to device once and iterate with torch.randperm --
-    # avoids ~180k per-batch CPU->device transfers per full 10-seed run
-    # (~2x wall-time speedup on MPS).
-    # Deterministic order for the extra block-cov-inv tensors staged
-    # in the tuple below (kept as a module-level for the batch unpack).
-    _block_cov_group_order = tuple(
-        g for g in block_cov_loss_groups if g in _block_cov_inv_by_group)
-    # 2026-08-25b: relative-MSE state on device (float32 buffers per group).
-    _rel_mse_torch_by_group = {}
-    for _g_rm, _st_rm in _rel_mse_state_by_group.items():
-        _rel_mse_torch_by_group[_g_rm] = {
-            'scale': torch.from_numpy(_st_rm['scale']).to(device),
-            'center': torch.from_numpy(_st_rm['center']).to(device),
-            'eps_sq': float(_st_rm['eps_sq']),
-            'scale_match': float(_st_rm['scale_match']),
-        }
-    # 2026-08-25c: per-pixel flux MSE state on device (float32 buffers per group).
+    # avoids ~180k per-batch CPU->device transfers per full 10-seed run.
     _flux_mse_torch_by_group = {}
     for _g_fm, _st_fm in _flux_mse_state_by_group.items():
         _flux_mse_torch_by_group[_g_fm] = {
@@ -674,23 +364,19 @@ def train_compressed_group_mlp(
             'scale_match':  float(_st_fm['scale_match']),
         }
     _row_idx_all_np = np.arange(int(coef_sci.shape[0]), dtype=np.int64)
+
     def _stage_on_device(_idx):
-        _base = (
+        return (
             torch.from_numpy(near_s[_idx]).to(device),
             torch.from_numpy(far_s[_idx]).to(device),
             torch.from_numpy(ctx_near_n[_idx]).to(device),
             torch.from_numpy(ctx_far_n[_idx]).to(device),
             torch.from_numpy(ctx_sci_n[_idx]).to(device),
-            torch.from_numpy(_moon_alt_sign_all[_idx]).to(device),
             torch.from_numpy(_row_weights_np[_idx]).to(device),
             torch.from_numpy(w_pe_np[_idx]).to(device),
             torch.from_numpy(sci_s[_idx]).to(device),
             torch.from_numpy(_row_idx_all_np[_idx]).to(device),
         )
-        _cov = tuple(
-            torch.from_numpy(_block_cov_inv_by_group[_g][_idx]).to(device)
-            for _g in _block_cov_group_order)
-        return _base + _cov
     _tr_tensors = _stage_on_device(train_idx)
     _va_tensors = _stage_on_device(val_idx)
     _tr_bs = int(batch_size)
@@ -706,126 +392,36 @@ def train_compressed_group_mlp(
         ctx_dims=tuple(int(v) for v in ctx_dims),
         trunk_dims=tuple(int(v) for v in trunk_dims),
         head_dim=int(head_dim),
-        head_extra_dims=tuple(int(v) for v in head_extra_dims),
         zodi_head_extra_dims=tuple(int(v) for v in zodi_head_extra_dims),
         continuum_head_extra_dims=tuple(int(v) for v in continuum_head_extra_dims),
         continuum_branch_dims=tuple(int(v) for v in continuum_branch_dims),
-        moon_zodi_ctx_restriction=moon_zodi_ctx_restriction,
-        moon_zodi_branch_dims=tuple(int(v) for v in moon_zodi_branch_dims),
-        moon_zodi_moon_head_extra_dims=tuple(int(v) for v in moon_zodi_moon_head_extra_dims),
-        moon_zodi_zodi_head_extra_dims=tuple(int(v) for v in moon_zodi_zodi_head_extra_dims),
-        moon_zodi_mode=(str(moon_zodi_mode) if moon_zodi_mode else 'additive'),
         moon_zodi_coupling_dims=tuple(int(v) for v in moon_zodi_coupling_dims),
-        drop_vanrhijn_from_context=bool(drop_vanrhijn_from_context),
         blend_init_alpha=float(blend_init_alpha),
-        blend_use_direct=(str(blend_optim).lower()
-                          in ('direct', 'prefit_freeze', 'prefit_warmstart')),
-        moon_alt_conditional_alpha=bool(moon_alt_conditional_alpha),
         alpha_ctx_features=alpha_ctx_features,
-        alpha_ctx_groups=alpha_ctx_groups,
         zodi_ctx_restriction=zodi_ctx_restriction,
         continuum_ctx_restriction=continuum_ctx_restriction,
+        moon_zodi_ctx_restriction=moon_zodi_ctx_restriction,
     ).to(device)
 
-    # Optimizer construction depends on blend_optim mode:
-    #   'default' -> single AdamW param group.
-    #   'no_wd'   -> blend params in a group with weight_decay=0.
-    #   'lr10x'   -> blend params in a group with lr=10*base_lr.
-    #   'direct'  -> alpha_g stored directly (no sigmoid); blend group has weight_decay=0
-    #                and is clamped to [eps, 1-eps] after each step.
-    _blend_mode = str(blend_optim).lower()
-    _ALLOWED_BLEND_MODES = ('default', 'no_wd', 'lr10x', 'direct',
-                            'prefit_freeze', 'prefit_warmstart')
-    if _blend_mode not in _ALLOWED_BLEND_MODES:
-        raise ValueError(f"Unknown blend_optim={blend_optim!r}; "
-                         f"expected one of {_ALLOWED_BLEND_MODES}.")
-    # Pre-fit alpha_g in scaled score space on training rows. Closed-form OLS:
-    #   alpha_g = <s_near - s_far, s_sci - s_far> / ||s_near - s_far||^2
-    # summed across all coefficients in group g. 'prefit_freeze' locks the
-    # value; 'prefit_warmstart' uses it as an init and lets AdamW adjust.
-    _prefit_alphas = None
-    if _blend_mode in ('prefit_freeze', 'prefit_warmstart'):
-        _prefit_alphas = {}
-        for _g_pf, (_lo_pf, _hi_pf) in score_slices.items():
-            if model.moon_alt_conditional_alpha and _g_pf == 'moon':
-                continue  # conditional moon alpha does not use the closed-form prefit.
-            _sn = near_s[train_idx, _lo_pf:_hi_pf].astype(np.float64)
-            _sf = far_s[train_idx, _lo_pf:_hi_pf].astype(np.float64)
-            _ss = sci_s[train_idx, _lo_pf:_hi_pf].astype(np.float64)
-            _diff = _sn - _sf
-            _target = _ss - _sf
-            _num = float(np.sum(_diff * _target))
-            _den = float(np.sum(_diff * _diff))
-            if _den <= 1e-12:
-                # near ≈ far for this group; blend is ill-defined -> midpoint.
-                _alpha_star = 0.5
-            else:
-                _alpha_star = float(np.clip(_num / _den,
-                                            float(model.blend_alpha_eps),
-                                            1.0 - float(model.blend_alpha_eps)))
-            _prefit_alphas[_g_pf] = _alpha_star
-            with torch.no_grad():
-                model.blend_alpha_direct[str(_g_pf)].data.fill_(float(_alpha_star))
-        if _blend_mode == 'prefit_freeze':
-            for _g_pf in group_score_dims:
-                model.blend_alpha_direct[str(_g_pf)].requires_grad_(False)
-        print(f'Pre-fit alpha per group ({_blend_mode}): '
-              + '  '.join(f'{_g_pf}={_prefit_alphas[_g_pf]:.3f}'
-                          for _g_pf in group_score_dims))
+    # Blend params (per-group alpha) get weight_decay=0 and are clamped
+    # to [eps, 1-eps] after each optimizer step.
+    blend_pnames = {f'blend_alpha_direct.{_k}' for _k in model.blend_alpha_direct}
+    blend_params = [_p for _n, _p in model.named_parameters() if _n in blend_pnames]
+    other_params = [_p for _n, _p in model.named_parameters() if _n not in blend_pnames]
+    opt = torch.optim.AdamW(
+        [{'params': other_params, 'weight_decay': float(weight_decay)},
+         {'params': blend_params, 'weight_decay': 0.0}],
+        lr=float(lr))
+    print(f"Blend optim: direct (n_blend_params={sum(p.numel() for p in blend_params)})")
 
-    blend_pnames = set()
-    blend_params = []
-    if model.blend_use_direct:
-        for _k, _p in model.blend_alpha_direct.items():
-            blend_params.append(_p)
-            blend_pnames.add(f'blend_alpha_direct.{_k}')
-        if model.moon_alt_conditional_alpha and hasattr(model, 'blend_alpha_moon_by_alt'):
-            blend_params.append(model.blend_alpha_moon_by_alt)
-            blend_pnames.add('blend_alpha_moon_by_alt')
-    else:
-        for _k, _p in model.blend_logit.items():
-            blend_params.append(_p)
-            blend_pnames.add(f'blend_logit.{_k}')
-        if model.moon_alt_conditional_alpha and hasattr(model, 'blend_moon_by_alt_logit'):
-            blend_params.append(model.blend_moon_by_alt_logit)
-            blend_pnames.add('blend_moon_by_alt_logit')
-    other_params = [p for n, p in model.named_parameters() if n not in blend_pnames]
-    if _blend_mode == 'default':
-        opt = torch.optim.AdamW(model.parameters(), lr=float(lr),
-                                weight_decay=float(weight_decay))
-    elif _blend_mode == 'no_wd':
-        opt = torch.optim.AdamW(
-            [{'params': other_params, 'weight_decay': float(weight_decay)},
-             {'params': blend_params, 'weight_decay': 0.0}],
-            lr=float(lr))
-    elif _blend_mode == 'lr10x':
-        opt = torch.optim.AdamW(
-            [{'params': other_params, 'lr': float(lr)},
-             {'params': blend_params, 'lr': float(lr) * 10.0}],
-            weight_decay=float(weight_decay))
-    elif _blend_mode == 'prefit_freeze':
-        # blend params carry the OLS alpha and are frozen (requires_grad=False).
-        opt = torch.optim.AdamW(other_params, lr=float(lr),
-                                weight_decay=float(weight_decay))
-    else:  # 'direct' or 'prefit_warmstart'
-        opt = torch.optim.AdamW(
-            [{'params': other_params, 'weight_decay': float(weight_decay)},
-             {'params': blend_params, 'weight_decay': 0.0}],
-            lr=float(lr))
-    print(f"Blend optim mode: {_blend_mode} "
-          f"(use_direct={bool(model.blend_use_direct)}, "
-          f"n_blend_params={sum(p.numel() for p in blend_params)})")
-
-    def compressed_loss(pred_dict, yb, w_row, w_pe, row_idx_b=None, block_cov_inv_batch=None):
+    def compressed_loss(pred_dict, yb, w_row, w_pe, row_idx_b):
         loss = torch.tensor(0.0, device=yb.device)
         for g, y_head in pred_dict.items():
             lo, hi = score_slices[g]
             target = yb[:, lo:hi].contiguous()
-            res = y_head - target
-            if g in _flux_mse_torch_by_group and row_idx_b is not None:
-                # 2026-08-25c: per-pixel flux MSE for moon and/or zodi.
-                # Inverse compressor in torch: undo RobustScaler, PCA, sqrt,
-                # geometry.  Reconstruct flux via c @ A and MSE per pixel.
+            if g in _flux_mse_torch_by_group:
+                # Per-pixel flux MSE for moon and/or zodi.  Inverse compressor
+                # in torch: undo RobustScaler, PCA, sqrt, geometry.
                 _st_fm = _flux_mse_torch_by_group[g]
                 _raw_target = target * _st_fm['score_scale'] + _st_fm['score_center']
                 _raw_pred   = y_head * _st_fm['score_scale'] + _st_fm['score_center']
@@ -836,60 +432,22 @@ def train_compressed_group_mlp(
                 _em_true = torch.clamp(_z_true, min=0.0) ** 2
                 _em_pred = torch.clamp(_z_pred, min=0.0) ** 2
                 _g_row = _st_fm['g_scale_sci'][row_idx_b, :]
-                _c_true = _em_true * _g_row
-                _c_pred = _em_pred * _g_row
-                _flux_true = _c_true @ _st_fm['A']
-                _flux_pred = _c_pred @ _st_fm['A']
+                _flux_true = (_em_true * _g_row) @ _st_fm['A']
+                _flux_pred = (_em_pred * _g_row) @ _st_fm['A']
                 _per_row = ((_flux_pred - _flux_true) ** 2).mean(dim=1) * float(_st_fm['scale_match'])
-            elif g in _rel_mse_torch_by_group:
-                # 2026-08-25b: relative-error MSE on the RobustScaler-undone
-                # score vector.  L_g(row) = ||pred_raw - true_raw||^2 /
-                # (||true_raw||^2 + eps_g^2), then scaled to match the
-                # diagonal Huber magnitude on train rows so
-                # group_loss_weight[g] stays calibrated across loss types.
-                # Takes precedence over block_cov_inv_batch.
-                _st_rm = _rel_mse_torch_by_group[g]
-                _sc_rm = _st_rm['scale']
-                _mu_rm = _st_rm['center']
-                target_raw = target * _sc_rm + _mu_rm
-                res_raw = res * _sc_rm
-                _num = (res_raw * res_raw).sum(dim=1)
-                _den = (target_raw * target_raw).sum(dim=1) + _st_rm['eps_sq']
-                _per_row = (_num / _den) * float(_st_rm['scale_match'])
-            elif block_cov_inv_batch is not None and g in block_cov_inv_batch:
-                # Block Mahalanobis in scaled score space.  The precomputed
-                # Sigma^-1 already includes the scale-match factor so this
-                # term is on the same magnitude as the diagonal Huber term
-                # it replaces.
-                _Sinv = block_cov_inv_batch[g]
-                _per_row = torch.einsum('bi,bij,bj->b', res, _Sinv, res)
-                _per_row = _per_row / float(max(int(_Sinv.shape[-1]), 1))
             else:
                 w_pe_g = w_pe[:, lo:hi].contiguous()
                 _per_elem = F.smooth_l1_loss(y_head, target, reduction='none') * w_pe_g
                 _per_row = _per_elem.mean(dim=1)
-            _weighted = (w_row * _per_row).mean()
-            _w_g = group_loss_weight[g]
-            loss = loss + float(_w_g) * _weighted
+            loss = loss + float(group_loss_weight[g]) * (w_row * _per_row).mean()
         return loss / max(len(pred_dict), 1)
 
     def _snapshot_alpha():
-        result = {}
-        for g in group_score_dims:
-            if model.moon_alt_conditional_alpha and g == 'moon':
-                if model.blend_use_direct:
-                    _a = model.blend_alpha_moon_by_alt.detach().cpu().numpy()
-                else:
-                    _a = torch.sigmoid(model.blend_moon_by_alt_logit).detach().cpu().numpy()
-                result['moon_dn'] = float(_a[0])
-                result['moon_up'] = float(_a[1])
-            elif model.blend_use_direct:
-                result[g] = float(model.blend_alpha_direct[str(g)].item())
-            else:
-                result[g] = float(torch.sigmoid(model.blend_logit[str(g)]).item())
-        return result
+        return {str(g): float(model.blend_alpha_direct[str(g)].item())
+                for g in group_score_dims}
+
     history = []
-    blend_history = []  # per-epoch snapshot of learned alpha_g
+    blend_history = []
     _init_blend = _snapshot_alpha()
     blend_history.append({'epoch': 0, **_init_blend})
     best_val = np.inf
@@ -903,34 +461,20 @@ def train_compressed_group_mlp(
         _perm = torch.randperm(_n_train, device=device)
         for _b0 in range(0, _n_train, _tr_bs):
             _sel = _perm[_b0:_b0 + _tr_bs]
-            _batch_tr = tuple(t[_sel] for t in _tr_tensors)
-            near_b, far_b, near_ctx_b, far_ctx_b, ctx_b, ma_sign_b, w_row_b, w_pe_b, yb, row_idx_b = _batch_tr[:10]
-            _block_cov_batch_tr = {
-                _g: _batch_tr[10 + _i]
-                for _i, _g in enumerate(_block_cov_group_order)
-            }
-            pred = model(near_b, far_b, near_ctx_b, far_ctx_b, ctx_b,
-                         sci_moon_alt_sign=(ma_sign_b
-                                            if model.moon_alt_conditional_alpha else None))
-            loss = compressed_loss(pred, yb, w_row_b, w_pe_b,
-                                    row_idx_b=row_idx_b,
-                                    block_cov_inv_batch=(_block_cov_batch_tr
-                                                         if _block_cov_batch_tr else None))
+            near_b, far_b, near_ctx_b, far_ctx_b, ctx_b, w_row_b, w_pe_b, yb, row_idx_b = tuple(
+                t[_sel] for t in _tr_tensors)
+            pred = model(near_b, far_b, near_ctx_b, far_ctx_b, ctx_b)
+            loss = compressed_loss(pred, yb, w_row_b, w_pe_b, row_idx_b)
             if not torch.isfinite(loss):
                 continue
             opt.zero_grad(set_to_none=True)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), float(grad_clip))
             opt.step()
-            if model.blend_use_direct:
-                with torch.no_grad():
-                    _eps = float(model.blend_alpha_eps)
-                    for _g in group_score_dims:
-                        if model.moon_alt_conditional_alpha and _g == 'moon':
-                            continue
-                        model.blend_alpha_direct[str(_g)].clamp_(_eps, 1.0 - _eps)
-                    if model.moon_alt_conditional_alpha and hasattr(model, 'blend_alpha_moon_by_alt'):
-                        model.blend_alpha_moon_by_alt.clamp_(_eps, 1.0 - _eps)
+            with torch.no_grad():
+                _eps = float(model.blend_alpha_eps)
+                for _g in group_score_dims:
+                    model.blend_alpha_direct[str(_g)].clamp_(_eps, 1.0 - _eps)
             tr_loss += float(loss.item())
             tr_n += 1
 
@@ -940,19 +484,10 @@ def train_compressed_group_mlp(
         with torch.no_grad():
             for _b0 in range(0, _n_val, _va_bs):
                 _sel = slice(_b0, _b0 + _va_bs)
-                _batch_va = tuple(t[_sel] for t in _va_tensors)
-                near_b, far_b, near_ctx_b, far_ctx_b, ctx_b, ma_sign_b, w_row_b, w_pe_b, yb, row_idx_b = _batch_va[:10]
-                _block_cov_batch_va = {
-                    _g: _batch_va[10 + _i]
-                    for _i, _g in enumerate(_block_cov_group_order)
-                }
-                pred = model(near_b, far_b, near_ctx_b, far_ctx_b, ctx_b,
-                             sci_moon_alt_sign=(ma_sign_b
-                                                if model.moon_alt_conditional_alpha else None))
-                loss = compressed_loss(pred, yb, w_row_b, w_pe_b,
-                                        row_idx_b=row_idx_b,
-                                        block_cov_inv_batch=(_block_cov_batch_va
-                                                             if _block_cov_batch_va else None))
+                near_b, far_b, near_ctx_b, far_ctx_b, ctx_b, w_row_b, w_pe_b, yb, row_idx_b = tuple(
+                    t[_sel] for t in _va_tensors)
+                pred = model(near_b, far_b, near_ctx_b, far_ctx_b, ctx_b)
+                loss = compressed_loss(pred, yb, w_row_b, w_pe_b, row_idx_b)
                 if torch.isfinite(loss):
                     va_loss += float(loss.item())
                     va_n += 1
@@ -978,26 +513,11 @@ def train_compressed_group_mlp(
         model.load_state_dict(best_state)
 
     _final_blend = _snapshot_alpha()
-    _parts = []
-    for _g in group_score_dims:
-        if model.moon_alt_conditional_alpha and _g == 'moon':
-            _parts.append(f'moon_dn={_final_blend["moon_dn"]:.3f}')
-            _parts.append(f'moon_up={_final_blend["moon_up"]:.3f}')
-        else:
-            _parts.append(f'{_g}={_final_blend[_g]:.3f}')
-    print(f"Learned per-group near-arm blend alpha at best epoch [{_blend_mode}]: "
-          + '  '.join(_parts))
-    if _init_blend is not None:
-        init_s = float(blend_init_alpha)
-        _deltas = []
-        for _g in group_score_dims:
-            if model.moon_alt_conditional_alpha and _g == 'moon':
-                _deltas.append(f'moon_dn={_final_blend["moon_dn"] - _init_blend["moon_dn"]:+.3f}')
-                _deltas.append(f'moon_up={_final_blend["moon_up"] - _init_blend["moon_up"]:+.3f}')
-            else:
-                _deltas.append(f'{_g}={_final_blend[_g] - _init_blend[_g]:+.3f}')
-        print(f'  init alpha={init_s:.3f} (uniform)  |  delta alpha at best epoch: '
-              + '  '.join(_deltas))
+    print(f"Learned per-group near-arm blend alpha at best epoch: "
+          + '  '.join(f'{_g}={_final_blend[_g]:.3f}' for _g in group_score_dims))
+    _deltas = [f'{_g}={_final_blend[_g] - _init_blend[_g]:+.3f}' for _g in group_score_dims]
+    print(f'  init alpha={float(blend_init_alpha):.3f} (uniform)  |  delta alpha at best epoch: '
+          + '  '.join(_deltas))
 
     # --- Fit per-group empirical mean-bias calibration on train + val rows ---
     # Since 2026-08-16: fit on train+val (test excluded), applied to ALL groups.
@@ -1020,8 +540,6 @@ def train_compressed_group_mlp(
             torch.from_numpy(ctx_near_n[_calib_idx]).to(device),
             torch.from_numpy(ctx_far_n[_calib_idx]).to(device),
             torch.from_numpy(ctx_sci_n[_calib_idx]).to(device),
-            sci_moon_alt_sign=(torch.from_numpy(_moon_alt_sign_all[_calib_idx]).to(device)
-                               if model.moon_alt_conditional_alpha else None),
         )
     _calib_scores_scaled = np.zeros((_calib_idx.size, n_input_score), dtype=np.float64)
     for _g, (_lo, _hi) in score_slices.items():
@@ -1184,10 +702,6 @@ def train_compressed_group_mlp(
         'history': history,
         'blend_history': blend_history,
         'blend_init_alpha': float(blend_init_alpha),
-        'blend_optim': str(_blend_mode),
-        'blend_use_direct': bool(model.blend_use_direct),
-        'blend_prefit_alphas': (dict(_prefit_alphas)
-                                if _prefit_alphas is not None else None),
         'best_val_loss': float(best_val),
         'best_epoch': int(best_epoch),
         'train_idx': train_idx, 'val_idx': val_idx, 'test_idx': test_idx,
@@ -1199,65 +713,33 @@ def train_compressed_group_mlp(
             'ctx_dims': tuple(int(v) for v in ctx_dims),
             'trunk_dims': tuple(int(v) for v in trunk_dims),
             'head_dim': int(head_dim), 'weight_decay': float(weight_decay),
-            'head_extra_dims': tuple(int(v) for v in head_extra_dims),
             'zodi_head_extra_dims': tuple(int(v) for v in zodi_head_extra_dims),
             'continuum_head_extra_dims': tuple(int(v) for v in continuum_head_extra_dims),
             'continuum_branch_dims': tuple(int(v) for v in continuum_branch_dims),
-            'zodi_ctx_restriction': (tuple(str(x) for x in zodi_ctx_restriction)
-                                     if zodi_ctx_restriction else None),
-            'continuum_ctx_restriction': (tuple(str(x) for x in continuum_ctx_restriction)
-                                          if continuum_ctx_restriction else None),
-            'moon_zodi_ctx_restriction': (tuple(str(x) for x in moon_zodi_ctx_restriction)
-                                          if moon_zodi_ctx_restriction else None),
-            'moon_zodi_branch_dims': tuple(int(v) for v in moon_zodi_branch_dims),
-            'moon_zodi_moon_head_extra_dims': tuple(int(v) for v in moon_zodi_moon_head_extra_dims),
-            'moon_zodi_zodi_head_extra_dims': tuple(int(v) for v in moon_zodi_zodi_head_extra_dims),
-            'moon_zodi_mode': (str(moon_zodi_mode) if moon_zodi_mode else 'additive'),
+            'zodi_ctx_restriction': tuple(str(x) for x in zodi_ctx_restriction),
+            'continuum_ctx_restriction': tuple(str(x) for x in continuum_ctx_restriction),
+            'moon_zodi_ctx_restriction': tuple(str(x) for x in moon_zodi_ctx_restriction),
             'moon_zodi_coupling_dims': tuple(int(v) for v in moon_zodi_coupling_dims),
-            'alpha_ctx_features': (tuple(str(x) for x in alpha_ctx_features)
-                                    if alpha_ctx_features else None),
-            'alpha_ctx_groups': (tuple(str(x) for x in alpha_ctx_groups)
-                                    if alpha_ctx_groups else None),
+            'alpha_ctx_features': tuple(str(x) for x in alpha_ctx_features),
             'patience': int(patience), 'seed': int(seed),
-            'drop_vanrhijn_from_context': bool(drop_vanrhijn_from_context),
             'moon_group_weight': float(moon_group_weight),
             'zodi_group_weight': float(zodi_group_weight),
             'continuum_group_weight': float(continuum_group_weight),
             'mesospheric_group_weight': float(mesospheric_group_weight),
             'ionospheric_group_weight': float(ionospheric_group_weight),
             'blend_init_alpha': float(blend_init_alpha),
-            'blend_optim': str(_blend_mode),
-            'moon_alt_conditional_alpha': bool(moon_alt_conditional_alpha),
-            'high_airmass_boost': float(high_airmass_boost),
-            'moon_down_ecliptic_boost': float(moon_down_ecliptic_boost),
-            'moon_down_ecliptic_beta_deg': float(moon_down_ecliptic_beta_deg),
             'bright_moon_close_boost': float(bright_moon_close_boost),
             'bright_moon_close_fli_min': float(bright_moon_close_fli_min),
             'bright_moon_close_sep_max_deg': float(bright_moon_close_sep_max_deg),
-            'use_coef_err_weights': bool(_weights_enabled),
-            # 2026-08-25 opt-in covariance-aware loss; empty tuple = the
-            # baseline diagonal Huber loss (backwards compat).
-            'block_cov_loss_groups': tuple(block_cov_loss_groups),
-            # 2026-08-25b opt-in relative-error MSE per group; takes
-            # precedence over block_cov_loss_groups.
-            'relative_mse_groups': tuple(relative_mse_groups),
-            'relative_mse_eps_frac': float(relative_mse_eps_frac),
-            # 2026-08-25c opt-in per-pixel flux MSE per group; takes
-            # precedence over relative_mse and block_cov.
             'flux_mse_groups': tuple(flux_mse_groups),
-            'flux_mse_eps_frac': float(flux_mse_eps_frac),
-            'coef_err_sigma_floor_rel': (
-                _resolved_floor_by_group
-                if _weights_enabled
-                else dict(DEFAULT_COEF_ERR_SIGMA_FLOOR_BY_GROUP)
-            ),
+            'coef_err_sigma_floor_rel': _resolved_floor_by_group,
         },
     }
 
 
 def predict_sci_coefficients_default(artifacts, coef_near_phys, coef_far_phys,
                                      ctx_near_phys, ctx_far_phys, ctx_sci_phys):
-    """Default sky-to-science coefficient predictor (compressed model, see methods §5.5).
+    """Default sky-to-science coefficient predictor (compressed model, §5.5).
 
     Pipeline: physical coefficients -> divide by geometry factor (§4) ->
     per-group forward compressor (asinh / linear / sqrt + PCA rotation +
@@ -1305,15 +787,6 @@ def predict_sci_coefficients_default(artifacts, coef_near_phys, coef_far_phys,
     ctx_sci_n = np.clip(ctx_scaler.transform(np.asarray(ctx_sci_phys, dtype=np.float32)),
                         -25.0, 25.0).astype(np.float32)
 
-    _pred_ma_sign = None
-    if getattr(model, 'moon_alt_conditional_alpha', False):
-        _ctx_names_p = list(artifacts.get('ctx_names', []))
-        if 'moon_alt' in _ctx_names_p:
-            _ma_idx = _ctx_names_p.index('moon_alt')
-            _ma_sign_np = (np.asarray(ctx_sci_phys, dtype=np.float32)[:, _ma_idx] > 0.0
-                           ).astype(np.int64)
-            _pred_ma_sign = torch.from_numpy(_ma_sign_np).to(device)
-
     with torch.no_grad():
         pred_dict = model(
             torch.from_numpy(near_s).to(device),
@@ -1321,7 +794,6 @@ def predict_sci_coefficients_default(artifacts, coef_near_phys, coef_far_phys,
             torch.from_numpy(ctx_near_n).to(device),
             torch.from_numpy(ctx_far_n).to(device),
             torch.from_numpy(ctx_sci_n).to(device),
-            sci_moon_alt_sign=_pred_ma_sign,
         )
 
     n_rows = near_s.shape[0]
@@ -1341,7 +813,7 @@ def predict_sci_coefficients_default(artifacts, coef_near_phys, coef_far_phys,
     return coef_predicted.astype(np.float32)
 
 
-# --- Train the compressed model as an N-seed ensemble, register as the default predictor --
+# --- Deployed ensemble config (matches the shipped mlp_ensemble_split_zodi_current.pt) ---
 default_dual_group_config: dict[str, Any] = {
     "name": "dual_group_mlp_compressed",
     "n_epochs": 50,
@@ -1351,39 +823,21 @@ default_dual_group_config: dict[str, Any] = {
     "ctx_dims": (96,),
     "trunk_dims": (320, 160),
     "head_dim": 192,
-    # Phase C (2026-08-26): extra hidden layer inside per-group heads.  Empirically
-    # neutral on shared-trunk heads (moon, continuum, etc) but a small win on the
-    # isolated zodi head; default is therefore no extras on shared heads and one
-    # extra layer on the zodi isolated head.  Set to (96,) to reactivate globally.
-    "head_extra_dims": (),
     "zodi_head_extra_dims": (32,),
-    "continuum_head_extra_dims": (),
-    "continuum_branch_dims": (64, 32),
-    "moon_zodi_ctx_restriction": None,
-    "moon_zodi_branch_dims": (128, 64),
-    "moon_zodi_moon_head_extra_dims": (64,),
-    "moon_zodi_zodi_head_extra_dims": (32,),
-    "moon_zodi_mode": "additive",
+    "continuum_head_extra_dims": (64,),
+    "continuum_branch_dims": (128, 64),
     "moon_zodi_coupling_dims": (64, 32),
     "weight_decay": 1.0e-4,
     "patience": 12,
-    "moon_group_weight": 4.0,
-    "zodi_group_weight": 1.0,
+    "moon_group_weight": 2.0,
+    "zodi_group_weight": 2.0,
     "continuum_group_weight": 1.0,
     "mesospheric_group_weight": 1.0,
     "ionospheric_group_weight": 1.0,
-    "block_cov_loss_groups": (),
-    "relative_mse_groups": (),
-    "relative_mse_eps_frac": 0.05,
     "flux_mse_groups": ("moon", "zodi"),
-    "flux_mse_eps_frac": 0.0,
-    "high_airmass_boost": 1.0,
-    "moon_down_ecliptic_boost": 1.0,
-    "moon_down_ecliptic_beta_deg": 15.0,
-    "bright_moon_close_boost": 1.0,
-    "bright_moon_close_fli_min": 0.85,
-    "bright_moon_close_sep_max_deg": 45.0,
-    "use_coef_err_weights": True,
+    "bright_moon_close_boost": 1.5,
+    "bright_moon_close_fli_min": 0.90,
+    "bright_moon_close_sep_max_deg": 30.0,
     "coef_err_sigma_floor_rel": dict(DEFAULT_COEF_ERR_SIGMA_FLOOR_BY_GROUP),
     "ensemble_seeds": (42, 43, 44, 45, 46, 47, 48, 49, 50, 51),
     "zodi_ctx_restriction": (
@@ -1395,27 +849,26 @@ default_dual_group_config: dict[str, Any] = {
         "moon_fli", "moon_up_smooth",
         "moon_airmass_up", "moon_signal_proxy",
     ),
-    # Phase B (2026-08-26): route the continuum head through an isolated branch
-    # keyed on moon geometry.  residual_ctx_attribution flagged continuum with
-    # RF R^2 = 0.70 driven by moon_fli + moon_phase_cos + moon_sep.  Empty tuple
-    # / None reverts to the shared-trunk head.
     "continuum_ctx_restriction": (
         "moon_alt", "moon_sep",
         "moon_phase_sin", "moon_phase_cos",
         "moon_fli", "airmass",
+        "moon_fli_x_phase_cos",
+        "moon_sig_x_lon_cos", "moon_sig_x_lon_sin",
     ),
-    # Phase A (2026-08-26): context-dependent per-group blend alpha.
-    # Empty tuple / None reverts to a single learnable scalar per group.
-    "alpha_ctx_features": (
-        "moon_up_smooth", "ecl_beta_deg", "airmass",
+    "moon_zodi_ctx_restriction": (
+        "airmass", "vanrhijn_285km",
+        "ecl_beta_deg", "ecl_lon_sin", "ecl_lon_cos",
+        "zodi_log10_v", "sun_sep",
+        "moon_alt", "moon_sep",
+        "moon_phase_sin", "moon_phase_cos",
+        "moon_fli", "moon_up_smooth",
+        "moon_airmass_up", "moon_signal_proxy",
+        "moon_fli_x_phase_cos",
+        "moon_sig_x_lon_cos", "moon_sig_x_lon_sin",
     ),
-    # Phase A restriction: which groups get a ctx-alpha predictor.  Only the
-    # groups whose sky-to-sci transfer is anisotropic (moon, zodi, continuum).
-    # Mesospheric / ionospheric / atomic are LOS-integrated thin shells that
-    # want alpha near 0.5 with no ctx dependence.  None -> all groups.
-    "alpha_ctx_groups": ("moon", "zodi", "continuum"),
+    "alpha_ctx_features": ("moon_up_smooth", "ecl_beta_deg", "airmass"),
 }
-
 
 _WAVE_STRIDE_FLUX_LOSS = 5
 
@@ -1510,16 +963,11 @@ class Trainer:
             ctx_dims=tuple(int(v) for v in c["ctx_dims"]),
             trunk_dims=tuple(int(v) for v in c["trunk_dims"]),
             head_dim=int(c["head_dim"]),
-            head_extra_dims=tuple(int(v) for v in c.get("head_extra_dims", ())),
-            zodi_head_extra_dims=tuple(int(v) for v in c.get("zodi_head_extra_dims", ())),
-            continuum_head_extra_dims=tuple(int(v) for v in c.get("continuum_head_extra_dims", ())),
-            continuum_branch_dims=tuple(int(v) for v in c.get("continuum_branch_dims", (64, 32))),
-            moon_zodi_ctx_restriction=c.get("moon_zodi_ctx_restriction"),
-            moon_zodi_branch_dims=tuple(int(v) for v in c.get("moon_zodi_branch_dims", (128, 64))),
-            moon_zodi_moon_head_extra_dims=tuple(int(v) for v in c.get("moon_zodi_moon_head_extra_dims", (64,))),
-            moon_zodi_zodi_head_extra_dims=tuple(int(v) for v in c.get("moon_zodi_zodi_head_extra_dims", (32,))),
-            moon_zodi_mode=c.get("moon_zodi_mode", "additive"),
-            moon_zodi_coupling_dims=tuple(int(v) for v in c.get("moon_zodi_coupling_dims", (64, 32))),
+            zodi_head_extra_dims=tuple(int(v) for v in c["zodi_head_extra_dims"]),
+            continuum_head_extra_dims=tuple(int(v) for v in c["continuum_head_extra_dims"]),
+            continuum_branch_dims=tuple(int(v) for v in c["continuum_branch_dims"]),
+            moon_zodi_ctx_restriction=c["moon_zodi_ctx_restriction"],
+            moon_zodi_coupling_dims=tuple(int(v) for v in c["moon_zodi_coupling_dims"]),
             weight_decay=float(c["weight_decay"]),
             patience=int(c["patience"]),
             moon_group_weight=float(c["moon_group_weight"]),
@@ -1527,23 +975,14 @@ class Trainer:
             continuum_group_weight=float(c["continuum_group_weight"]),
             mesospheric_group_weight=float(c["mesospheric_group_weight"]),
             ionospheric_group_weight=float(c["ionospheric_group_weight"]),
-            high_airmass_boost=float(c["high_airmass_boost"]),
-            moon_down_ecliptic_boost=float(c["moon_down_ecliptic_boost"]),
-            moon_down_ecliptic_beta_deg=float(c["moon_down_ecliptic_beta_deg"]),
             bright_moon_close_boost=float(c["bright_moon_close_boost"]),
             bright_moon_close_fli_min=float(c["bright_moon_close_fli_min"]),
             bright_moon_close_sep_max_deg=float(c["bright_moon_close_sep_max_deg"]),
-            use_coef_err_weights=bool(c["use_coef_err_weights"]),
             coef_err_sigma_floor_rel=c["coef_err_sigma_floor_rel"],
-            zodi_ctx_restriction=c.get("zodi_ctx_restriction"),
-            continuum_ctx_restriction=c.get("continuum_ctx_restriction"),
-            alpha_ctx_features=c.get("alpha_ctx_features"),
-            alpha_ctx_groups=c.get("alpha_ctx_groups"),
-            block_cov_loss_groups=tuple(c.get("block_cov_loss_groups", ())),
-            relative_mse_groups=tuple(c.get("relative_mse_groups", ())),
-            relative_mse_eps_frac=float(c.get("relative_mse_eps_frac", 0.05)),
+            zodi_ctx_restriction=c["zodi_ctx_restriction"],
+            continuum_ctx_restriction=c["continuum_ctx_restriction"],
+            alpha_ctx_features=c["alpha_ctx_features"],
             flux_mse_groups=tuple(c.get("flux_mse_groups", ())),
-            flux_mse_eps_frac=float(c.get("flux_mse_eps_frac", 0.0)),
             flux_basis_matrices=flux_basis_matrices,
             flux_geom_sc_sci=flux_geom_sc_sci,
         )
