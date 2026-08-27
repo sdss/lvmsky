@@ -186,7 +186,13 @@ class DualEncoderGroupHeadMLPCompressed(DualEncoderGroupHeadMLP):
                  alpha_ctx_features=None,
                  alpha_ctx_groups=None,
                  zodi_ctx_restriction=None,
-                 continuum_ctx_restriction=None):
+                 continuum_ctx_restriction=None,
+                 moon_zodi_ctx_restriction=None,
+                 moon_zodi_branch_dims=(128, 64),
+                 moon_zodi_moon_head_extra_dims=(64,),
+                 moon_zodi_zodi_head_extra_dims=(32,),
+                 moon_zodi_mode='additive',
+                 moon_zodi_coupling_dims=(64, 32)):
         fake_group_indices = {g: np.arange(int(n))
                               for g, n in group_score_dims.items()}
         super().__init__(
@@ -397,6 +403,124 @@ class DualEncoderGroupHeadMLPCompressed(DualEncoderGroupHeadMLP):
                       f'continuum_branch_dims={_cb_dims}, '
                       f'continuum_head_extra_dims={_ch_extras}.')
 
+        # -----------------------------------------------------------
+        # 2026-08-27b (Phase E) / 2026-08-27c (Phase F): moon-zodi coupling.
+        # When `moon_zodi_ctx_restriction` is a non-empty iterable of ctx feature
+        # names, `moon_zodi_mode` selects between:
+        #   'shared_branch' -- Phase E: retire the shared-trunk moon head AND
+        #     the isolated zodi branch; moon and zodi both consume the shared
+        #     `moon_zodi_branch` latent via new dedicated heads.  A/B on this
+        #     path (2026-08-27b) landed +moon wins but atlas mid regressed +35%.
+        #   'additive' (default) -- Phase F: keep both existing paths (moon on
+        #     shared trunk, zodi on isolated branch).  Add a small coupling
+        #     branch producing a shared latent, projected additively into the
+        #     moon and zodi head outputs via zero-init linear projectors.  At
+        #     init the projector outputs are zero, so training starts byte-
+        #     identical to Phase A''; the projectors learn to route the
+        #     moon-zodi coupling signal without breaking zodi's isolation.
+        # -----------------------------------------------------------
+        self.moon_zodi_ctx_restriction = None
+        self.moon_zodi_mode = None
+        self.moon_zodi_branch = None
+        self.moon_zodi_moon_head = None
+        self.moon_zodi_zodi_head = None
+        self.moon_zodi_coupling_branch = None
+        self.moon_zodi_moon_projector = None
+        self.moon_zodi_zodi_projector = None
+        if (moon_zodi_ctx_restriction and 'moon' in group_score_dims
+                and 'zodi' in group_score_dims and ctx_names is not None):
+            _mz_mode = str(moon_zodi_mode).lower() if moon_zodi_mode else 'additive'
+            if _mz_mode not in ('shared_branch', 'additive'):
+                raise ValueError(
+                    f'moon_zodi_mode must be "additive" or "shared_branch"; got {_mz_mode!r}.')
+            _ctx_names_lower = [str(n).strip().lower() for n in ctx_names]
+            _want = [str(x).strip().lower() for x in moon_zodi_ctx_restriction]
+            _idx = [i for i, n in enumerate(_ctx_names_lower) if n in _want]
+            _missing = [w for w in _want if w not in _ctx_names_lower]
+            if len(_idx) == 0:
+                print('DualEncoderGroupHeadMLPCompressed: moon_zodi_ctx_restriction '
+                      f'requested {_want!r} but none of those features are '
+                      f'in ctx_names; falling back to per-group paths for moon+zodi.')
+            else:
+                if _missing:
+                    print('DualEncoderGroupHeadMLPCompressed: moon_zodi_ctx_restriction '
+                          f'missing features {_missing!r} (they will be skipped).')
+                self.moon_zodi_ctx_restriction = tuple(_ctx_names_lower[i] for i in _idx)
+                self.moon_zodi_mode = _mz_mode
+                self.register_buffer('moon_zodi_ctx_idx',
+                                     torch.tensor(_idx, dtype=torch.long))
+                _n_m = int(group_score_dims['moon'])
+                _n_z = int(group_score_dims['zodi'])
+                _mz_in = 3 * len(_idx) + 2 * (_n_m + _n_z)
+
+                def _build_head(_n_out, _extras, _in_dim):
+                    _extras = tuple(int(v) for v in _extras)
+                    if not _extras:
+                        return nn.Linear(_in_dim, _n_out)
+                    _layers = []
+                    _din = int(_in_dim)
+                    for _dh in _extras:
+                        _layers += [nn.Linear(_din, _dh), nn.GELU()]
+                        _din = _dh
+                    _layers += [nn.Linear(_din, _n_out)]
+                    return nn.Sequential(*_layers)
+
+                if _mz_mode == 'shared_branch':
+                    _mzb_dims = tuple(int(v) for v in moon_zodi_branch_dims)
+                    if len(_mzb_dims) != 2:
+                        raise ValueError(
+                            f'moon_zodi_branch_dims must be a 2-tuple; got {_mzb_dims!r}.')
+                    _hidden_a, _hidden_b = _mzb_dims
+                    self.moon_zodi_branch = nn.Sequential(
+                        nn.Linear(_mz_in, _hidden_a),
+                        nn.LayerNorm(_hidden_a), nn.GELU(),
+                        nn.Linear(_hidden_a, _hidden_b),
+                        nn.LayerNorm(_hidden_b), nn.GELU(),
+                    )
+                    _mh_extras = tuple(int(v) for v in moon_zodi_moon_head_extra_dims)
+                    _zh_extras = tuple(int(v) for v in moon_zodi_zodi_head_extra_dims)
+                    self.moon_zodi_moon_head = _build_head(_n_m, _mh_extras, _hidden_b)
+                    self.moon_zodi_zodi_head = _build_head(_n_z, _zh_extras, _hidden_b)
+                    # Precedence: shared branch overrides isolated zodi.
+                    if self.zodi_branch is not None or self.zodi_head_isolated is not None:
+                        print('DualEncoderGroupHeadMLPCompressed: moon_zodi shared branch '
+                              'takes precedence; disabling the pre-existing isolated zodi branch.')
+                        self.zodi_branch = None
+                        self.zodi_head_isolated = None
+                        self.zodi_ctx_restriction = None
+                    print(f'DualEncoderGroupHeadMLPCompressed: shared moon-zodi branch active, '
+                          f'ctx features = {self.moon_zodi_ctx_restriction} (fed per-arm sci+near+far), '
+                          f'n_moon_score={_n_m}, n_zodi_score={_n_z}, branch input dim={_mz_in}, '
+                          f'moon_zodi_branch_dims={_mzb_dims}, '
+                          f'moon_head_extra_dims={_mh_extras}, zodi_head_extra_dims={_zh_extras}.')
+                else:
+                    # additive mode: small coupling branch + zero-init projectors.
+                    _cdims = tuple(int(v) for v in moon_zodi_coupling_dims)
+                    if len(_cdims) != 2:
+                        raise ValueError(
+                            f'moon_zodi_coupling_dims must be a 2-tuple; got {_cdims!r}.')
+                    _c_hidden_a, _c_hidden_b = _cdims
+                    self.moon_zodi_coupling_branch = nn.Sequential(
+                        nn.Linear(_mz_in, _c_hidden_a),
+                        nn.LayerNorm(_c_hidden_a), nn.GELU(),
+                        nn.Linear(_c_hidden_a, _c_hidden_b),
+                        nn.LayerNorm(_c_hidden_b), nn.GELU(),
+                    )
+                    self.moon_zodi_moon_projector = nn.Linear(_c_hidden_b, _n_m)
+                    self.moon_zodi_zodi_projector = nn.Linear(_c_hidden_b, _n_z)
+                    # Zero the projector weights and biases so at init the
+                    # additive contribution is exactly zero and training starts
+                    # byte-identical to Phase A''.
+                    with torch.no_grad():
+                        for _p in (self.moon_zodi_moon_projector,
+                                   self.moon_zodi_zodi_projector):
+                            _p.weight.zero_()
+                            _p.bias.zero_()
+                    print(f'DualEncoderGroupHeadMLPCompressed: additive moon-zodi coupling active, '
+                          f'ctx features = {self.moon_zodi_ctx_restriction} (fed per-arm sci+near+far), '
+                          f'n_moon_score={_n_m}, n_zodi_score={_n_z}, branch input dim={_mz_in}, '
+                          f'coupling_dims={_cdims}, projectors zero-init.')
+
     def forward(self, near_score, far_score, near_ctx, far_ctx, sci_ctx,
                 sci_moon_alt_sign=None):
         near_ctx_m = self._select_ctx(near_ctx)
@@ -412,6 +536,24 @@ class DualEncoderGroupHeadMLPCompressed(DualEncoderGroupHeadMLP):
         h = self.trunk(z)
         # Predict a residual on top of an explicit per-group blend of the two sky arms
         # so delta=0 is the interpolation baseline rather than the training mean.
+        # moon-zodi latent computed once per batch when either the shared-branch
+        # (Phase E) or additive coupling (Phase F) is active.
+        _mz_latent = None
+        _mz_branch_active = self.moon_zodi_branch is not None
+        _mz_coupling_active = self.moon_zodi_coupling_branch is not None
+        if _mz_branch_active or _mz_coupling_active:
+            _mzctx_sci  = sci_ctx[:,  self.moon_zodi_ctx_idx]
+            _mzctx_near = near_ctx[:, self.moon_zodi_ctx_idx]
+            _mzctx_far  = far_ctx[:,  self.moon_zodi_ctx_idx]
+            _lo_m, _hi_m = self._score_offsets['moon']
+            _lo_z, _hi_z = self._score_offsets['zodi']
+            _mzin = torch.cat([
+                _mzctx_sci, _mzctx_near, _mzctx_far,
+                near_score[:, _lo_m:_hi_m], far_score[:, _lo_m:_hi_m],
+                near_score[:, _lo_z:_hi_z], far_score[:, _lo_z:_hi_z],
+            ], dim=1)
+            _mz_latent = (self.moon_zodi_branch(_mzin) if _mz_branch_active
+                          else self.moon_zodi_coupling_branch(_mzin))
         out = {}
         for g, head in self.heads.items():
             lo, hi = self._score_offsets[g]
@@ -438,7 +580,15 @@ class DualEncoderGroupHeadMLPCompressed(DualEncoderGroupHeadMLP):
                     alpha = torch.sigmoid(self.blend_logit[str(g)])
                 blend = (alpha * near_score[:, lo:hi]
                          + (1.0 - alpha) * far_score[:, lo:hi])
-            if (g == 'zodi' and self.zodi_branch is not None
+            if (_mz_latent is not None and g == 'moon'
+                    and self.moon_zodi_moon_head is not None):
+                # Phase E shared_branch: moon head is replaced.
+                out[g] = blend + self.moon_zodi_moon_head(_mz_latent)
+            elif (_mz_latent is not None and g == 'zodi'
+                    and self.moon_zodi_zodi_head is not None):
+                # Phase E shared_branch: zodi head is replaced.
+                out[g] = blend + self.moon_zodi_zodi_head(_mz_latent)
+            elif (g == 'zodi' and self.zodi_branch is not None
                     and self.zodi_head_isolated is not None):
                 _zctx_sci  = sci_ctx[:,  self.zodi_ctx_idx]
                 _zctx_near = near_ctx[:, self.zodi_ctx_idx]
@@ -446,7 +596,11 @@ class DualEncoderGroupHeadMLPCompressed(DualEncoderGroupHeadMLP):
                 _zin = torch.cat([_zctx_sci, _zctx_near, _zctx_far,
                                   near_score[:, lo:hi],
                                   far_score[:, lo:hi]], dim=1)
-                out[g] = blend + self.zodi_head_isolated(self.zodi_branch(_zin))
+                _z_out = self.zodi_head_isolated(self.zodi_branch(_zin))
+                if (_mz_latent is not None
+                        and self.moon_zodi_zodi_projector is not None):
+                    _z_out = _z_out + self.moon_zodi_zodi_projector(_mz_latent)
+                out[g] = blend + _z_out
             elif (g == 'continuum' and self.continuum_branch is not None
                     and self.continuum_head_isolated is not None):
                 _cctx_sci  = sci_ctx[:,  self.continuum_ctx_idx]
@@ -457,7 +611,11 @@ class DualEncoderGroupHeadMLPCompressed(DualEncoderGroupHeadMLP):
                                   far_score[:, lo:hi]], dim=1)
                 out[g] = blend + self.continuum_head_isolated(self.continuum_branch(_cin))
             else:
-                out[g] = blend + head(h)
+                _head_out = head(h)
+                if (g == 'moon' and _mz_latent is not None
+                        and self.moon_zodi_moon_projector is not None):
+                    _head_out = _head_out + self.moon_zodi_moon_projector(_mz_latent)
+                out[g] = blend + _head_out
         return out
 
 

@@ -606,6 +606,12 @@ else:
         ("diffuse", sci_diffuse_arr),
         ("lines",   sci_lines_arr),
     ]
+    # Stable per-row colors so row i has the same color in every panel.
+    from plotly.colors import sample_colorscale as _sample_colorscale
+    _row_colors = _sample_colorscale(
+        "turbo",
+        [j / max(n_use - 1, 1) for j in range(n_use)],
+    )
     # (percent enclosed, color, dash) for the per-row median-residual histograms.
     _sigma_specs = [
         (68.27, "rgba(200, 60, 60, 0.95)", "solid"),
@@ -626,7 +632,7 @@ else:
                     go.Scattergl(
                         x=wave_ref, y=_arr[i],
                         mode="lines",
-                        line=dict(width=0.8),
+                        line=dict(width=0.8, color=_row_colors[i]),
                         opacity=0.7,
                         hovertemplate=_hover,
                         showlegend=False,
@@ -669,7 +675,7 @@ else:
                     go.Scattergl(
                         x=sci_wave_rows[i], y=_arr[i],
                         mode="lines",
-                        line=dict(width=0.8),
+                        line=dict(width=0.8, color=_row_colors[i]),
                         opacity=0.7,
                         hovertemplate=_hover,
                         showlegend=False,
