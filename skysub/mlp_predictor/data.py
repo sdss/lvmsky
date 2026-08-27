@@ -2684,6 +2684,12 @@ PHYSICS_PRIOR_FEATURE_NAMES = [
     'moon_up_smooth',     # sigmoid(moon_alt/5), smooth horizon step
     'moon_airmass_up',    # moon LOS airmass, zeroed below horizon
     'moon_signal_proxy',  # rough moon flux at pointing (KS-like)
+    # Phase A' (2026-08-26): explicit non-linear interaction features that
+    # attack the residual_ctx_attribution RF rankings on continuum
+    # (moon_fli * moon_phase_cos, moon_signal_proxy * ecl_lon_{cos,sin}).
+    'moon_fli_x_phase_cos',   # 2nd-order moon phase (cos - cos^2)/2
+    'moon_sig_x_lon_cos',     # moon-scatter x zodi anisotropy (cos)
+    'moon_sig_x_lon_sin',     # moon-scatter x zodi anisotropy (sin)
 ]
 
 # ---------------------------------------------------------------------------
@@ -2832,8 +2838,12 @@ def _augment_triplet_with_physics_priors(triplet, force=True):
         _moon_ext = 10.0 ** (-0.4 * 0.15 * _X_moon)
         _sep = _arm_ctx[:, _idx['moon_sep']]
         _signal_proxy = _fli * _up_smooth * _moon_ext / (1.0 + _sep / 45.0)**2
+        _fli_x_phase_cos = _fli * _phase_cos
+        _sig_x_lon_cos = _signal_proxy * _lon_c
+        _sig_x_lon_sin = _signal_proxy * _lon_s
         _new_cols[_arm_key] = np.column_stack([
             _zodi, _fli, _up_smooth, _airmass_up, _signal_proxy,
+            _fli_x_phase_cos, _sig_x_lon_cos, _sig_x_lon_sin,
         ]).astype(np.float32)
 
     for _arm_key, _new in _new_cols.items():

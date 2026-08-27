@@ -73,6 +73,8 @@ def train_compressed_group_mlp(
     n_epochs=50, batch_size=256, lr=7e-4,
     encoder_dims=(384, 192), ctx_dims=(64,),
     trunk_dims=(320, 160), head_dim=192,
+    head_extra_dims=(),
+    zodi_head_extra_dims=(),
     weight_decay=1e-4, grad_clip=1.0, patience=4,
     seed=42, drop_vanrhijn_from_context=False,
     moon_group_weight=1.0,
@@ -84,6 +86,11 @@ def train_compressed_group_mlp(
     blend_optim='direct',
     moon_alt_conditional_alpha=False,
     zodi_ctx_restriction=None,
+    continuum_ctx_restriction=None,
+    continuum_head_extra_dims=(),
+    continuum_branch_dims=(64, 32),
+    alpha_ctx_features=None,
+    alpha_ctx_groups=None,
     # 2026-08-25: opt-in covariance-aware loss for moon and/or zodi.  Empty
     # tuple keeps the existing per-element weighted Huber loss (backwards
     # compat).  Setting e.g. ('moon',) precomputes Sigma_scaled^-1 per row
@@ -693,12 +700,19 @@ def train_compressed_group_mlp(
         ctx_dims=tuple(int(v) for v in ctx_dims),
         trunk_dims=tuple(int(v) for v in trunk_dims),
         head_dim=int(head_dim),
+        head_extra_dims=tuple(int(v) for v in head_extra_dims),
+        zodi_head_extra_dims=tuple(int(v) for v in zodi_head_extra_dims),
+        continuum_head_extra_dims=tuple(int(v) for v in continuum_head_extra_dims),
+        continuum_branch_dims=tuple(int(v) for v in continuum_branch_dims),
         drop_vanrhijn_from_context=bool(drop_vanrhijn_from_context),
         blend_init_alpha=float(blend_init_alpha),
         blend_use_direct=(str(blend_optim).lower()
                           in ('direct', 'prefit_freeze', 'prefit_warmstart')),
         moon_alt_conditional_alpha=bool(moon_alt_conditional_alpha),
+        alpha_ctx_features=alpha_ctx_features,
+        alpha_ctx_groups=alpha_ctx_groups,
         zodi_ctx_restriction=zodi_ctx_restriction,
+        continuum_ctx_restriction=continuum_ctx_restriction,
     ).to(device)
 
     # Optimizer construction depends on blend_optim mode:
@@ -1173,6 +1187,14 @@ def train_compressed_group_mlp(
             'ctx_dims': tuple(int(v) for v in ctx_dims),
             'trunk_dims': tuple(int(v) for v in trunk_dims),
             'head_dim': int(head_dim), 'weight_decay': float(weight_decay),
+            'head_extra_dims': tuple(int(v) for v in head_extra_dims),
+            'zodi_head_extra_dims': tuple(int(v) for v in zodi_head_extra_dims),
+            'continuum_head_extra_dims': tuple(int(v) for v in continuum_head_extra_dims),
+            'continuum_branch_dims': tuple(int(v) for v in continuum_branch_dims),
+            'alpha_ctx_features': (tuple(str(x) for x in alpha_ctx_features)
+                                    if alpha_ctx_features else None),
+            'alpha_ctx_groups': (tuple(str(x) for x in alpha_ctx_groups)
+                                    if alpha_ctx_groups else None),
             'patience': int(patience), 'seed': int(seed),
             'drop_vanrhijn_from_context': bool(drop_vanrhijn_from_context),
             'moon_group_weight': float(moon_group_weight),
@@ -1306,6 +1328,14 @@ default_dual_group_config: dict[str, Any] = {
     "ctx_dims": (96,),
     "trunk_dims": (320, 160),
     "head_dim": 192,
+    # Phase C (2026-08-26): extra hidden layer inside per-group heads.  Empirically
+    # neutral on shared-trunk heads (moon, continuum, etc) but a small win on the
+    # isolated zodi head; default is therefore no extras on shared heads and one
+    # extra layer on the zodi isolated head.  Set to (96,) to reactivate globally.
+    "head_extra_dims": (),
+    "zodi_head_extra_dims": (32,),
+    "continuum_head_extra_dims": (),
+    "continuum_branch_dims": (64, 32),
     "weight_decay": 1.0e-4,
     "patience": 12,
     "moon_group_weight": 4.0,
@@ -1336,6 +1366,25 @@ default_dual_group_config: dict[str, Any] = {
         "moon_fli", "moon_up_smooth",
         "moon_airmass_up", "moon_signal_proxy",
     ),
+    # Phase B (2026-08-26): route the continuum head through an isolated branch
+    # keyed on moon geometry.  residual_ctx_attribution flagged continuum with
+    # RF R^2 = 0.70 driven by moon_fli + moon_phase_cos + moon_sep.  Empty tuple
+    # / None reverts to the shared-trunk head.
+    "continuum_ctx_restriction": (
+        "moon_alt", "moon_sep",
+        "moon_phase_sin", "moon_phase_cos",
+        "moon_fli", "airmass",
+    ),
+    # Phase A (2026-08-26): context-dependent per-group blend alpha.
+    # Empty tuple / None reverts to a single learnable scalar per group.
+    "alpha_ctx_features": (
+        "moon_up_smooth", "ecl_beta_deg", "airmass",
+    ),
+    # Phase A restriction: which groups get a ctx-alpha predictor.  Only the
+    # groups whose sky-to-sci transfer is anisotropic (moon, zodi, continuum).
+    # Mesospheric / ionospheric / atomic are LOS-integrated thin shells that
+    # want alpha near 0.5 with no ctx dependence.  None -> all groups.
+    "alpha_ctx_groups": ("moon", "zodi", "continuum"),
 }
 
 
@@ -1432,6 +1481,10 @@ class Trainer:
             ctx_dims=tuple(int(v) for v in c["ctx_dims"]),
             trunk_dims=tuple(int(v) for v in c["trunk_dims"]),
             head_dim=int(c["head_dim"]),
+            head_extra_dims=tuple(int(v) for v in c.get("head_extra_dims", ())),
+            zodi_head_extra_dims=tuple(int(v) for v in c.get("zodi_head_extra_dims", ())),
+            continuum_head_extra_dims=tuple(int(v) for v in c.get("continuum_head_extra_dims", ())),
+            continuum_branch_dims=tuple(int(v) for v in c.get("continuum_branch_dims", (64, 32))),
             weight_decay=float(c["weight_decay"]),
             patience=int(c["patience"]),
             moon_group_weight=float(c["moon_group_weight"]),
@@ -1448,6 +1501,9 @@ class Trainer:
             use_coef_err_weights=bool(c["use_coef_err_weights"]),
             coef_err_sigma_floor_rel=c["coef_err_sigma_floor_rel"],
             zodi_ctx_restriction=c.get("zodi_ctx_restriction"),
+            continuum_ctx_restriction=c.get("continuum_ctx_restriction"),
+            alpha_ctx_features=c.get("alpha_ctx_features"),
+            alpha_ctx_groups=c.get("alpha_ctx_groups"),
             block_cov_loss_groups=tuple(c.get("block_cov_loss_groups", ())),
             relative_mse_groups=tuple(c.get("relative_mse_groups", ())),
             relative_mse_eps_frac=float(c.get("relative_mse_eps_frac", 0.05)),
