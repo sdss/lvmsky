@@ -7,11 +7,13 @@ Wraps
   :func:`mlp_predictor.trainer.predict_sci_coefficients_default`,
 - per-row confidence via the ensemble spread across seeds,
 
-so callers can go from ``(mjd, sci_ra, sci_dec, sky_near_ra, sky_near_dec,
-sky_far_ra, sky_far_dec, coef_near, coef_far)`` straight to a predicted
-science-arm coefficient vector plus a per-row confidence estimate, without
-constructing FITS files or having to know which of the 39 context features
-enter which specialised branch of the model.
+so callers can go from ``(mjd, sci_ra, sci_dec, sky_e_ra, sky_e_dec,
+sky_w_ra, sky_w_dec, coef_e, coef_w)`` straight to a predicted science-arm
+coefficient vector plus a per-row confidence estimate.  The near-vs-far arm
+assignment (which the model actually consumes) is computed internally from
+angular separation, so callers do not have to know which of the 39 context
+features enter which specialised branch of the model, nor which arm is
+"near" in the training corpus's convention.
 """
 
 from __future__ import annotations
@@ -36,6 +38,19 @@ def _as_1d_f64(arr, name):
     if a.size == 0:
         raise ValueError(f"{name} is empty.")
     return a
+
+
+def _angular_separation_deg(ra1, dec1, ra2, dec2):
+    """Vincenty spherical separation in degrees, per-row, no astropy roundtrip."""
+    ra1_r, dec1_r = np.deg2rad(ra1), np.deg2rad(dec1)
+    ra2_r, dec2_r = np.deg2rad(ra2), np.deg2rad(dec2)
+    dra = ra2_r - ra1_r
+    n = np.hypot(np.cos(dec2_r) * np.sin(dra),
+                 np.cos(dec1_r) * np.sin(dec2_r)
+                 - np.sin(dec1_r) * np.cos(dec2_r) * np.cos(dra))
+    d = (np.sin(dec1_r) * np.sin(dec2_r)
+         + np.cos(dec1_r) * np.cos(dec2_r) * np.cos(dra))
+    return np.rad2deg(np.arctan2(n, d))
 
 
 def _compute_moon_phase_deg(obstime_mjd: np.ndarray) -> np.ndarray:
@@ -182,11 +197,10 @@ def predict_sky_from_minimal_inputs(
     *,
     obstime_mjd,
     sci_ra, sci_dec,
-    sky_near_ra, sky_near_dec,
-    sky_far_ra,  sky_far_dec,
-    coef_near, coef_far,
+    sky_e_ra, sky_e_dec,
+    sky_w_ra, sky_w_dec,
+    coef_e, coef_w,
     moon_phase_deg=None,
-    sky_near_label=None, sky_far_label=None,
     return_per_seed: bool = False,
 ) -> dict:
     """Predict the science-arm decomposition coefficients + a confidence score.
@@ -196,16 +210,25 @@ def predict_sky_from_minimal_inputs(
     ensemble:
         The dict returned by :func:`~mlp_predictor.serialization.load_ensemble`.
         Must have ``is_ensemble=True``.
-    obstime_mjd, sci_ra, sci_dec, sky_near_ra, sky_near_dec, sky_far_ra, sky_far_dec:
-        The minimal per-row observation metadata; see
-        :func:`build_triplet_from_pointings`.
-    coef_near, coef_far:
-        The two sky-arm decomposition coefficient vectors, shape ``(n_rows,
+    obstime_mjd, sci_ra, sci_dec:
+        UT MJD and science-fiber pointing (degrees, ICRS).  Everything time-
+        related derives from ``obstime_mjd`` (cyclic time features, solar-
+        activity indices, moon/sun ephemerides).
+    sky_e_ra, sky_e_dec, sky_w_ra, sky_w_dec:
+        Pointings of the SkyE and SkyW fibre bundles (degrees, ICRS).  The
+        function computes the angular separation of each arm to the science
+        pointing per row and internally assigns the closer one as "near" and
+        the farther one as "far" — the sign convention the training corpus
+        uses (see training notebook \u00a72.4).
+    coef_e, coef_w:
+        The SkyE and SkyW decomposition coefficient vectors, shape ``(n_rows,
         n_coef)`` where ``n_coef`` matches ``len(ensemble['coef_names'])``.
         These come from running the QP decomposition on the two sky-arm
-        spectra separately.
-    moon_phase_deg, sky_near_label, sky_far_label:
-        Optional overrides passed straight to :func:`build_triplet_from_pointings`.
+        spectra separately.  They are swapped internally in lockstep with the
+        near-vs-far reassignment above.
+    moon_phase_deg:
+        Optional per-row moon phase in degrees (0 = new moon, 180 = full).
+        Computed from astropy sun/moon ephemerides when omitted.
     return_per_seed:
         If True, additionally include the ``(n_seeds, n_rows, n_coef)`` array
         of per-seed predictions under key ``'per_seed'``.
@@ -225,6 +248,8 @@ def predict_sky_from_minimal_inputs(
         - ``coef_names``:  the list of coefficient names matching the column
           order of ``coef`` and ``coef_std``.
         - ``triplet``:     the built context dict (useful for debugging).
+        - ``near_is_east``: ``(n_rows,)`` bool, ``True`` where the SkyE arm
+          was closer to the science pointing than SkyW.
         - ``per_seed`` (optional): raw per-seed predictions.
 
     Notes
@@ -239,29 +264,55 @@ def predict_sky_from_minimal_inputs(
     if not ensemble.get("is_ensemble", False):
         raise ValueError("`ensemble` must be an ensemble artifact (is_ensemble=True).")
 
+    obstime_mjd_arr = _as_1d_f64(obstime_mjd, "obstime_mjd")
+    n_rows = obstime_mjd_arr.size
+    _bcast = lambda a, name: np.broadcast_to(
+        _as_1d_f64(a, name), (n_rows,)).astype(np.float64).copy()
+
+    sci_ra_arr  = _bcast(sci_ra,  "sci_ra")
+    sci_dec_arr = _bcast(sci_dec, "sci_dec")
+    e_ra_arr    = _bcast(sky_e_ra,  "sky_e_ra")
+    e_dec_arr   = _bcast(sky_e_dec, "sky_e_dec")
+    w_ra_arr    = _bcast(sky_w_ra,  "sky_w_ra")
+    w_dec_arr   = _bcast(sky_w_dec, "sky_w_dec")
+
+    # Per-row near/far assignment by angular separation to the science pointing.
+    sep_e = _angular_separation_deg(sci_ra_arr, sci_dec_arr, e_ra_arr, e_dec_arr)
+    sep_w = _angular_separation_deg(sci_ra_arr, sci_dec_arr, w_ra_arr, w_dec_arr)
+    near_is_east = sep_e <= sep_w
+
+    sky_near_ra    = np.where(near_is_east, e_ra_arr,   w_ra_arr)
+    sky_near_dec   = np.where(near_is_east, e_dec_arr,  w_dec_arr)
+    sky_far_ra     = np.where(near_is_east, w_ra_arr,   e_ra_arr)
+    sky_far_dec    = np.where(near_is_east, w_dec_arr,  e_dec_arr)
+    sky_near_label = np.where(near_is_east, "SKYE", "SKYW")
+    sky_far_label  = np.where(near_is_east, "SKYW", "SKYE")
+
     triplet = build_triplet_from_pointings(
-        obstime_mjd=obstime_mjd,
-        sci_ra=sci_ra, sci_dec=sci_dec,
+        obstime_mjd=obstime_mjd_arr,
+        sci_ra=sci_ra_arr, sci_dec=sci_dec_arr,
         sky_near_ra=sky_near_ra, sky_near_dec=sky_near_dec,
-        sky_far_ra=sky_far_ra, sky_far_dec=sky_far_dec,
+        sky_far_ra=sky_far_ra,   sky_far_dec=sky_far_dec,
         moon_phase_deg=moon_phase_deg,
         sky_near_label=sky_near_label, sky_far_label=sky_far_label,
     )
 
-    coef_near_arr = np.asarray(coef_near, dtype=np.float32)
-    coef_far_arr  = np.asarray(coef_far,  dtype=np.float32)
     n_coef = len(ensemble["coef_names"])
-    for name, arr in (("coef_near", coef_near_arr), ("coef_far", coef_far_arr)):
-        if arr.ndim == 1:
-            arr = arr.reshape(1, -1)
+    coef_e_arr = np.asarray(coef_e, dtype=np.float32)
+    coef_w_arr = np.asarray(coef_w, dtype=np.float32)
+    if coef_e_arr.ndim == 1:
+        coef_e_arr = coef_e_arr.reshape(1, -1)
+    if coef_w_arr.ndim == 1:
+        coef_w_arr = coef_w_arr.reshape(1, -1)
+    for name, arr in (("coef_e", coef_e_arr), ("coef_w", coef_w_arr)):
         if arr.shape[1] != n_coef:
             raise ValueError(
                 f"{name} has {arr.shape[1]} columns but the ensemble expects "
                 f"{n_coef} (coef_names length).")
-    if coef_near_arr.ndim == 1:
-        coef_near_arr = coef_near_arr.reshape(1, -1)
-    if coef_far_arr.ndim == 1:
-        coef_far_arr = coef_far_arr.reshape(1, -1)
+    # Swap E/W into near/far to match the pointings above.
+    near_mask = near_is_east[:, None]
+    coef_near_arr = np.where(near_mask, coef_e_arr, coef_w_arr).astype(np.float32)
+    coef_far_arr  = np.where(near_mask, coef_w_arr, coef_e_arr).astype(np.float32)
 
     ctx_near = triplet["ctx_near"]
     ctx_far  = triplet["ctx_far"]
@@ -292,6 +343,7 @@ def predict_sky_from_minimal_inputs(
         "confidence":   confidence,
         "coef_names":   list(ensemble["coef_names"]),
         "triplet":      triplet,
+        "near_is_east": near_is_east.astype(bool),
     }
     if return_per_seed:
         result["per_seed"] = per_seed_arr.astype(np.float32)
