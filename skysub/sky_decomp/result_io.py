@@ -762,13 +762,7 @@ def results_to_fits(results, filename):
 
     iterative_result_types = []
     try:
-        from sky_decomp.lsf_surface_iterative import LSFSurfaceIterativeResult
-
-        iterative_result_types.append(LSFSurfaceIterativeResult)
-    except ModuleNotFoundError:
-        pass
-    try:
-        from skysub.sky_decomp.lsf_surface_iterative import LSFSurfaceIterativeResult
+        from .lsf_surface_iterative import LSFSurfaceIterativeResult
 
         iterative_result_types.append(LSFSurfaceIterativeResult)
     except ModuleNotFoundError:

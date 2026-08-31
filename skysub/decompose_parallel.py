@@ -26,6 +26,7 @@ os.environ["TBB_NUM_THREADS"] = "1"
 
 import argparse
 import queue as queue_mod
+import sys
 import time
 from pathlib import Path
 from concurrent.futures import ProcessPoolExecutor, wait, FIRST_COMPLETED
@@ -35,25 +36,19 @@ import numpy as np
 from astropy.io import fits
 from tqdm import tqdm
 
-try:
-    from .sky_decomp.result_io import results_to_fits
-except ImportError:  # Direct execution from the skysub/ directory.
-    from sky_decomp.result_io import results_to_fits
+# ``python /path/to/skysub/decompose_parallel.py`` puts only ``skysub/`` on
+# sys.path.  Add the repository/package root so direct-script and ``-m``
+# execution use the same fully-qualified package imports.
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-try:
-    from .sky_decomp.moon_zodi_model import (
-        DEFAULT_DATA_ROOT as DEFAULT_MOON_ZODI_DATA_ROOT,
-        DEFAULT_PALACE_DIFFUSE_SUFFIX,
-        DEFAULT_PALACE_OH_SUFFIX,
-        validate_decomposition_data_root,
-    )
-except ImportError:  # Direct execution from the skysub/ directory.
-    from sky_decomp.moon_zodi_model import (
-        DEFAULT_DATA_ROOT as DEFAULT_MOON_ZODI_DATA_ROOT,
-        DEFAULT_PALACE_DIFFUSE_SUFFIX,
-        DEFAULT_PALACE_OH_SUFFIX,
-        validate_decomposition_data_root,
-    )
+from skysub.sky_decomp.result_io import results_to_fits
+from skysub.sky_decomp.moon_zodi_model import (
+    DEFAULT_DATA_ROOT as DEFAULT_MOON_ZODI_DATA_ROOT,
+    DEFAULT_PALACE_DIFFUSE_SUFFIX,
+    DEFAULT_PALACE_OH_SUFFIX,
+    validate_decomposition_data_root,
+)
 
 try:
     from threadpoolctl import threadpool_limits
@@ -184,10 +179,7 @@ def init_worker(
         _WORKER_LSF = {}
         _WORKER_META = None
     if fit_model == "baseline":
-        try:
-            from .sky_decomp.fit import SkyDecomp
-        except ImportError:  # Direct execution from the skysub/ directory.
-            from sky_decomp.fit import SkyDecomp
+        from skysub.sky_decomp.fit import SkyDecomp
 
         _WORKER_DECOMPOSER = SkyDecomp(
             wave,
@@ -203,16 +195,10 @@ def init_worker(
             moon_interline_line_flux_threshold=0.01,
         )
     elif fit_model == "lsf-surface-iterative":
-        try:
-            from .sky_decomp.lsf_surface_iterative import (
-                LSFSurfaceIterativeConfig,
-                SkyDecompLSFSurfaceIterative,
-            )
-        except ImportError:  # Direct execution from the skysub/ directory.
-            from sky_decomp.lsf_surface_iterative import (
-                LSFSurfaceIterativeConfig,
-                SkyDecompLSFSurfaceIterative,
-            )
+        from skysub.sky_decomp.lsf_surface_iterative import (
+            LSFSurfaceIterativeConfig,
+            SkyDecompLSFSurfaceIterative,
+        )
 
         _WORKER_DECOMPOSER = SkyDecompLSFSurfaceIterative(
             wave,
@@ -229,16 +215,10 @@ def init_worker(
             ),
         )
     elif fit_model == SPLIT_ZODI_FIT_MODEL:
-        try:
-            from .sky_decomp.lsf_surface_iterative import (
-                LSFSurfaceIterativeConfig,
-                SkyDecompLSFSurfaceIterative,
-            )
-        except ImportError:  # Direct execution from the skysub/ directory.
-            from sky_decomp.lsf_surface_iterative import (
-                LSFSurfaceIterativeConfig,
-                SkyDecompLSFSurfaceIterative,
-            )
+        from skysub.sky_decomp.lsf_surface_iterative import (
+            LSFSurfaceIterativeConfig,
+            SkyDecompLSFSurfaceIterative,
+        )
 
         _WORKER_DECOMPOSER = SkyDecompLSFSurfaceIterative(
             wave,
@@ -260,16 +240,10 @@ def init_worker(
             ),
         )
     elif fit_model == MOON_ZODI_FIT_MODEL:
-        try:
-            from .sky_decomp.lsf_surface_iterative import LSFSurfaceIterativeConfig
-            from .sky_decomp.moon_zodi_lsf_surface_iterative import (
-                SkyDecompMoonZodiLSFSurfaceIterative,
-            )
-        except ImportError:  # Direct execution from the skysub/ directory.
-            from sky_decomp.lsf_surface_iterative import LSFSurfaceIterativeConfig
-            from sky_decomp.moon_zodi_lsf_surface_iterative import (
-                SkyDecompMoonZodiLSFSurfaceIterative,
-            )
+        from skysub.sky_decomp.lsf_surface_iterative import LSFSurfaceIterativeConfig
+        from skysub.sky_decomp.moon_zodi_lsf_surface_iterative import (
+            SkyDecompMoonZodiLSFSurfaceIterative,
+        )
         _WORKER_DECOMPOSER = SkyDecompMoonZodiLSFSurfaceIterative(
             wave,
             lsf_sigma=lsf_sigma,
@@ -332,10 +306,7 @@ def _text_value(value):
 
 
 def _moon_zodi_observation(kind, row_index):
-    try:
-        from .sky_decomp.moon_zodi_model import MoonZodiObservation
-    except ImportError:  # Direct execution from the skysub/ directory.
-        from sky_decomp.moon_zodi_model import MoonZodiObservation
+    from skysub.sky_decomp.moon_zodi_model import MoonZodiObservation
 
     role_contract = {
         "sci": ("sci", "sci_ra", "sci_dec"),

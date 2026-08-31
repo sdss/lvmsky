@@ -1,4 +1,6 @@
+import os
 from pathlib import Path
+import subprocess
 import sys
 from types import SimpleNamespace
 
@@ -8,6 +10,22 @@ import pytest
 from skysub import decompose_parallel
 from skysub.sky_decomp.fit import SkyDecomp
 from skysub.sky_decomp.lsf_surface_iterative import SkyDecompLSFSurfaceIterative
+
+
+def test_decompose_parallel_direct_script_imports_package_from_any_cwd(tmp_path):
+    env = os.environ.copy()
+    env["PYTHONPATH"] = ""
+    completed = subprocess.run(
+        [sys.executable, str(Path(decompose_parallel.__file__).resolve()), "--help"],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "LVM sky spectral decomposition" in completed.stdout
 
 
 def _path_only_model(tmp_path, palace_suffix):
