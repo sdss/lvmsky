@@ -2,9 +2,8 @@
 
 This directory is the portable data root for
 `SkyDecompMoonZodiLSFSurfaceIterative`. It contains the physical Moon/Zodi
-model, the versioned PALACE tables selected by the runtime contract, and an
-unchanged copy of the Meftah SOLAR-HRS text spectrum used by the historical
-decomposition.
+model, the exact PALACE tables used by the validated fit, and an unchanged copy
+of the Meftah SOLAR-HRS text spectrum used by the historical decomposition.
 
 The historical `SkyDecomp` and `SkyDecompLSFSurfaceIterative` defaults are not
 redirected here. Their existing `base_dir` and `skysub/palace` contracts remain
@@ -26,7 +25,6 @@ data/
 │   ├── eso_skycalc_rolo_moon_albedo.dat
 │   └── eso_skycalc_leinert_zodiacal_light.dat
 └── palace/PMD/
-    ├── pmd_popmodel_OH_moon_zodi_oh_flat_family_v1.dat
     ├── pmd_popmodel_OH_joint_v2_updated.dat
     ├── pmd_refcont_joint_native_adam_invsky_p2_10000iter.dat
     ├── pmd_intdata_atom.dat
@@ -112,9 +110,8 @@ under CC BY 4.0 and code under GPLv3.
 
 The new method needs exactly five PALACE-compatible ASCII tables:
 
-- `pmd_popmodel_OH_moon_zodi_oh_flat_family_v1.dat`: current runtime
-  default OH population table. It is the byte-identical export of the terminal
-  30,000-step coefficients from `experiments_moon_zodi_oh_flat_family_adam_v1`;
+- `pmd_popmodel_OH_joint_v2_updated.dat`: frozen repository OH population
+  table used by the Moon/Zodi model training and assessment;
 - `pmd_refcont_joint_native_adam_invsky_p2_10000iter.dat`: experimental
   native-LVM HO2, FeO, and O2Ac continuum export; its header records the
   unchanged grid, optimizer, source hash, and diagnostic status;
@@ -128,15 +125,6 @@ PALACE v1.0 products. Their scientific provenance is retained in their headers
 and in `bundle_manifest.json`. The three remaining tables are copied unchanged
 from the local PALACE v1.0 installation. The original files under
 `skysub/palace/PMD/` remain in place for backward compatibility.
-
-The previous `pmd_popmodel_OH_joint_v2_updated.dat` table remains in this
-directory for callers that select its suffix explicitly, but it is no longer
-the Moon/Zodi LSF-surface default. The new default changes only OH `Aij`
-coefficients relative to unsuffixed PALACE; all other table columns are
-elementwise identical. Its held-out assessment status remains
-`diagnostic_failed_declared_holdout_gates` because the [O I] 5577 window failed
-the declared non-regression gate. The default promotion is therefore an
-explicit project choice, not a claim that every scientific gate passed.
 
 ## Runtime selection
 

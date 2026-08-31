@@ -152,6 +152,10 @@ def test_dataclass_field_order_and_defaults():
         "vector_o2",
         "o2_prefit_amp",
         "bestfit_lsf_sigma",
+        "zodi_names",
+        "zodi_knots",
+        "coef_cov_moon",
+        "coef_cov_zodi",
         "lsf_state",
     )
 

@@ -93,9 +93,20 @@ _WORKER_EXPOSURE_SECONDS = 900.0
 FIT_MODEL_SUFFIXES = {
     "baseline": "",
     "lsf-surface-iterative": "_lsf_surface_iterative",
+    "lsf-surface-iterative-split-zodi": "_lsf_surface_iterative_split_zodi",
     "moon-zodi-lsf-surface-iterative": "_moon_zodi_lsf_surface_iterative",
 }
 MOON_ZODI_FIT_MODEL = "moon-zodi-lsf-surface-iterative"
+SPLIT_ZODI_FIT_MODEL = "lsf-surface-iterative-split-zodi"
+
+# Defaults for the SkyDecompLSFSurfaceIterative(split_zodi=True) knobs; match the
+# settings validated on the p40_p70 every10 identifiability notebook.
+SPLIT_ZODI_N_KNOTS_DEFAULT = 3
+SPLIT_ZODI_SMOOTH_LAMBDA_DEFAULT = 1.0e-1
+SPLIT_ZODI_MOON_ALBEDO_PHASE_DEG = 30.0
+SPLIT_ZODI_COLOR_EXPONENT = 0.26
+# Moon_bs interior-knot count; matches SkyDecomp.__init__ default in fit.py.
+MOON_N_KNOTS_DEFAULT = 25
 
 
 def init_worker(
@@ -115,6 +126,9 @@ def init_worker(
     palace_diffuse_suffix=None,
     exposure_seconds=900.0,
     moon_zodi_data_root=None,
+    n_spline_knots=MOON_N_KNOTS_DEFAULT,
+    n_zodi_spline_knots=SPLIT_ZODI_N_KNOTS_DEFAULT,
+    zodi_smooth_lambda=SPLIT_ZODI_SMOOTH_LAMBDA_DEFAULT,
 ):
     """Initialise one SkyDecomp instance per worker process."""
     global \
@@ -196,6 +210,32 @@ def init_worker(
             palace_diffuse_suffix=palace_diffuse_suffix,
             moon_smooth_lambda=0.1,
             moon_interline_boost=0.0,
+            n_spline_knots=int(n_spline_knots),
+            config=LSFSurfaceIterativeConfig(
+                n_refinement_cycles=n_refinement_cycles,
+            ),
+        )
+    elif fit_model == SPLIT_ZODI_FIT_MODEL:
+        from sky_decomp.lsf_surface_iterative import (
+            LSFSurfaceIterativeConfig,
+            SkyDecompLSFSurfaceIterative,
+        )
+
+        _WORKER_DECOMPOSER = SkyDecompLSFSurfaceIterative(
+            wave,
+            lsf_sigma=lsf_sigma,
+            base_dir=base_dir,
+            palace_suffix=palace_suffix,
+            palace_oh_suffix=palace_oh_suffix,
+            palace_diffuse_suffix=palace_diffuse_suffix,
+            moon_smooth_lambda=0.1,
+            moon_interline_boost=0.0,
+            n_spline_knots=int(n_spline_knots),
+            split_zodi=True,
+            n_zodi_spline_knots=int(n_zodi_spline_knots),
+            zodi_smooth_lambda=float(zodi_smooth_lambda),
+            moon_albedo_fiducial_phase_deg=SPLIT_ZODI_MOON_ALBEDO_PHASE_DEG,
+            zodi_color_exponent=SPLIT_ZODI_COLOR_EXPONENT,
             config=LSFSurfaceIterativeConfig(
                 n_refinement_cycles=n_refinement_cycles,
             ),
@@ -305,7 +345,6 @@ def fit_chunk_worker(args):
     global _WORKER_DECOMPOSER, _WORKER_FACTOR, _WORKER_PROGRESS_QUEUE, _WORKER_FIT_MODEL
     if _WORKER_DECOMPOSER is None:
         raise RuntimeError("Worker SkyDecomp has not been initialised.")
-
     kind, idx0, idx1 = args
     flux_chunk = np.asarray(_WORKER_FLUX[kind][idx0:idx1], dtype=np.float64)
     out = []
@@ -321,6 +360,12 @@ def fit_chunk_worker(args):
                 n_lsf_refits=3,
             )
         elif _WORKER_FIT_MODEL == "lsf-surface-iterative":
+            result = _WORKER_DECOMPOSER.fit(
+                flux_row,
+                ivar_row,
+                verbose=False,
+            )
+        elif _WORKER_FIT_MODEL == SPLIT_ZODI_FIT_MODEL:
             result = _WORKER_DECOMPOSER.fit(
                 flux_row,
                 ivar_row,
@@ -413,6 +458,9 @@ def run(
     palace_diffuse_suffix=None,
     exposure_seconds=900.0,
     moon_zodi_data_root=None,
+    n_spline_knots=MOON_N_KNOTS_DEFAULT,
+    n_zodi_spline_knots=SPLIT_ZODI_N_KNOTS_DEFAULT,
+    zodi_smooth_lambda=SPLIT_ZODI_SMOOTH_LAMBDA_DEFAULT,
 ):
     base_dir, resolved_moon_zodi_data_root = resolve_runtime_data_roots(
         fit_model,
@@ -442,6 +490,12 @@ def run(
     print(f"  exposure_seconds_fallback={exposure_seconds}")
     if fit_model == MOON_ZODI_FIT_MODEL:
         print(f"  moon_zodi_data_root={str(resolved_moon_zodi_data_root)!r}")
+    if fit_model in ("lsf-surface-iterative", SPLIT_ZODI_FIT_MODEL):
+        print(f"  n_spline_knots={n_spline_knots} "
+              f"(Moon_bs basis = {int(n_spline_knots) + 4})")
+    if fit_model == SPLIT_ZODI_FIT_MODEL:
+        print(f"  n_zodi_spline_knots={n_zodi_spline_knots}, "
+              f"zodi_smooth_lambda={zodi_smooth_lambda}")
     print(f"  pin_workers={pin_workers}, diagnose_threads={diagnose_threads}")
     print(f"  base_dir={base_dir}")
 
@@ -491,6 +545,9 @@ def run(
                 if resolved_moon_zodi_data_root is None
                 else str(resolved_moon_zodi_data_root)
             ),
+            int(n_spline_knots),
+            int(n_zodi_spline_knots),
+            float(zodi_smooth_lambda),
         ),
     ) as executor:
         pbar = tqdm(
@@ -618,6 +675,9 @@ def extract_meta_and_coef_products(
             ]
             if "COEF_ERR" in hdul_dec:
                 compact_hdus.append(_copy_hdu_with_name(hdul_dec["COEF_ERR"], "COEF_ERR"))
+            for cov_name in ("COEF_COV_MOON", "COEF_COV_ZODI"):
+                if cov_name in hdul_dec:
+                    compact_hdus.append(_copy_hdu_with_name(hdul_dec[cov_name], cov_name))
             lsf_extensions = ("LSF_COEF", "LSF_KNOTS", "LSF_META")
             present = [name in hdul_dec for name in lsf_extensions]
             if any(present) and not all(present):
@@ -810,6 +870,34 @@ def main():
         ),
     )
     parser.add_argument(
+        "--n-spline-knots",
+        type=int,
+        default=MOON_N_KNOTS_DEFAULT,
+        help=(
+            f"Interior B-spline knots for Moon_bs when --fit-model is "
+            f"lsf-surface-iterative or {SPLIT_ZODI_FIT_MODEL} "
+            f"(default: {MOON_N_KNOTS_DEFAULT}; Moon_bs basis = knots + 4)."
+        ),
+    )
+    parser.add_argument(
+        "--n-zodi-spline-knots",
+        type=int,
+        default=SPLIT_ZODI_N_KNOTS_DEFAULT,
+        help=(
+            f"Interior B-spline knots for Zodi_bs when "
+            f"--fit-model={SPLIT_ZODI_FIT_MODEL} (default: {SPLIT_ZODI_N_KNOTS_DEFAULT})."
+        ),
+    )
+    parser.add_argument(
+        "--zodi-smooth-lambda",
+        type=float,
+        default=SPLIT_ZODI_SMOOTH_LAMBDA_DEFAULT,
+        help=(
+            f"Curvature penalty on the Zodi_bs spline when "
+            f"--fit-model={SPLIT_ZODI_FIT_MODEL} (default: {SPLIT_ZODI_SMOOTH_LAMBDA_DEFAULT})."
+        ),
+    )
+    parser.add_argument(
         "--limit",
         type=int,
         default=None,
@@ -889,6 +977,9 @@ def main():
             palace_diffuse_suffix=args.palace_diffuse_suffix,
             exposure_seconds=args.exposure_seconds,
             moon_zodi_data_root=args.moon_zodi_data_root,
+            n_spline_knots=args.n_spline_knots,
+            n_zodi_spline_knots=args.n_zodi_spline_knots,
+            zodi_smooth_lambda=args.zodi_smooth_lambda,
         )
 
         extract_meta_and_coef_products(

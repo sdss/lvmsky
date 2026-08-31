@@ -138,6 +138,12 @@ class _FitRun:
     solver_status: str
     continuum_status: str = "not_run"
     line_status: str = "not_run"
+    # Persisted covariance sub-blocks captured from the final continuum-stage
+    # ``_fit_design`` return (2D arrays sized (n_moon, n_moon) and
+    # (n_zodi, n_zodi)).  ``None`` when the block was not present in the
+    # solve.  These are what get written to disk as ``COEF_COV_*`` HDUs.
+    coef_cov_moon: np.ndarray | None = None
+    coef_cov_zodi: np.ndarray | None = None
 
 
 def _wave_fingerprint(wave: np.ndarray) -> tuple[int, float, float, str]:
@@ -1114,9 +1120,15 @@ def _nominal_lsf_state(
 class SkyDecompLSFSurfaceIterative(SkyDecomp):
     """Iteratively refine continuum, smooth LSF, and emission-line amplitudes."""
 
-    _CONTINUUM_KEYS = ("moon", "diffuse")
     _LINE_KEYS = ("oh", "atom", "orc", "o2")
     _SOLVED = {"Solved", "AlmostSolved"}
+
+    @property
+    def _CONTINUUM_KEYS(self) -> tuple[str, ...]:
+        """Continuum block order.  Grows to include ``zodi`` when split_zodi=True."""
+        if getattr(self, "split_zodi", False):
+            return ("moon", "zodi", "diffuse")
+        return ("moon", "diffuse")
 
     def __init__(
         self,
@@ -1299,7 +1311,10 @@ class SkyDecompLSFSurfaceIterative(SkyDecomp):
         components: dict[str, np.ndarray],
     ) -> np.ndarray:
         """Return the additive continuum represented by the public components."""
-        return components["moon"] + components["diffuse"]
+        total = components["moon"] + components["diffuse"]
+        if "zodi" in components:
+            total = total + components["zodi"]
+        return total
 
     @staticmethod
     def _relative_change(new: np.ndarray, old: np.ndarray) -> float:
@@ -1363,12 +1378,22 @@ class SkyDecompLSFSurfaceIterative(SkyDecomp):
         )
         design = self._stack_matrices(run.matrices, self._CONTINUUM_KEYS)
         n_moon = run.matrices["moon"].shape[0]
+        # Continuum stack order: moon [, zodi], diffuse.  Zodi occupies the block
+        # immediately after moon when split_zodi is on.
+        if getattr(self, "split_zodi", False) and "zodi" in run.matrices and run.matrices["zodi"].shape[0] > 0:
+            n_zodi = run.matrices["zodi"].shape[0]
+            zodi_slice_local = slice(n_moon, n_moon + n_zodi)
+            diffuse_slice_local = slice(n_moon + n_zodi, design.shape[0])
+        else:
+            zodi_slice_local = None
+            diffuse_slice_local = slice(n_moon, design.shape[0])
         fit = self._fit_design(
             design,
             flux - run.line_model,
             weights,
             moon_slice=slice(0, n_moon),
-            diffuse_slice=slice(n_moon, design.shape[0]),
+            diffuse_slice=diffuse_slice_local,
+            zodi_slice=zodi_slice_local,
         )
         if str(fit["status"]) not in self._SOLVED:
             return fit, None, None, None, weights, channel_noise
@@ -1387,6 +1412,7 @@ class SkyDecompLSFSurfaceIterative(SkyDecomp):
     ) -> tuple[dict[str, object], np.ndarray, _FitRun]:
         """Run the nominal seed, refinement transactions, and final closure."""
         # Nominal joint seed.
+        split_zodi = getattr(self, "split_zodi", False)
         matrices = self._matrix_bundle(
             self.matrix_oh,
             self.matrix_moon,
@@ -1394,11 +1420,11 @@ class SkyDecompLSFSurfaceIterative(SkyDecomp):
             self.matrix_atom,
             self.matrix_orc,
             self.matrix_o2,
+            matrix_zodi=self.matrix_zodi if split_zodi else None,
         )
-        full_design = self._stack_matrices(
-            matrices,
-            ("oh", "moon", "diffuse", "atom", "orc", "o2"),
-        )
+        full_keys = (("oh", "moon", "zodi", "diffuse", "atom", "orc", "o2")
+                     if split_zodi else ("oh", "moon", "diffuse", "atom", "orc", "o2"))
+        full_design = self._stack_matrices(matrices, full_keys)
         slices = self._component_slices(matrices)
         seed = self._fit_design(
             full_design,
@@ -1406,6 +1432,7 @@ class SkyDecompLSFSurfaceIterative(SkyDecomp):
             ivar,
             moon_slice=slices["moon"],
             diffuse_slice=slices["diffuse"],
+            zodi_slice=slices.get("zodi"),
         )
         seed_coefficient = np.asarray(seed["coef"], dtype=float)
         seed_coef_err = np.asarray(
@@ -1565,6 +1592,8 @@ class SkyDecompLSFSurfaceIterative(SkyDecomp):
             run.matrices = matrices
             run.continuum_coefficient = candidate_coefficient
             run.continuum_coef_err = candidate_coef_err
+            run.coef_cov_moon = continuum_fit.get("coef_cov_moon")
+            run.coef_cov_zodi = continuum_fit.get("coef_cov_zodi")
             run.line_coefficient = candidate_line_coefficient
             run.line_coef_err = candidate_line_coef_err
             run.continuum = candidate_continuum
@@ -1644,6 +1673,8 @@ class SkyDecompLSFSurfaceIterative(SkyDecomp):
                     )
                     run.continuum_coefficient = candidate_coefficient
                     run.continuum_coef_err = candidate_coef_err
+                    run.coef_cov_moon = continuum_fit.get("coef_cov_moon")
+                    run.coef_cov_zodi = continuum_fit.get("coef_cov_zodi")
                     run.line_coefficient = candidate_line_coefficient
                     run.line_coef_err = candidate_line_coef_err
                     run.continuum = candidate_continuum
@@ -1691,6 +1722,7 @@ class SkyDecompLSFSurfaceIterative(SkyDecomp):
             + _sigma_comps["atom"] ** 2
             + _sigma_comps["orc"] ** 2
             + _sigma_comps["o2"] ** 2
+            + (_sigma_comps["zodi"] ** 2 if "zodi" in _sigma_comps else 0.0)
         )
         continuum = self._continuum_from_components(components)
         line_model = (
@@ -1812,6 +1844,8 @@ class SkyDecompLSFSurfaceIterative(SkyDecomp):
             o2_prefit_amp=float(self.o2_prefit_amp),
             bestfit_lsf_sigma=bestfit_lsf_sigma,
             lsf_state=self.lsf_surface_state,
+            coef_cov_moon=run.coef_cov_moon,
+            coef_cov_zodi=run.coef_cov_zodi,
         )
 
     def fit(
