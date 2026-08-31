@@ -36,19 +36,19 @@ from astropy.io import fits
 from tqdm import tqdm
 
 try:
+    from .sky_decomp.result_io import results_to_fits
+except ImportError:  # Direct execution from the skysub/ directory.
     from sky_decomp.result_io import results_to_fits
-except ModuleNotFoundError:
-    from skysub.sky_decomp.result_io import results_to_fits
 
 try:
-    from sky_decomp.moon_zodi_model import (
+    from .sky_decomp.moon_zodi_model import (
         DEFAULT_DATA_ROOT as DEFAULT_MOON_ZODI_DATA_ROOT,
         DEFAULT_PALACE_DIFFUSE_SUFFIX,
         DEFAULT_PALACE_OH_SUFFIX,
         validate_decomposition_data_root,
     )
-except ModuleNotFoundError:
-    from skysub.sky_decomp.moon_zodi_model import (
+except ImportError:  # Direct execution from the skysub/ directory.
+    from sky_decomp.moon_zodi_model import (
         DEFAULT_DATA_ROOT as DEFAULT_MOON_ZODI_DATA_ROOT,
         DEFAULT_PALACE_DIFFUSE_SUFFIX,
         DEFAULT_PALACE_OH_SUFFIX,
@@ -184,7 +184,10 @@ def init_worker(
         _WORKER_LSF = {}
         _WORKER_META = None
     if fit_model == "baseline":
-        from sky_decomp.fit import SkyDecomp
+        try:
+            from .sky_decomp.fit import SkyDecomp
+        except ImportError:  # Direct execution from the skysub/ directory.
+            from sky_decomp.fit import SkyDecomp
 
         _WORKER_DECOMPOSER = SkyDecomp(
             wave,
@@ -200,10 +203,16 @@ def init_worker(
             moon_interline_line_flux_threshold=0.01,
         )
     elif fit_model == "lsf-surface-iterative":
-        from sky_decomp.lsf_surface_iterative import (
-            LSFSurfaceIterativeConfig,
-            SkyDecompLSFSurfaceIterative,
-        )
+        try:
+            from .sky_decomp.lsf_surface_iterative import (
+                LSFSurfaceIterativeConfig,
+                SkyDecompLSFSurfaceIterative,
+            )
+        except ImportError:  # Direct execution from the skysub/ directory.
+            from sky_decomp.lsf_surface_iterative import (
+                LSFSurfaceIterativeConfig,
+                SkyDecompLSFSurfaceIterative,
+            )
 
         _WORKER_DECOMPOSER = SkyDecompLSFSurfaceIterative(
             wave,
@@ -220,10 +229,16 @@ def init_worker(
             ),
         )
     elif fit_model == SPLIT_ZODI_FIT_MODEL:
-        from sky_decomp.lsf_surface_iterative import (
-            LSFSurfaceIterativeConfig,
-            SkyDecompLSFSurfaceIterative,
-        )
+        try:
+            from .sky_decomp.lsf_surface_iterative import (
+                LSFSurfaceIterativeConfig,
+                SkyDecompLSFSurfaceIterative,
+            )
+        except ImportError:  # Direct execution from the skysub/ directory.
+            from sky_decomp.lsf_surface_iterative import (
+                LSFSurfaceIterativeConfig,
+                SkyDecompLSFSurfaceIterative,
+            )
 
         _WORKER_DECOMPOSER = SkyDecompLSFSurfaceIterative(
             wave,
@@ -245,10 +260,16 @@ def init_worker(
             ),
         )
     elif fit_model == MOON_ZODI_FIT_MODEL:
-        from sky_decomp.lsf_surface_iterative import LSFSurfaceIterativeConfig
-        from sky_decomp.moon_zodi_lsf_surface_iterative import (
-            SkyDecompMoonZodiLSFSurfaceIterative,
-        )
+        try:
+            from .sky_decomp.lsf_surface_iterative import LSFSurfaceIterativeConfig
+            from .sky_decomp.moon_zodi_lsf_surface_iterative import (
+                SkyDecompMoonZodiLSFSurfaceIterative,
+            )
+        except ImportError:  # Direct execution from the skysub/ directory.
+            from sky_decomp.lsf_surface_iterative import LSFSurfaceIterativeConfig
+            from sky_decomp.moon_zodi_lsf_surface_iterative import (
+                SkyDecompMoonZodiLSFSurfaceIterative,
+            )
         _WORKER_DECOMPOSER = SkyDecompMoonZodiLSFSurfaceIterative(
             wave,
             lsf_sigma=lsf_sigma,
@@ -311,7 +332,10 @@ def _text_value(value):
 
 
 def _moon_zodi_observation(kind, row_index):
-    from sky_decomp.moon_zodi_model import MoonZodiObservation
+    try:
+        from .sky_decomp.moon_zodi_model import MoonZodiObservation
+    except ImportError:  # Direct execution from the skysub/ directory.
+        from sky_decomp.moon_zodi_model import MoonZodiObservation
 
     role_contract = {
         "sci": ("sci", "sci_ra", "sci_dec"),

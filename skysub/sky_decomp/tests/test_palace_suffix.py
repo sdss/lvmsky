@@ -144,7 +144,11 @@ def test_parallel_worker_propagates_suffix_to_lsf_surface_model(monkeypatch):
         "FLUX_SKY_NEAR": SimpleNamespace(data=np.empty((1, 2))),
         "FLUX_SKY_FAR": SimpleNamespace(data=np.empty((1, 2))),
     }
-    monkeypatch.setitem(sys.modules, "sky_decomp.lsf_surface_iterative", fake_module)
+    monkeypatch.setitem(
+        sys.modules,
+        "skysub.sky_decomp.lsf_surface_iterative",
+        fake_module,
+    )
     monkeypatch.setattr(decompose_parallel, "_clamp_native_threads", lambda *args: None)
     monkeypatch.setattr(decompose_parallel.fits, "open", lambda *args, **kwargs: fake_hdul)
 
