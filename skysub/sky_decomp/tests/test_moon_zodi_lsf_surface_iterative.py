@@ -86,7 +86,7 @@ def fitted_case():
     assert decomposer.data_root == DEFAULT_DATA_ROOT.resolve()
     assert decomposer.base_dir == DEFAULT_DATA_ROOT.resolve()
     assert decomposer.pmd_dir == DEFAULT_DATA_ROOT.resolve() / "palace" / "PMD"
-    assert decomposer.palace_oh_suffix == "_joint_v2_updated"
+    assert decomposer.palace_oh_suffix == "_h_family_default_ef_v1"
     assert (
         decomposer.palace_diffuse_suffix
         == "_joint_native_adam_invsky_p2_10000iter"

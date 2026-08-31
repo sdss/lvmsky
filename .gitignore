@@ -75,6 +75,7 @@ lvmsframe_*
 !skysub/sky_decomp/data/palace/PMD/pmd_intdata_atom.dat
 !skysub/sky_decomp/data/palace/PMD/pmd_intmodel_Orc.dat
 !skysub/sky_decomp/data/palace/PMD/pmd_popmodel_O2.dat
+!skysub/sky_decomp/data/palace/PMD/pmd_popmodel_OH_h_family_default_ef_v1.dat
 !skysub/sky_decomp/data/palace/PMD/pmd_popmodel_OH_joint_v2_updated.dat
 !skysub/sky_decomp/data/palace/PMD/pmd_popmodel_OH_moon_zodi_oh_flat_family_v1.dat
 !skysub/sky_decomp/data/palace/PMD/pmd_refcont_joint_native_adam_invsky_p2_10000iter.dat

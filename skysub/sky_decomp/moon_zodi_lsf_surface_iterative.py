@@ -196,6 +196,7 @@ class SkyDecompMoonZodiLSFSurfaceIterative(SkyDecompLSFSurfaceIterative):
             np.zeros_like(self.wave),
             fallback,
             self.config,
+            spline_config=self.spline_config,
         )
         for channel in lsf_state.coefficients:
             lsf_state.coefficients[channel] = np.full_like(

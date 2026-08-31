@@ -43,11 +43,15 @@ except ModuleNotFoundError:
 try:
     from sky_decomp.moon_zodi_model import (
         DEFAULT_DATA_ROOT as DEFAULT_MOON_ZODI_DATA_ROOT,
+        DEFAULT_PALACE_DIFFUSE_SUFFIX,
+        DEFAULT_PALACE_OH_SUFFIX,
         validate_decomposition_data_root,
     )
 except ModuleNotFoundError:
     from skysub.sky_decomp.moon_zodi_model import (
         DEFAULT_DATA_ROOT as DEFAULT_MOON_ZODI_DATA_ROOT,
+        DEFAULT_PALACE_DIFFUSE_SUFFIX,
+        DEFAULT_PALACE_OH_SUFFIX,
         validate_decomposition_data_root,
     )
 
@@ -424,11 +428,46 @@ def resolve_runtime_data_roots(
         validate_decomposition_data_root(str(data_root))
         return data_root, data_root
 
+    if fit_model == SPLIT_ZODI_FIT_MODEL and (
+        moon_zodi_data_root is not None or palace_dir is None
+    ):
+        candidate = (
+            moon_zodi_data_root
+            if moon_zodi_data_root is not None
+            else DEFAULT_MOON_ZODI_DATA_ROOT
+        )
+        data_root = Path(candidate).expanduser().resolve()
+        validate_decomposition_data_root(str(data_root))
+        return data_root, data_root
+
+    if fit_model == SPLIT_ZODI_FIT_MODEL and palace_dir is not None:
+        candidate = Path(palace_dir).expanduser().resolve()
+        if (candidate / "bundle_manifest.json").is_file():
+            validate_decomposition_data_root(str(candidate))
+            return candidate, candidate
+
     if palace_dir is None:
         raise ValueError(
-            "palace_dir is required for baseline and lsf-surface-iterative fits"
+            "palace_dir is required for baseline and non-split "
+            "lsf-surface-iterative fits"
         )
     return resolve_base_dir(palace_dir), None
+
+
+def resolve_palace_suffixes(
+    *,
+    bundled_data_root,
+    palace_suffix=None,
+    palace_oh_suffix=None,
+    palace_diffuse_suffix=None,
+):
+    """Select the bundle's frozen OH/diffuse tables unless explicitly overridden."""
+    if bundled_data_root is not None and palace_suffix is None:
+        if palace_oh_suffix is None:
+            palace_oh_suffix = DEFAULT_PALACE_OH_SUFFIX
+        if palace_diffuse_suffix is None:
+            palace_diffuse_suffix = DEFAULT_PALACE_DIFFUSE_SUFFIX
+    return palace_suffix, palace_oh_suffix, palace_diffuse_suffix
 
 
 def _iter_chunk_tasks(n_rows, chunk_size):
@@ -467,6 +506,12 @@ def run(
         palace_dir=palace_dir,
         moon_zodi_data_root=moon_zodi_data_root,
     )
+    palace_suffix, palace_oh_suffix, palace_diffuse_suffix = resolve_palace_suffixes(
+        bundled_data_root=resolved_moon_zodi_data_root,
+        palace_suffix=palace_suffix,
+        palace_oh_suffix=palace_oh_suffix,
+        palace_diffuse_suffix=palace_diffuse_suffix,
+    )
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -488,8 +533,8 @@ def run(
     print(f"  palace_oh_suffix={palace_oh_suffix!r}")
     print(f"  palace_diffuse_suffix={palace_diffuse_suffix!r}")
     print(f"  exposure_seconds_fallback={exposure_seconds}")
-    if fit_model == MOON_ZODI_FIT_MODEL:
-        print(f"  moon_zodi_data_root={str(resolved_moon_zodi_data_root)!r}")
+    if resolved_moon_zodi_data_root is not None:
+        print(f"  bundled_data_root={str(resolved_moon_zodi_data_root)!r}")
     if fit_model in ("lsf-surface-iterative", SPLIT_ZODI_FIT_MODEL):
         print(f"  n_spline_knots={n_spline_knots} "
               f"(Moon_bs basis = {int(n_spline_knots) + 4})")
@@ -794,8 +839,9 @@ def main():
         nargs="?",
         default=None,
         help=(
-            "Legacy project/PALACE root. Required by baseline and "
-            "lsf-surface-iterative; optional bundle root for the Moon/Zodi mode."
+            "Legacy project/PALACE root, or a complete bundled data root containing "
+            "bundle_manifest.json. Required by baseline and non-split "
+            "lsf-surface-iterative; optional for split-zodi and Moon/Zodi modes."
         ),
     )
     parser.add_argument(
@@ -838,7 +884,8 @@ def main():
             "Optional suffix for versioned pmd_popmodel_OH and pmd_refcont files. "
             "The suffix is appended exactly; for example, '_adam_v1' selects "
             "pmd_popmodel_OH_adam_v1.dat and "
-            "pmd_refcont_adam_v1.dat (default: canonical unsuffixed files)."
+            "pmd_refcont_adam_v1.dat (legacy default: canonical unsuffixed "
+            "files; bundled Moon/Zodi modes use their manifest defaults)."
         ),
     )
     parser.add_argument(
@@ -866,7 +913,8 @@ def main():
         default=None,
         help=(
             "Complete data root containing moon_zodi/ and palace/PMD for the "
-            "Moon/Zodi method (default: packaged skysub/sky_decomp/data)."
+            "Moon/Zodi or split-zodi method (default for both: packaged "
+            "skysub/sky_decomp/data)."
         ),
     )
     parser.add_argument(
@@ -946,11 +994,12 @@ def main():
         )
     if (
         not args.only_thin
-        and args.fit_model != MOON_ZODI_FIT_MODEL
+        and args.fit_model not in (MOON_ZODI_FIT_MODEL, SPLIT_ZODI_FIT_MODEL)
         and args.palace_dir is None
     ):
         parser.error(
-            "palace_dir is required for baseline and lsf-surface-iterative fits"
+            "palace_dir is required for baseline and non-split "
+            "lsf-surface-iterative fits"
         )
 
     suffix = FIT_MODEL_SUFFIXES[args.fit_model]

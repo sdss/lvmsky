@@ -99,6 +99,7 @@ def test_reconstruct_component_spectra_no_coef_err_backward_compat(_model_setup)
     out = reconstruct_component_spectra(wave=wave, coef=coef, lsf_sigma=1.5)
     assert "sigma" not in out
     assert "sigma_total" not in out
+    assert "zodi" not in out
 
 
 def test_diffuse_sigma_is_quadrature_sum(_model_setup):

@@ -39,7 +39,7 @@ FORMULA_VERSION = "moon-zodi-geometry-v1"
 CORRECTION_SCOPE = "moon_plus_zodi"
 DATA_BUNDLE_SCHEMA_VERSION = 1
 DATA_BUNDLE_ID = "sky_decomp_moon_zodi_lsf_surface_iterative_v1"
-DEFAULT_PALACE_OH_SUFFIX = "_joint_v2_updated"
+DEFAULT_PALACE_OH_SUFFIX = "_h_family_default_ef_v1"
 DEFAULT_PALACE_DIFFUSE_SUFFIX = "_joint_native_adam_invsky_p2_10000iter"
 EPHEMERIS_ASSET = "jpl_de432s_short_planetary_ephemeris.bsp"
 SOLAR_ASSET = (
@@ -112,8 +112,22 @@ def validate_decomposition_data_root(data_root: str) -> dict[str, object]:
     ):
         raise ValueError("Sky decomposition PALACE suffix contract changed")
     records = palace.get("assets")
-    if not isinstance(records, list) or len(records) != 5:
-        raise ValueError("Sky decomposition data bundle must describe five PALACE assets")
+    if not isinstance(records, list):
+        raise ValueError("Sky decomposition data bundle lacks PALACE asset records")
+    required_palace_paths = {
+        f"palace/PMD/pmd_popmodel_OH{DEFAULT_PALACE_OH_SUFFIX}.dat",
+        f"palace/PMD/pmd_refcont{DEFAULT_PALACE_DIFFUSE_SUFFIX}.dat",
+        "palace/PMD/pmd_intdata_atom.dat",
+        "palace/PMD/pmd_intmodel_Orc.dat",
+        "palace/PMD/pmd_popmodel_O2.dat",
+    }
+    recorded_palace_paths = {str(record.get("path")) for record in records}
+    missing_palace_paths = required_palace_paths - recorded_palace_paths
+    if missing_palace_paths:
+        raise ValueError(
+            "Sky decomposition data bundle lacks required PALACE assets: "
+            + ", ".join(sorted(missing_palace_paths))
+        )
     for record in records:
         path = root / str(record["path"])
         expected = str(record["sha256"])

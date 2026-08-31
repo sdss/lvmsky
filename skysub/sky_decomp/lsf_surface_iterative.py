@@ -87,6 +87,77 @@ class LSFSurfaceIterativeConfig:
             raise ValueError("blue_fit_lower must be finite")
 
 
+@dataclass(frozen=True, slots=True)
+class LSFChannelSplineConfig:
+    """One channel's wavelength B-spline representation.
+
+    ``information`` reproduces the existing first-cycle information-quantile
+    knots. ``uniform`` spaces the interior knots uniformly in wavelength, and
+    ``explicit`` uses the supplied interior wavelengths verbatim. The full
+    clamped knot vector is persisted in :class:`LSFSurfaceState` in every case.
+    """
+
+    n_basis: int = 6
+    degree: int = 3
+    knot_strategy: str = "information"
+    interior_knots: tuple[float, ...] = ()
+
+    def __post_init__(self) -> None:
+        for name in ("n_basis", "degree"):
+            value = getattr(self, name)
+            if isinstance(value, (bool, np.bool_)) or not isinstance(
+                value,
+                (int, np.integer),
+            ):
+                raise TypeError(f"{name} must be an integer")
+        if self.degree < 0:
+            raise ValueError("degree must be nonnegative")
+        if self.n_basis < self.degree + 1:
+            raise ValueError("n_basis must be at least degree + 1")
+        if self.knot_strategy not in {"information", "uniform", "explicit"}:
+            raise ValueError(
+                "knot_strategy must be 'information', 'uniform', or 'explicit'"
+            )
+        knots = tuple(float(value) for value in self.interior_knots)
+        object.__setattr__(self, "interior_knots", knots)
+        if any(not np.isfinite(value) for value in knots):
+            raise ValueError("interior_knots must be finite")
+        if any(right <= left for left, right in zip(knots[:-1], knots[1:])):
+            raise ValueError("interior_knots must be strictly increasing")
+        expected = self.n_basis - self.degree - 1
+        if self.knot_strategy == "explicit" and len(knots) != expected:
+            raise ValueError(
+                "explicit interior_knots must contain n_basis - degree - 1 values"
+            )
+        if self.knot_strategy != "explicit" and knots:
+            raise ValueError("interior_knots are only valid with knot_strategy='explicit'")
+
+
+@dataclass(frozen=True, slots=True)
+class LSFSplineConfig:
+    """Opt-in per-channel B-spline controls for the LSF surface.
+
+    The defaults reproduce the historical constant B-channel kernel and the
+    six-basis cubic information-adaptive R/Z surfaces. Omitting this object
+    preserves the legacy ``LSFSurfaceIterativeConfig.n_basis`` and ``degree``
+    path exactly.
+    """
+
+    b: LSFChannelSplineConfig = LSFChannelSplineConfig(
+        n_basis=1,
+        degree=0,
+        knot_strategy="uniform",
+    )
+    r: LSFChannelSplineConfig = LSFChannelSplineConfig()
+    z: LSFChannelSplineConfig = LSFChannelSplineConfig()
+
+    def for_channel(self, channel: str) -> LSFChannelSplineConfig:
+        try:
+            return {"B": self.b, "R": self.r, "Z": self.z}[channel]
+        except KeyError as error:
+            raise ValueError(f"Unknown LSF channel: {channel}") from error
+
+
 @dataclass(slots=True)
 class LSFSurfaceState:
     """Compact, self-describing representation of one fitted LSF."""
@@ -354,6 +425,71 @@ def build_bspline_basis(
     basis = np.maximum(basis, 0.0)
     basis /= np.sum(basis, axis=1, keepdims=True)
     return basis, knots
+
+
+def _configured_knot_vector(
+    wave: np.ndarray,
+    spline: LSFChannelSplineConfig,
+) -> np.ndarray | None:
+    """Return a configured clamped knot vector, or ``None`` for information knots."""
+    if spline.knot_strategy == "information":
+        return None
+    n_interior = spline.n_basis - spline.degree - 1
+    if spline.knot_strategy == "uniform":
+        interior = np.linspace(wave[0], wave[-1], n_interior + 2)[1:-1]
+    else:
+        interior = np.asarray(spline.interior_knots, dtype=float)
+        if interior.size and (
+            float(interior[0]) <= float(wave[0])
+            or float(interior[-1]) >= float(wave[-1])
+        ):
+            raise ValueError(
+                "explicit interior knots must lie strictly inside the channel fit domain"
+            )
+    return np.concatenate(
+        [
+            np.repeat(wave[0], spline.degree + 1),
+            interior,
+            np.repeat(wave[-1], spline.degree + 1),
+        ]
+    )
+
+
+def _resolved_spline_config(
+    config: LSFSurfaceIterativeConfig,
+    spline_config: LSFSplineConfig | None,
+) -> LSFSplineConfig:
+    if spline_config is not None:
+        if not isinstance(spline_config, LSFSplineConfig):
+            raise TypeError("spline_config must be an LSFSplineConfig")
+        return spline_config
+    return LSFSplineConfig(
+        b=LSFChannelSplineConfig(
+            n_basis=1,
+            degree=0,
+            knot_strategy="information",
+        ),
+        r=LSFChannelSplineConfig(
+            n_basis=config.n_basis,
+            degree=config.degree,
+            knot_strategy="information",
+        ),
+        z=LSFChannelSplineConfig(
+            n_basis=config.n_basis,
+            degree=config.degree,
+            knot_strategy="information",
+        ),
+    )
+
+
+def _spline_strategy_summary(spline_config: LSFSplineConfig) -> str:
+    values = []
+    for channel in ("B", "R", "Z"):
+        spline = spline_config.for_channel(channel)
+        values.append(
+            f"{channel}={spline.knot_strategy}:n{spline.n_basis}:k{spline.degree}"
+        )
+    return "first_cycle_configured_then_fixed;" + ";".join(values)
 
 
 def evaluate_bspline_basis(
@@ -728,6 +864,7 @@ def fit_lsf_surface(
     config: LSFSurfaceIterativeConfig,
     *,
     previous_state: LSFSurfaceState | None = None,
+    spline_config: LSFSplineConfig | None = None,
 ) -> LSFSurfaceState:
     """Fit the three-channel wavelength-dependent LSF.
 
@@ -754,26 +891,31 @@ def fit_lsf_surface(
     degrees: dict[str, int] = {}
     bounds: dict[str, tuple[float | None, float | None]] = {}
     metrics: dict[str, dict[str, object]] = {}
+    resolved_splines = _resolved_spline_config(config, spline_config)
 
     for channel, lower, upper in LSF_CHANNELS:
         mask = _channel_mask(wave, lower, upper)
         if not np.any(mask):
             continue
         fit_mask = mask.copy()
-        n_basis = config.n_basis
-        degree = config.degree
+        channel_spline = resolved_splines.for_channel(channel)
+        n_basis = channel_spline.n_basis
+        degree = channel_spline.degree
         free_amplitude = False
         if channel == "B":
             # The blue arm has too little isolated-line information for a smooth surface.
             fit_mask &= wave >= config.blue_fit_lower
-            n_basis = 1
-            degree = 0
             free_amplitude = True
 
         # Freeze the first accepted knots so later cycles change only coefficients.
         previous_knots = None
         if previous_state is not None:
             previous_knots = previous_state.knot_vectors.get(channel)
+        configured_knots = (
+            None
+            if previous_knots is not None
+            else _configured_knot_vector(wave[fit_mask], channel_spline)
+        )
 
         local_surface, coefficient, knot_vector, channel_metrics = fit_bspline_channel(
             wave[fit_mask],
@@ -790,7 +932,7 @@ def fit_lsf_surface(
             ),
             background_degree=config.background_degree,
             free_amplitude=free_amplitude,
-            knot_vector=previous_knots,
+            knot_vector=(previous_knots if previous_knots is not None else configured_knots),
         )
 
         restored_previous = previous_state is not None and channel_metrics["status"] == "fallback"
@@ -805,6 +947,15 @@ def fit_lsf_surface(
         else:
             surface[mask] = local_surface
             channel_metrics["model"] = "cubic_bspline_kernel"
+        if spline_config is not None:
+            if channel == "B" and (n_basis != 1 or degree != 0):
+                if not restored_previous:
+                    surface[mask] = local_surface[0]
+                    surface[fit_mask] = local_surface
+                channel_metrics["model"] = "wavelength_dependent_blue_bspline_kernel"
+            elif channel != "B":
+                channel_metrics["model"] = "wavelength_dependent_bspline_kernel"
+            channel_metrics["knot_strategy"] = channel_spline.knot_strategy
         channel_metrics["fit_lower"] = float(np.min(wave[fit_mask]))
         channel_metrics["fit_upper"] = float(np.max(wave[fit_mask]))
         channel_metrics["knots_fixed"] = previous_knots is not None
@@ -833,6 +984,11 @@ def fit_lsf_surface(
         wave_min=wave_min,
         wave_max=wave_max,
         wave_sha256=wave_sha256,
+        knot_strategy=(
+            "first_cycle_adaptive_then_fixed"
+            if spline_config is None
+            else _spline_strategy_summary(resolved_splines)
+        ),
     )
 
 
@@ -980,9 +1136,20 @@ def evaluate_lsf_surface(
             surface[mask] = coefficient[:, 0]
             covered[mask] = True
             continue
+        channel_wave = evaluation_wave[mask]
+        knot_vector = np.asarray(state.knot_vectors[channel], dtype=float)
+        domain_lower = float(knot_vector[degree])
+        domain_upper = float(knot_vector[-degree - 1])
+        outside_domain = (channel_wave < domain_lower) | (channel_wave > domain_upper)
+        if np.any(outside_domain):
+            if channel != "B":
+                raise ValueError(
+                    f"Evaluation grid lies outside the fitted {channel}-channel spline domain"
+                )
+            channel_wave = np.clip(channel_wave, domain_lower, domain_upper)
         basis = evaluate_bspline_basis(
-            evaluation_wave[mask],
-            state.knot_vectors[channel],
+            channel_wave,
+            knot_vector,
             degree,
         )
         if basis.shape[1] != coefficient.shape[1]:
@@ -1134,12 +1301,16 @@ class SkyDecompLSFSurfaceIterative(SkyDecomp):
         self,
         *args,
         config: LSFSurfaceIterativeConfig | None = None,
+        spline_config: LSFSplineConfig | None = None,
         **kwargs,
     ) -> None:
         if float(kwargs.get("moon_interline_boost", 0.0)) != 0.0:
             raise ValueError("SkyDecompLSFSurfaceIterative requires moon_interline_boost=0")
         kwargs["moon_interline_boost"] = 0.0
         self.config = config or LSFSurfaceIterativeConfig()
+        if spline_config is not None and not isinstance(spline_config, LSFSplineConfig):
+            raise TypeError("spline_config must be an LSFSplineConfig")
+        self.spline_config = spline_config
         self.lsf_surface_state: LSFSurfaceState | None = None
         self._lsf_surface: np.ndarray | None = None
         self._lsf_operator: sp.csr_matrix | None = None
@@ -1231,6 +1402,7 @@ class SkyDecompLSFSurfaceIterative(SkyDecomp):
             fallback,
             self.config,
             previous_state=previous,
+            spline_config=self.spline_config,
         )
         self._set_lsf_state(state)
         return state
@@ -1884,6 +2056,8 @@ class SkyDecompLSFSurfaceIterative(SkyDecomp):
 
 
 __all__ = [
+    "LSFChannelSplineConfig",
+    "LSFSplineConfig",
     "LSFSurfaceIterativeConfig",
     "LSFSurfaceIterativeResult",
     "LSFSurfaceState",

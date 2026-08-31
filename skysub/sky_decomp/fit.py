@@ -82,7 +82,7 @@ The design, identifiability analysis, and end-to-end validation on 100
 phase-stratified rows live in
 `notebooks/moon_zodi_split_identifiability.ipynb`.  Corpus-scale usage:
 
-    python skysub/decompose_parallel.py <every10.fits> <palace_dir> \\
+    python skysub/decompose_parallel.py <every10.fits> \\
         --fit-model lsf-surface-iterative-split-zodi \\
         --n-zodi-spline-knots 3 --zodi-smooth-lambda 0.1 \\
         --n-refinement-cycles 5 --n-workers 8 --output-dir <out>
@@ -136,8 +136,13 @@ def vac_to_air(lam_vac_a: np.ndarray) -> np.ndarray:
 
 def decode_hitran_id(table: Table) -> Table:
     ids = np.asarray(table["ID"].astype(str), dtype=str)
-    if np.min(np.char.str_len(ids)) < 13:
-        raise ValueError("HITRAN ID strings are shorter than expected.")
+    lengths = np.char.str_len(ids)
+    if np.any(lengths != 13):
+        index = int(np.flatnonzero(lengths != 13)[0])
+        raise ValueError(
+            f"HITRAN ID must contain exactly 13 characters: row={index}, "
+            f"ID={ids[index]!r}, length={int(lengths[index])}"
+        )
 
     v_up = np.where(np.array([s[4:5] for s in ids]) == "X", "10", np.array([s[4:5] for s in ids])).astype(int)
     v_low = np.array([s[5:6] for s in ids], dtype=int)
@@ -145,11 +150,46 @@ def decode_hitran_id(table: Table) -> Table:
     branch_j = np.array([s[7:8] for s in ids])
     f_up = np.array([s[8:9] for s in ids], dtype=int)
     f_low = np.array([s[9:10] for s in ids], dtype=int)
-    n_low = np.array([s[10:12] for s in ids], dtype=int)
+    n_up = np.array([s[10:12] for s in ids], dtype=int)
     parity = np.array([s[12:13] for s in ids])
 
     delta_map = {"O": -2, "P": -1, "Q": 0, "R": 1, "S": 2}
-    n_up = n_low + np.vectorize(delta_map.get)(branch_n)
+    invalid_branches = sorted(set(branch_n) - set(delta_map))
+    if invalid_branches:
+        raise ValueError(f"Unsupported HITRAN rotational branches: {invalid_branches}")
+    delta_n = np.array([delta_map[branch] for branch in branch_n], dtype=int)
+    n_low = n_up - delta_n
+    invalid_levels = (n_up < 0) | (n_low < 0)
+    if np.any(invalid_levels):
+        index = int(np.flatnonzero(invalid_levels)[0])
+        raise ValueError(
+            f"HITRAN ID yields a negative rotational level: row={index}, "
+            f"ID={ids[index]!r}, N_upper={n_up[index]}, N_lower={n_low[index]}"
+        )
+
+    decoded_reference_columns = {
+        "vi": v_up,
+        "Fi": f_up,
+        "Ni": n_up,
+        "pi": parity,
+    }
+    for column, decoded in decoded_reference_columns.items():
+        if column not in table.colnames:
+            continue
+        if column == "pi":
+            reference = np.char.strip(
+                np.asarray(table[column].astype(str), dtype=str)
+            )
+        else:
+            reference = np.asarray(table[column], dtype=int)
+        mismatch = reference != decoded
+        if np.any(mismatch):
+            index = int(np.flatnonzero(mismatch)[0])
+            raise ValueError(
+                f"HITRAN ID disagrees with PALACE column {column}: row={index}, "
+                f"ID={ids[index]!r}, decoded={decoded[index]!r}, "
+                f"reference={reference[index]!r}"
+            )
 
     table["v_upper"] = v_up
     table["v_lower"] = v_low
@@ -1173,8 +1213,6 @@ class SkyDecomp:
         components["diffuse"] = components["ho2"] + components["feo"] + components["o2ac"]
         if "zodi" in sl:
             components["zodi"] = mats["zodi"].T @ coef[sl["zodi"]]
-        else:
-            components["zodi"] = np.zeros_like(components["moon"])
         return components
 
     def _components_sigma_from_coef_err(
@@ -1245,10 +1283,8 @@ class SkyDecomp:
             "orc": _matrix_sigma("orc"),
             "o2": _matrix_sigma("o2"),
         }
-        sigmas["zodi"] = (
-            _matrix_sigma("zodi") if "zodi" in sl
-            else np.zeros_like(sigmas["moon"])
-        )
+        if "zodi" in sl:
+            sigmas["zodi"] = _matrix_sigma("zodi")
         return sigmas
 
     def _build_lsf_source(self, coef: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -2056,12 +2092,13 @@ def reconstruct_component_spectra(
     comps["total"] = (
         comps["oh"]
         + comps["moon"]
-        + comps["zodi"]
         + comps["diffuse"]
         + comps["atom"]
         + comps["orc"]
         + comps["o2"]
     )
+    if "zodi" in comps:
+        comps["total"] = comps["total"] + comps["zodi"]
     if coef_err is not None:
         err_arr = np.asarray(coef_err, dtype=np.float64).ravel()
         if err_arr.size != coef_arr.size:
@@ -2074,11 +2111,11 @@ def reconstruct_component_spectra(
         comps["sigma_total"] = np.sqrt(
             sigma_comps["oh"] ** 2
             + sigma_comps["moon"] ** 2
-            + sigma_comps["zodi"] ** 2
             + sigma_comps["diffuse"] ** 2
             + sigma_comps["atom"] ** 2
             + sigma_comps["orc"] ** 2
             + sigma_comps["o2"] ** 2
+            + (sigma_comps["zodi"] ** 2 if "zodi" in sigma_comps else 0.0)
         )
     return comps
 

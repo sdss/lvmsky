@@ -5,10 +5,12 @@ This directory is the portable data root for
 model, the exact PALACE tables used by the validated fit, and an unchanged copy
 of the Meftah SOLAR-HRS text spectrum used by the historical decomposition.
 
-The historical `SkyDecomp` and `SkyDecompLSFSurfaceIterative` defaults are not
-redirected here. Their existing `base_dir` and `skysub/palace` contracts remain
-unchanged. The new Moon/Zodi method uses this directory by default; any class
-can also use the copied historical layout explicitly with `base_dir=.../data`.
+The historical `SkyDecomp` and non-split `SkyDecompLSFSurfaceIterative`
+defaults are not redirected here. Their existing `base_dir` and
+`skysub/palace` contracts remain unchanged. The Moon/Zodi method and the
+`lsf-surface-iterative-split-zodi` command-line mode use this directory by
+default; any class can also use the copied historical layout explicitly with
+`base_dir=.../data`.
 
 ## Directory layout
 
@@ -25,6 +27,7 @@ data/
 │   ├── eso_skycalc_rolo_moon_albedo.dat
 │   └── eso_skycalc_leinert_zodiacal_light.dat
 └── palace/PMD/
+    ├── pmd_popmodel_OH_h_family_default_ef_v1.dat
     ├── pmd_popmodel_OH_joint_v2_updated.dat
     ├── pmd_refcont_joint_native_adam_invsky_p2_10000iter.dat
     ├── pmd_intdata_atom.dat
@@ -108,10 +111,19 @@ DOI `10.5281/zenodo.14064022`; the model description is Noll et al. (2025),
 *Geoscientific Model Development*, 18, 4353-4398. PALACE data are published
 under CC BY 4.0 and code under GPLv3.
 
-The new method needs exactly five PALACE-compatible ASCII tables:
+The new method needs five selected PALACE-compatible ASCII tables. This bundle
+also retains the preceding OH table for explicit backward-compatible runs:
 
-- `pmd_popmodel_OH_joint_v2_updated.dat`: frozen repository OH population
-  table used by the Moon/Zodi model training and assessment;
+- `pmd_popmodel_OH_h_family_default_ef_v1.dat`: current runtime OH table with
+  the latest export of the terminal 30,000-step refined upper-group/per-family
+  weights and the PALACE e/f split retained. It reproduces the previously
+  promoted corrected-decoder flat-family export to within text-rounding
+  precision (maximum relative `Aij` difference `8.90e-13`). Its declared
+  held-out [O I] 5577 local non-regression gate failed, and this status is
+  retained in the manifest;
+- `pmd_popmodel_OH_joint_v2_updated.dat`: preceding frozen repository OH
+  population table, retained for backward-compatible explicit selection and
+  recording the table used by the Moon/Zodi model training;
 - `pmd_refcont_joint_native_adam_invsky_p2_10000iter.dat`: experimental
   native-LVM HO2, FeO, and O2Ac continuum export; its header records the
   unchanged grid, optimizer, source hash, and diagnostic status;
@@ -120,10 +132,10 @@ The new method needs exactly five PALACE-compatible ASCII tables:
 - `pmd_popmodel_O2.dat`: canonical O2 population-model table used by the O2
   prefit and final `O2_b01` component.
 
-The first two tables are repository-specific frozen derivatives, not unmodified
-PALACE v1.0 products. Their scientific provenance is retained in their headers
-and in `bundle_manifest.json`. The three remaining tables are copied unchanged
-from the local PALACE v1.0 installation. The original files under
+The first three tables are repository-specific frozen derivatives, not
+unmodified PALACE v1.0 products. Their scientific provenance is retained in
+their headers and in `bundle_manifest.json`. The three remaining tables are
+copied unchanged from the local PALACE v1.0 installation. The original files under
 `skysub/palace/PMD/` remain in place for backward compatibility.
 
 ## Runtime selection
@@ -136,6 +148,39 @@ decomposer = SkyDecompMoonZodiLSFSurfaceIterative(
     physical_to_fit_flux_scale=1e14,
 )
 ```
+
+The parallel split-zodi mode uses the same frozen OH and diffuse tables when no
+legacy positional PALACE root is supplied:
+
+```bash
+python skysub/decompose_parallel.py input.fits \
+    --fit-model lsf-surface-iterative-split-zodi
+```
+
+Both bundled command-line modes select
+`pmd_popmodel_OH_h_family_default_ef_v1.dat` and
+`pmd_refcont_joint_native_adam_invsky_p2_10000iter.dat` by default. Explicit
+`--palace-oh-suffix` and `--palace-diffuse-suffix` values still override those
+defaults.
+
+For a remote clone, the packaged root can be selected explicitly from the Git
+root. Omitting the suffix flags intentionally follows the versions declared by
+the checked-out code and bundle manifest instead of pinning an older filename:
+
+```bash
+python skysub/decompose_parallel.py input.fits \
+    --moon-zodi-data-root skysub/sky_decomp/data \
+    --fit-model lsf-surface-iterative-split-zodi \
+    --n-spline-knots 11 \
+    --n-zodi-spline-knots 1 \
+    --n-refinement-cycles 5 \
+    --n-workers 32 \
+    --output-dir moon_zodi_spline/
+```
+
+The optional positional root is also accepted when it points at this complete
+bundle, but the named `--moon-zodi-data-root` form is unambiguous and preferred
+for scripts.
 
 An externally distributed copy of the complete `data/` directory can be used
 without changing repository files:

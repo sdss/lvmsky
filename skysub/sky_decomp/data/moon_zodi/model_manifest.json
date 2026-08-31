@@ -1,0 +1,99 @@
+{
+  "schema_version": 1,
+  "model_id": "lvm_moon_zodi_joint_adam_30000_v1",
+  "formula_version": "moon-zodi-geometry-v1",
+  "scientific_status": "diagnostic_only_decomposition_nonregression_failed",
+  "source_session": "019ffb6d-050d-78a0-912f-d415cbda9bfb",
+  "source_checkpoint": {
+    "path": "skysub/experiments_moon_zodi_full_sky_joint_adam_300_v1/artifacts/joint_adam_30000_checkpoint.npz",
+    "sha256": "269a8d36503cc44d896a7f0ca1078065d2bc8fc5386ce40311355cf75aaa31ef"
+  },
+  "native_grid": {
+    "samples": 12401,
+    "dtype": "float64",
+    "wavelength_frame": "air",
+    "wavelength_unit": "Angstrom",
+    "minimum": 3600.0,
+    "maximum": 9799.9990234375,
+    "sha256_little_endian_float64": "78d6785c2ecda6afb2b1d4d02bfc2a28c9803dfca7477ad407d946c46e9e3dd1"
+  },
+  "parameters": [
+    {"name": "moon_rayleigh_intercept", "value": 0.42411393},
+    {"name": "moon_aerosol_intercept", "value": 0.37603319},
+    {"name": "moon_common_target_airmass_log", "value": 0.67683078},
+    {"name": "moon_common_moon_airmass_log", "value": -0.07847629},
+    {"name": "moon_common_phase_abs_fraction", "value": 0.24262969},
+    {"name": "moon_common_phase_signed_fraction", "value": -0.21086058},
+    {"name": "moon_common_cos_separation_centered", "value": -0.16686079},
+    {"name": "moon_rayleigh_extra_target_airmass_log", "value": -0.84935496},
+    {"name": "moon_aerosol_extra_cos_separation_centered", "value": -0.95147071},
+    {"name": "moon_below_horizon_suppression", "value": -8.21817871},
+    {"name": "zodi_intercept", "value": 0.21415927},
+    {"name": "zodi_target_airmass_log", "value": 1.28393814}
+  ],
+  "training_selection": {
+    "source_stack": "lvmsframe_median_stack_1.2.1.fits",
+    "spectrum_role": "sky_far",
+    "split": "select_split() training partition",
+    "rows": 100,
+    "grouping": "MJD-disjoint from the 100-row holdout",
+    "palace_oh_suffix": "_joint_v2_updated",
+    "palace_diffuse_suffix": "_joint_native_adam_invsky_p2_10000iter"
+  },
+  "training_domain": {
+    "target_airmass": [1.004881, 1.962145],
+    "moon_airmass": [1.0, 27.282933],
+    "moon_altitude_deg": [-7.124648, 86.779026],
+    "moon_separation_deg": [21.349767, 130.05848],
+    "signed_phase_deg": [-53.310321, 75.951487]
+  },
+  "conventions": {
+    "observatory": "Las Campanas Observatory, geodetic lon=-70.6920 deg lat=-29.0089 deg height=2281 m",
+    "geometry_time": "UTC exposure midpoint",
+    "ephemeris": "bundled JPL DE432s short SPK selected explicitly through Astropy",
+    "observed_wavelength": "unchanged native LVM air-wavelength detector grid",
+    "physical_wavelength": "vacuum high-resolution solar grid",
+    "detector_projection": "integration over exact native detector-pixel boundaries with the measured Gaussian detector LSF",
+    "flux_unit": "physical carriers in erg s-1 cm-2 Angstrom-1 per LVM fibre before physical_to_fit_flux_scale",
+    "moon_below_horizon": "construct visible carriers at moon altitude 0.01 deg and then apply the learned suppression",
+    "zodiacal_brightness": "Leinert B500 surface brightness with the frozen analytic colour and extinction convention"
+  },
+  "assets": [
+    {
+      "name": "jpl_de432s_short_planetary_ephemeris.bsp",
+      "original_name": "de432s.bsp",
+      "sha256": "363f32e14f5255359ac32c4d38080cf28ab55564a5e16696a75f63394b666e9b",
+      "source": "https://naif.jpl.nasa.gov/pub/naif/generic_kernels/spk/planets/de432s.bsp",
+      "attribution": "JPL/NAIF DE432s short generic planetary and lunar SPK ephemeris",
+      "license_or_terms": "NASA/JPL public scientific ephemeris; see NAIF rules and acknowledgements"
+    },
+    {
+      "name": "meftah_solar_hrs_disk_integrated_v1_1_vacuum_velocity_step_2kms.npz",
+      "original_name": "solar_hr_vacuum_dv2.npz",
+      "sha256": "cab38bff4cffca72855cd7f305712c2743df4af8ba66d60a1575cdeba5ad8fba",
+      "source": "../Spectre_HR_LATMOS_Meftah_V1_350_1000nm.txt",
+      "source_url": "https://cdsarc.cds.unistra.fr/viz-bin/cat/VI/159",
+      "source_sha256": "d141e880a3486c039610bcd8de2b6b08930796de6588857ba643c493fbd687bd",
+      "attribution": "Meftah high-resolution disk-integrated solar irradiance; logarithmically resampled to a 2 km/s vacuum grid",
+      "grid_velocity_step_kms": 2.0,
+      "transformation": "Restrict the Meftah SOLAR-HRS source to 3500-10000 Angstrom, convert wavelength from nm to vacuum Angstrom, and interpolate flux onto a logarithmic wavelength grid with a constant 2 km/s velocity step; preserve float64 arrays and source metadata.",
+      "license_or_terms": "No explicit license was recorded with the local source artifact; retain this attribution when redistributing"
+    },
+    {
+      "name": "eso_skycalc_rolo_moon_albedo.dat",
+      "original_name": "moonalbedo.dat",
+      "sha256": "86b9f9860fabb283de6659aabee8959186dc03e9d081aaa7c2761c2869ff16cc",
+      "source": "ESO SkyCalc sky-model data distribution",
+      "attribution": "ROLO wavelength-dependent lunar reflectance coefficients from Kieffer and Stone (2005)",
+      "license_or_terms": "ESO sky-model data terms; retain ESO and ROLO/Kieffer-Stone attribution"
+    },
+    {
+      "name": "eso_skycalc_leinert_zodiacal_light.dat",
+      "original_name": "zodiacallight.dat",
+      "sha256": "93d97a0635f2b49a96b2a7f840303f36d9254d97a8aafdeb24ddbec01a4bdbbe",
+      "source": "ESO SkyCalc sky-model data distribution",
+      "attribution": "Leinert et al. zodiacal-light B500 longitude-latitude table",
+      "license_or_terms": "ESO sky-model data terms; retain ESO and Leinert et al. attribution"
+    }
+  ]
+}

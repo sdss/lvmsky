@@ -4,13 +4,30 @@
   "runtime_method": "SkyDecompMoonZodiLSFSurfaceIterative",
   "moon_zodi_manifest": "moon_zodi/model_manifest.json",
   "palace_contract": {
-    "oh_suffix": "_joint_v2_updated",
+    "oh_suffix": "_h_family_default_ef_v1",
     "diffuse_suffix": "_joint_native_adam_invsky_p2_10000iter",
     "assets": [
       {
+        "path": "palace/PMD/pmd_popmodel_OH_h_family_default_ef_v1.dat",
+        "sha256": "7c3f6bb8ecf969e36fdf8e3997952986ab8801688d2b535238966e5e1a9827fa",
+        "source": "Latest frozen export of the terminal 30000-step upper-group/per-family OH weights from experiments_moon_zodi_oh_flat_family_adam_v1, with the PALACE e/f split retained",
+        "source_endpoint_iteration": 30000,
+        "previous_promoted_export_sha256": "b3496eae819919e191f423bfe4376f91fb0f856f76c9fe0693c314fc3825614f",
+        "maximum_aij_relative_difference_from_previous_promoted_export": 8.901899067160362e-13,
+        "export_assessment": "skysub/experiments_moon_zodi_updated_oh_skydecomp_v1/outputs/palace_default_vs_flat_family_current_v1/assessment_summary.json",
+        "assessment_status": "diagnostic_failed_declared_holdout_gates",
+        "known_failed_gate": "holdout_B_OI_5577_night_median_non_regression",
+        "rows": 22058,
+        "mapped_measurable_rows": 11379,
+        "changed_column": "Aij only",
+        "all_non_aij_columns_elementwise_equal_to_previous_promoted_export": true,
+        "preserved_measurable_group_quantity": "sum(Aij * gi)",
+        "hitran_decoder": "N_upper = ID[10:12]; N_lower = N_upper - branch_delta"
+      },
+      {
         "path": "palace/PMD/pmd_popmodel_OH_joint_v2_updated.dat",
         "sha256": "b0e2b763dc08c81b513fe51eed1505ff9982dcd89d975f8153e668e740ff5c65",
-        "source": "PALACE v1.0 pmd_popmodel_OH.dat with the repository's frozen joint-v2 updated OH weights"
+        "source": "Previous repository frozen joint-v2 OH weights retained for explicit backward-compatible selection"
       },
       {
         "path": "palace/PMD/pmd_refcont_joint_native_adam_invsky_p2_10000iter.dat",

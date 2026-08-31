@@ -389,6 +389,7 @@ def test_default_n5_state_has_semantic_fits_round_trip(golden_fit, tmp_path):
         "FLUX_SIGMA_TOTAL",
         "RESID",
         "VECTOR_O2",
+        "COEF_COV_MOON",
         *[f"COMP_{name.upper()}" for name in COMPONENT_ORDER],
         "LSF_COEF",
         "LSF_KNOTS",
@@ -397,6 +398,14 @@ def test_default_n5_state_has_semantic_fits_round_trip(golden_fit, tmp_path):
     with fits.open(output_path, memmap=False) as hdul:
         hdu_names = [hdu.name for hdu in hdul]
         assert hdu_names == expected_hdus
+        np.testing.assert_allclose(
+            np.asarray(hdul["COEF_COV_MOON"].data, dtype=float),
+            np.asarray(result.coef_cov_moon, dtype=float)[None, ...],
+            rtol=rtol,
+            atol=atol,
+            equal_nan=True,
+        )
+        assert "COEF_COV_ZODI" not in hdu_names
         assert tuple(hdul["LSF_META"].columns.names) == LSF_META_COLUMNS
         assert "LSF_WAVE" not in hdu_names
         assert not any("SURFACE" in name for name in hdu_names)

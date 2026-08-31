@@ -28,6 +28,8 @@ def _signature_without_annotations(callable_object):
 
 def test_public_exports_and_pickle_qualified_names():
     assert iterative.__all__ == [
+        "LSFChannelSplineConfig",
+        "LSFSplineConfig",
         "LSFSurfaceIterativeConfig",
         "LSFSurfaceIterativeResult",
         "LSFSurfaceState",
@@ -48,6 +50,8 @@ def test_public_exports_and_pickle_qualified_names():
     ]
 
     for class_name in (
+        "LSFChannelSplineConfig",
+        "LSFSplineConfig",
         "LSFSurfaceIterativeConfig",
         "LSFSurfaceState",
         "LSFSurfaceIterativeResult",
@@ -59,6 +63,30 @@ def test_public_exports_and_pickle_qualified_names():
 
 
 def test_dataclass_field_order_and_defaults():
+    channel_spline_fields = fields(iterative.LSFChannelSplineConfig)
+    assert tuple(field.name for field in channel_spline_fields) == (
+        "n_basis",
+        "degree",
+        "knot_strategy",
+        "interior_knots",
+    )
+    assert tuple(field.default for field in channel_spline_fields) == (
+        6,
+        3,
+        "information",
+        (),
+    )
+
+    spline_fields = fields(iterative.LSFSplineConfig)
+    assert tuple(field.name for field in spline_fields) == ("b", "r", "z")
+    assert iterative.LSFSplineConfig().b == iterative.LSFChannelSplineConfig(
+        n_basis=1,
+        degree=0,
+        knot_strategy="uniform",
+    )
+    assert iterative.LSFSplineConfig().r == iterative.LSFChannelSplineConfig()
+    assert iterative.LSFSplineConfig().z == iterative.LSFChannelSplineConfig()
+
     config_fields = fields(iterative.LSFSurfaceIterativeConfig)
     assert tuple(field.name for field in config_fields) == (
         "line_weight",
@@ -185,7 +213,7 @@ def test_public_callable_signatures():
         ),
         "fit_lsf_surface": (
             "(wave, flux, ivar, source, fixed_background, fallback_kernels, "
-            "config, *, previous_state=None)"
+            "config, *, previous_state=None, spline_config=None)"
         ),
         "kernel_moments": "(kernel_surface)",
         "load_lsf_surface_state": "(filename, spectrum_index=0)",
@@ -194,7 +222,7 @@ def test_public_callable_signatures():
         assert _signature_without_annotations(getattr(iterative, name)) == signature
 
     assert _signature_without_annotations(iterative.SkyDecompLSFSurfaceIterative.__init__) == (
-        "(self, *args, config=None, **kwargs)"
+        "(self, *args, config=None, spline_config=None, **kwargs)"
     )
     assert _signature_without_annotations(iterative.SkyDecompLSFSurfaceIterative.fit) == (
         "(self, flux, ivar, *, verbose=False)"

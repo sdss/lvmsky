@@ -166,6 +166,90 @@ def test_parallel_worker_propagates_suffix_to_lsf_surface_model(monkeypatch):
     )
 
 
+def test_bundled_modes_default_to_frozen_oh_and_diffuse_tables():
+    assert decompose_parallel.resolve_palace_suffixes(
+        bundled_data_root=Path("/bundle"),
+    ) == (
+        None,
+        "_h_family_default_ef_v1",
+        "_joint_native_adam_invsky_p2_10000iter",
+    )
+
+
+def test_explicit_palace_suffixes_override_bundled_defaults():
+    assert decompose_parallel.resolve_palace_suffixes(
+        bundled_data_root=Path("/bundle"),
+        palace_oh_suffix="_custom_oh",
+        palace_diffuse_suffix="_custom_diffuse",
+    ) == (None, "_custom_oh", "_custom_diffuse")
+    assert decompose_parallel.resolve_palace_suffixes(
+        bundled_data_root=Path("/bundle"),
+        palace_suffix="_custom_common",
+    ) == ("_custom_common", None, None)
+
+
+def test_split_zodi_without_legacy_path_uses_packaged_bundle(monkeypatch, tmp_path):
+    bundle_root = tmp_path / "bundle"
+    validated = []
+    monkeypatch.setattr(
+        decompose_parallel,
+        "DEFAULT_MOON_ZODI_DATA_ROOT",
+        bundle_root,
+    )
+    monkeypatch.setattr(
+        decompose_parallel,
+        "validate_decomposition_data_root",
+        validated.append,
+    )
+    monkeypatch.setattr(
+        decompose_parallel,
+        "resolve_base_dir",
+        lambda *_args: pytest.fail("legacy PALACE resolution must not run"),
+    )
+
+    base_dir, data_root = decompose_parallel.resolve_runtime_data_roots(
+        decompose_parallel.SPLIT_ZODI_FIT_MODEL,
+    )
+
+    assert base_dir == bundle_root.resolve()
+    assert data_root == bundle_root.resolve()
+    assert validated == [str(bundle_root.resolve())]
+
+
+def test_split_zodi_positional_bundle_uses_bundle_contract(monkeypatch, tmp_path):
+    bundle_root = tmp_path / "bundle"
+    bundle_root.mkdir()
+    (bundle_root / "bundle_manifest.json").touch()
+    validated = []
+    monkeypatch.setattr(
+        decompose_parallel,
+        "validate_decomposition_data_root",
+        validated.append,
+    )
+    monkeypatch.setattr(
+        decompose_parallel,
+        "resolve_base_dir",
+        lambda *_args: pytest.fail("legacy PALACE resolution must not run"),
+    )
+
+    base_dir, data_root = decompose_parallel.resolve_runtime_data_roots(
+        decompose_parallel.SPLIT_ZODI_FIT_MODEL,
+        palace_dir=bundle_root,
+    )
+    suffixes = decompose_parallel.resolve_palace_suffixes(
+        bundled_data_root=data_root,
+    )
+
+    assert base_dir == bundle_root.resolve()
+    assert data_root == bundle_root.resolve()
+    assert validated == [str(bundle_root.resolve())]
+    assert suffixes == (
+        None,
+        "_h_family_default_ef_v1",
+        "_joint_native_adam_invsky_p2_10000iter",
+    )
+
+
 def test_cli_forwards_optional_palace_suffix(monkeypatch):
     captured = {}
     monkeypatch.setattr(decompose_parallel, "run", lambda **kwargs: captured.update(kwargs))
@@ -197,3 +281,25 @@ def test_cli_forwards_optional_palace_suffix(monkeypatch):
     assert captured["palace_diffuse_suffix"] == (
         "_joint_native_adam_invsky_p2_10000iter_lvm"
     )
+
+
+def test_split_zodi_cli_does_not_require_legacy_palace_path(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(decompose_parallel, "run", lambda **kwargs: captured.update(kwargs))
+    monkeypatch.setattr(decompose_parallel, "extract_meta_and_coef_products", lambda **kwargs: None)
+    monkeypatch.setattr(decompose_parallel, "thin_fits_every_n", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "decompose_parallel.py",
+            "input.fits",
+            "--fit-model",
+            decompose_parallel.SPLIT_ZODI_FIT_MODEL,
+        ],
+    )
+
+    decompose_parallel.main()
+
+    assert captured["palace_dir"] is None
+    assert captured["moon_zodi_data_root"] is None

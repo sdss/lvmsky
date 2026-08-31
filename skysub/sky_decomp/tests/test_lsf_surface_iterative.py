@@ -4,6 +4,8 @@ from astropy.io import fits
 from dataclasses import fields
 
 from skysub.sky_decomp.lsf_surface_iterative import (
+    LSFChannelSplineConfig,
+    LSFSplineConfig,
     LSFSurfaceIterativeConfig,
     LSFSurfaceIterativeResult,
     apply_lsf_channelwise,
@@ -230,6 +232,157 @@ def test_public_config_defaults_to_five_configurable_cycles():
         LSFSurfaceIterativeConfig(n_refinement_cycles=0)
     with pytest.raises(TypeError, match="integer"):
         LSFSurfaceIterativeConfig(n_refinement_cycles=True)
+
+
+def test_per_channel_spline_config_validates_degree_strategy_and_knots():
+    with pytest.raises(ValueError, match=r"degree \+ 1"):
+        LSFChannelSplineConfig(n_basis=3, degree=3)
+    with pytest.raises(ValueError, match="knot_strategy"):
+        LSFChannelSplineConfig(knot_strategy="unknown")
+    with pytest.raises(ValueError, match="strictly increasing"):
+        LSFChannelSplineConfig(
+            n_basis=6,
+            degree=3,
+            knot_strategy="explicit",
+            interior_knots=(7000.0, 6900.0),
+        )
+    with pytest.raises(ValueError, match="n_basis - degree - 1"):
+        LSFChannelSplineConfig(
+            n_basis=7,
+            degree=3,
+            knot_strategy="explicit",
+            interior_knots=(7800.0, 8200.0),
+        )
+    with pytest.raises(ValueError, match="only valid"):
+        LSFChannelSplineConfig(interior_knots=(7000.0,))
+    with pytest.raises(ValueError, match="Unknown LSF channel"):
+        LSFSplineConfig().for_channel("X")
+
+
+def test_per_channel_uniform_and_explicit_knots_are_used_verbatim():
+    wave = np.arange(5400.0, 9001.0)
+    offsets = np.arange(-5, 6, dtype=float)
+    kernel = np.exp(-0.5 * (offsets / 1.1) ** 2)
+    kernel /= np.sum(kernel)
+    source = np.zeros_like(wave)
+    source[100:-100:31] = 1.0
+    surface = np.tile(kernel, (wave.size, 1))
+    spline_config = LSFSplineConfig(
+        b=LSFChannelSplineConfig(
+            n_basis=3,
+            degree=2,
+            knot_strategy="uniform",
+        ),
+        r=LSFChannelSplineConfig(
+            n_basis=5,
+            degree=2,
+            knot_strategy="uniform",
+        ),
+        z=LSFChannelSplineConfig(
+            n_basis=7,
+            degree=3,
+            knot_strategy="explicit",
+            interior_knots=(7750.0, 8250.0, 8750.0),
+        ),
+    )
+
+    state = fit_lsf_surface(
+        wave,
+        apply_lsf_surface(wave, source, surface),
+        np.ones_like(wave),
+        source,
+        np.zeros_like(wave),
+        {channel: kernel for channel in ("B", "R", "Z")},
+        LSFSurfaceIterativeConfig(),
+        spline_config=spline_config,
+    )
+    reconstructed = evaluate_lsf_surface(state, wave)
+
+    assert state.degrees == {"B": 2, "R": 2, "Z": 3}
+    assert {channel: value.shape[1] for channel, value in state.coefficients.items()} == {
+        "B": 3,
+        "R": 5,
+        "Z": 7,
+    }
+    assert np.array_equal(state.knot_vectors["Z"][4:-4], [7750.0, 8250.0, 8750.0])
+    assert "R=uniform:n5:k2" in state.knot_strategy
+    assert "Z=explicit:n7:k3" in state.knot_strategy
+    assert state.metrics["Z"]["knot_strategy"] == "explicit"
+    assert np.all(np.isfinite(reconstructed))
+    assert np.allclose(np.sum(reconstructed, axis=1), 1.0, atol=1.0e-12)
+
+
+def test_explicit_knots_must_lie_inside_the_fitted_channel():
+    wave = np.arange(5400.0, 9001.0)
+    kernel = np.zeros(11)
+    kernel[5] = 1.0
+    spline_config = LSFSplineConfig(
+        z=LSFChannelSplineConfig(
+            n_basis=5,
+            degree=3,
+            knot_strategy="explicit",
+            interior_knots=(9000.0,),
+        )
+    )
+
+    with pytest.raises(ValueError, match="strictly inside"):
+        fit_lsf_surface(
+            wave,
+            np.zeros_like(wave),
+            np.ones_like(wave),
+            np.zeros_like(wave),
+            np.zeros_like(wave),
+            {channel: kernel for channel in ("B", "R", "Z")},
+            LSFSurfaceIterativeConfig(),
+            spline_config=spline_config,
+        )
+
+
+def test_per_channel_spline_state_round_trips_through_fits(tmp_path):
+    wave = np.arange(5400.0, 9001.0)
+    kernel = np.zeros(11)
+    kernel[5] = 1.0
+    spline_config = LSFSplineConfig(
+        r=LSFChannelSplineConfig(
+            n_basis=5,
+            degree=2,
+            knot_strategy="uniform",
+        ),
+        z=LSFChannelSplineConfig(
+            n_basis=7,
+            degree=3,
+            knot_strategy="explicit",
+            interior_knots=(7750.0, 8250.0, 8750.0),
+        ),
+    )
+    state = fit_lsf_surface(
+        wave,
+        np.zeros_like(wave),
+        np.ones_like(wave),
+        np.zeros_like(wave),
+        np.zeros_like(wave),
+        {channel: kernel for channel in ("B", "R", "Z")},
+        LSFSurfaceIterativeConfig(),
+        spline_config=spline_config,
+    )
+    result = LSFSurfaceIterativeResult(
+        **_baseline_result_kwargs(wave),
+        lsf_state=state,
+    )
+    output = tmp_path / "per_channel_spline.fits"
+
+    results_to_fits([result], output)
+    restored = load_lsf_surface_state(output)
+
+    assert restored.degrees == state.degrees
+    assert restored.knot_strategy == state.knot_strategy
+    for channel in ("B", "R", "Z"):
+        assert np.array_equal(restored.knot_vectors[channel], state.knot_vectors[channel])
+        assert np.array_equal(restored.coefficients[channel], state.coefficients[channel])
+    assert np.array_equal(
+        evaluate_lsf_surface(restored, wave),
+        evaluate_lsf_surface(state, wave),
+    )
 
 
 def test_scalar_evaluation_and_state_application_use_compact_state():
