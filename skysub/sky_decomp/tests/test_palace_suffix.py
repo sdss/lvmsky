@@ -1,3 +1,5 @@
+import importlib.util
+import inspect
 import os
 from pathlib import Path
 import subprocess
@@ -10,6 +12,10 @@ import pytest
 from skysub import decompose_parallel
 from skysub.sky_decomp.fit import SkyDecomp
 from skysub.sky_decomp.lsf_surface_iterative import SkyDecompLSFSurfaceIterative
+from skysub.sky_decomp.moon_zodi_model import (
+    DEFAULT_PALACE_DIFFUSE_SUFFIX,
+    DEFAULT_PALACE_OH_SUFFIX,
+)
 
 
 def test_decompose_parallel_direct_script_imports_package_from_any_cwd(tmp_path):
@@ -177,37 +183,65 @@ def test_parallel_worker_propagates_suffix_to_lsf_surface_model(monkeypatch):
         1.0,
         "input.fits",
         fit_model="lsf-surface-iterative",
-        palace_oh_suffix="_joint_v2_updated",
-        palace_diffuse_suffix="_joint_native_adam_invsky_p2_10000iter_lvm",
+        palace_oh_suffix="_custom_oh",
+        palace_diffuse_suffix="_custom_diffuse",
     )
 
     assert captured["base_dir"] == "/custom/base"
-    assert captured["palace_oh_suffix"] == "_joint_v2_updated"
-    assert captured["palace_diffuse_suffix"] == (
-        "_joint_native_adam_invsky_p2_10000iter_lvm"
-    )
+    assert captured["palace_oh_suffix"] == "_custom_oh"
+    assert captured["palace_diffuse_suffix"] == "_custom_diffuse"
 
 
-def test_bundled_modes_default_to_frozen_oh_and_diffuse_tables():
-    assert decompose_parallel.resolve_palace_suffixes(
-        bundled_data_root=Path("/bundle"),
-    ) == (
-        None,
-        "_h_family_default_ef_v1",
-        "_joint_native_adam_invsky_p2_10000iter",
-    )
+def test_bundled_skydecomp_owns_default_oh_and_diffuse_tables(monkeypatch, tmp_path):
+    (tmp_path / "bundle_manifest.json").touch()
+    pmd_dir = tmp_path / "palace" / "PMD"
+    pmd_dir.mkdir(parents=True)
+    oh_path = pmd_dir / f"pmd_popmodel_OH{DEFAULT_PALACE_OH_SUFFIX}.dat"
+    diffuse_path = pmd_dir / f"pmd_refcont{DEFAULT_PALACE_DIFFUSE_SUFFIX}.dat"
+    oh_path.touch()
+    diffuse_path.touch()
+    monkeypatch.setattr(SkyDecomp, "_build_static_basis", lambda self: None)
+
+    model = SkyDecomp(np.arange(2.0), base_dir=tmp_path)
+
+    assert model.palace_suffix is None
+    assert model.palace_oh_suffix == DEFAULT_PALACE_OH_SUFFIX
+    assert model.palace_diffuse_suffix == DEFAULT_PALACE_DIFFUSE_SUFFIX
+    assert model._pmd_path("pmd_popmodel_OH.dat") == oh_path
+    assert model._pmd_path("pmd_refcont.dat") == diffuse_path
 
 
-def test_explicit_palace_suffixes_override_bundled_defaults():
-    assert decompose_parallel.resolve_palace_suffixes(
-        bundled_data_root=Path("/bundle"),
+def test_explicit_palace_suffixes_override_bundled_defaults(monkeypatch, tmp_path):
+    (tmp_path / "bundle_manifest.json").touch()
+    monkeypatch.setattr(SkyDecomp, "_build_static_basis", lambda self: None)
+
+    table_specific = SkyDecomp(
+        np.arange(2.0),
+        base_dir=tmp_path,
         palace_oh_suffix="_custom_oh",
         palace_diffuse_suffix="_custom_diffuse",
-    ) == (None, "_custom_oh", "_custom_diffuse")
-    assert decompose_parallel.resolve_palace_suffixes(
-        bundled_data_root=Path("/bundle"),
+    )
+    common = SkyDecomp(
+        np.arange(2.0),
+        base_dir=tmp_path,
         palace_suffix="_custom_common",
-    ) == ("_custom_common", None, None)
+    )
+
+    assert table_specific.palace_oh_suffix == "_custom_oh"
+    assert table_specific.palace_diffuse_suffix == "_custom_diffuse"
+    assert common.palace_suffix == "_custom_common"
+    assert common.palace_oh_suffix is None
+    assert common.palace_diffuse_suffix is None
+
+
+def test_nonbundled_skydecomp_keeps_legacy_unsuffixed_default(monkeypatch, tmp_path):
+    monkeypatch.setattr(SkyDecomp, "_build_static_basis", lambda self: None)
+
+    model = SkyDecomp(np.arange(2.0), base_dir=tmp_path)
+
+    assert model.palace_suffix is None
+    assert model.palace_oh_suffix is None
+    assert model.palace_diffuse_suffix is None
 
 
 def test_split_zodi_without_legacy_path_uses_packaged_bundle(monkeypatch, tmp_path):
@@ -258,18 +292,9 @@ def test_split_zodi_positional_bundle_uses_bundle_contract(monkeypatch, tmp_path
         decompose_parallel.SPLIT_ZODI_FIT_MODEL,
         palace_dir=bundle_root,
     )
-    suffixes = decompose_parallel.resolve_palace_suffixes(
-        bundled_data_root=data_root,
-    )
-
     assert base_dir == bundle_root.resolve()
     assert data_root == bundle_root.resolve()
     assert validated == [str(bundle_root.resolve())]
-    assert suffixes == (
-        None,
-        "_h_family_default_ef_v1",
-        "_joint_native_adam_invsky_p2_10000iter",
-    )
 
 
 def test_cli_forwards_optional_palace_suffix(monkeypatch):
@@ -289,9 +314,9 @@ def test_cli_forwards_optional_palace_suffix(monkeypatch):
             "--palace-suffix",
             "_adam_100_v1",
             "--palace-oh-suffix",
-            "_joint_v2_updated",
+            "_custom_oh",
             "--palace-diffuse-suffix",
-            "_joint_native_adam_invsky_p2_10000iter_lvm",
+            "_custom_diffuse",
         ],
     )
 
@@ -299,10 +324,8 @@ def test_cli_forwards_optional_palace_suffix(monkeypatch):
 
     assert captured["palace_dir"] == "/custom/base"
     assert captured["palace_suffix"] == "_adam_100_v1"
-    assert captured["palace_oh_suffix"] == "_joint_v2_updated"
-    assert captured["palace_diffuse_suffix"] == (
-        "_joint_native_adam_invsky_p2_10000iter_lvm"
-    )
+    assert captured["palace_oh_suffix"] == "_custom_oh"
+    assert captured["palace_diffuse_suffix"] == "_custom_diffuse"
 
 
 def test_split_zodi_cli_does_not_require_legacy_palace_path(monkeypatch):
@@ -325,3 +348,47 @@ def test_split_zodi_cli_does_not_require_legacy_palace_path(monkeypatch):
 
     assert captured["palace_dir"] is None
     assert captured["moon_zodi_data_root"] is None
+    assert captured["palace_suffix"] is None
+    assert captured["palace_oh_suffix"] is None
+    assert captured["palace_diffuse_suffix"] is None
+
+
+def test_mlp_gaussian_reconstruction_forwards_skydecomp_selection(
+    monkeypatch, tmp_path
+):
+    skysub_root = Path(__file__).resolve().parents[2]
+    monkeypatch.syspath_prepend(str(skysub_root))
+    monkeypatch.setenv("MPLCONFIGDIR", str(tmp_path / "matplotlib"))
+    module_path = skysub_root / "mlp_predictor" / "data.py"
+    spec = importlib.util.spec_from_file_location("mlp_data_for_test", module_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    signature = inspect.signature(module.reconstruct_with_lsf)
+    assert signature.parameters["palace_oh_suffix"].default is None
+    assert signature.parameters["palace_diffuse_suffix"].default is None
+
+    captured = {}
+    expected = {"total": np.arange(2.0)}
+    monkeypatch.setattr(
+        module,
+        "reconstruct_component_spectra",
+        lambda **kwargs: captured.update(kwargs) or expected,
+    )
+
+    result = module.reconstruct_with_lsf(
+        np.arange(2.0),
+        np.ones(3),
+        np.ones(2),
+        base_dir=tmp_path,
+        split_zodi=True,
+        n_zodi_spline_knots=7,
+        palace_oh_suffix="_custom_oh",
+        palace_diffuse_suffix="_custom_diffuse",
+    )
+
+    assert result is expected
+    assert captured["split_zodi"] is True
+    assert captured["n_zodi_spline_knots"] == 7
+    assert captured["palace_oh_suffix"] == "_custom_oh"
+    assert captured["palace_diffuse_suffix"] == "_custom_diffuse"

@@ -109,6 +109,11 @@ from scipy.optimize import least_squares
 
 from lvmdrp.core.fluxcal import rebin_and_convolve
 
+from .moon_zodi_model import (
+    DEFAULT_PALACE_DIFFUSE_SUFFIX,
+    DEFAULT_PALACE_OH_SUFFIX,
+)
+
 CAP_WAVE = 5.0
 HC_OVER_KB_CMK = 1.4387769
 OH_GROUP_KEYS = ("v_upper", "N_upper", "F_upper")
@@ -363,6 +368,11 @@ class SkyDecomp:
         self.base_dir = (
             Path(base_dir).resolve() if base_dir is not None else Path(__file__).resolve().parent.parent
         )
+        if (self.base_dir / "bundle_manifest.json").is_file() and palace_suffix is None:
+            if palace_oh_suffix is None:
+                palace_oh_suffix = DEFAULT_PALACE_OH_SUFFIX
+            if palace_diffuse_suffix is None:
+                palace_diffuse_suffix = DEFAULT_PALACE_DIFFUSE_SUFFIX
         self.palace_suffix = self._validate_palace_suffix(palace_suffix)
         self.palace_oh_suffix = self._validate_palace_suffix(palace_oh_suffix)
         self.palace_diffuse_suffix = self._validate_palace_suffix(palace_diffuse_suffix)

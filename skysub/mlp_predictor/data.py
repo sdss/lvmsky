@@ -2024,8 +2024,7 @@ def load_o2_vector_if_available(decomp_fits_path, spectrum_index):
 def reconstruct_with_lsf(wave, coef, lsf, *, n_spline_knots=25, base_dir=None,
                          o2_vector=None, coef_err=None,
                          split_zodi=True, n_zodi_spline_knots=3,
-                         palace_oh_suffix='_h_family_default_ef_v1',
-                         palace_diffuse_suffix='_joint_native_adam_invsky_p2_10000iter'):
+                         palace_oh_suffix=None, palace_diffuse_suffix=None):
     """Reconstruct component spectra, dispatching on the LSF representation.
 
     ``lsf`` is either an ``LSFSurfaceState`` (uses the wavelength-dependent
@@ -2096,6 +2095,10 @@ def reconstruct_with_lsf(wave, coef, lsf, *, n_spline_knots=25, base_dir=None,
         wave=wave, coef=coef, lsf_sigma=lsf,
         n_spline_knots=n_spline_knots, base_dir=base_dir, o2_vector=o2_vector,
         coef_err=coef_err,
+        split_zodi=bool(split_zodi),
+        n_zodi_spline_knots=int(n_zodi_spline_knots),
+        palace_oh_suffix=palace_oh_suffix,
+        palace_diffuse_suffix=palace_diffuse_suffix,
     )
 
 # ==========================================================================

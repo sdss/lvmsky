@@ -881,8 +881,8 @@ def _precompute_flux_basis_and_geometry(
     n_moon_knots,
     split_zodi,
     n_zodi_knots,
-    palace_oh_suffix="_h_family_default_ef_v1",
-    palace_diffuse_suffix="_joint_native_adam_invsky_p2_10000iter",
+    palace_oh_suffix=None,
+    palace_diffuse_suffix=None,
     verbose=True,
 ):
     """Materialise moon + zodi flux basis matrices (stride 5) and per-row geometry."""
@@ -998,8 +998,8 @@ class Trainer:
         n_moon_knots,
         split_zodi,
         n_zodi_knots,
-        palace_oh_suffix="_h_family_default_ef_v1",
-        palace_diffuse_suffix="_joint_native_adam_invsky_p2_10000iter",
+        palace_oh_suffix=None,
+        palace_diffuse_suffix=None,
         verbose=True,
     ):
         """Fit the full seed ensemble, assemble artifacts, report per-seed metrics."""
