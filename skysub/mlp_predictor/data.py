@@ -2575,9 +2575,9 @@ def _fill_arm_radec_from_meta_fits(triplet, meta_fits_path=None):
     _candidates = []
     if meta_fits_path is not None:
         _candidates.append(str(meta_fits_path))
-    _stem = globals().get('_DECOMP_STEM',
-                          f'{DECOMP_DATA_ROOT}/{DECOMP_STEM}')
-    _candidates.extend([f'{_stem}_meta_only.fits', f'{_stem}.fits'])
+    else:
+        _stem = globals().get('_DECOMP_STEM', f'{DECOMP_DATA_ROOT}/{DECOMP_STEM}')
+        _candidates.extend([f'{_stem}_meta_only.fits', f'{_stem}.fits'])
     _meta = None
     _used_path = None
     for _p in _candidates:
