@@ -22,8 +22,6 @@ from .lsf_surface_iterative import (
 from .moon_zodi_model import (
     DEFAULT_DATA_DIR,
     DEFAULT_DATA_ROOT,
-    DEFAULT_PALACE_DIFFUSE_SUFFIX,
-    DEFAULT_PALACE_OH_SUFFIX,
     MoonZodiInvalidObservationError,
     MoonZodiObservation,
     MoonZodiPhysicalModel,
@@ -69,10 +67,6 @@ class SkyDecompMoonZodiLSFSurfaceIterative(SkyDecompLSFSurfaceIterative):
         )
         if kwargs.get("base_dir") is None:
             kwargs["base_dir"] = data_root_value
-        if kwargs.get("palace_oh_suffix") is None:
-            kwargs["palace_oh_suffix"] = DEFAULT_PALACE_OH_SUFFIX
-        if kwargs.get("palace_diffuse_suffix") is None:
-            kwargs["palace_diffuse_suffix"] = DEFAULT_PALACE_DIFFUSE_SUFFIX
         self.physical_to_fit_flux_scale = float(physical_to_fit_flux_scale)
         self.data_root = data_root_value
         self.physical_model = MoonZodiPhysicalModel(data_dir=physical_data_dir)

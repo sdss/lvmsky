@@ -45,8 +45,6 @@ if __package__ in (None, ""):
 from skysub.sky_decomp.result_io import results_to_fits
 from skysub.sky_decomp.moon_zodi_model import (
     DEFAULT_DATA_ROOT as DEFAULT_MOON_ZODI_DATA_ROOT,
-    DEFAULT_PALACE_DIFFUSE_SUFFIX,
-    DEFAULT_PALACE_OH_SUFFIX,
     validate_decomposition_data_root,
 )
 
@@ -449,22 +447,6 @@ def resolve_runtime_data_roots(
     return resolve_base_dir(palace_dir), None
 
 
-def resolve_palace_suffixes(
-    *,
-    bundled_data_root,
-    palace_suffix=None,
-    palace_oh_suffix=None,
-    palace_diffuse_suffix=None,
-):
-    """Select the bundle's frozen OH/diffuse tables unless explicitly overridden."""
-    if bundled_data_root is not None and palace_suffix is None:
-        if palace_oh_suffix is None:
-            palace_oh_suffix = DEFAULT_PALACE_OH_SUFFIX
-        if palace_diffuse_suffix is None:
-            palace_diffuse_suffix = DEFAULT_PALACE_DIFFUSE_SUFFIX
-    return palace_suffix, palace_oh_suffix, palace_diffuse_suffix
-
-
 def _iter_chunk_tasks(n_rows, chunk_size):
     for kind in ("sci", "sky1", "sky2"):
         for i0 in range(0, n_rows, chunk_size):
@@ -500,12 +482,6 @@ def run(
         fit_model,
         palace_dir=palace_dir,
         moon_zodi_data_root=moon_zodi_data_root,
-    )
-    palace_suffix, palace_oh_suffix, palace_diffuse_suffix = resolve_palace_suffixes(
-        bundled_data_root=resolved_moon_zodi_data_root,
-        palace_suffix=palace_suffix,
-        palace_oh_suffix=palace_oh_suffix,
-        palace_diffuse_suffix=palace_diffuse_suffix,
     )
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
