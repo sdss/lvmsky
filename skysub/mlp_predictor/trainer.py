@@ -881,7 +881,7 @@ def _precompute_flux_basis_and_geometry(
     n_moon_knots,
     split_zodi,
     n_zodi_knots,
-    palace_oh_suffix="_joint_v2_updated",
+    palace_oh_suffix="_h_family_default_ef_v1",
     palace_diffuse_suffix="_joint_native_adam_invsky_p2_10000iter",
     verbose=True,
 ):
@@ -998,7 +998,7 @@ class Trainer:
         n_moon_knots,
         split_zodi,
         n_zodi_knots,
-        palace_oh_suffix="_joint_v2_updated",
+        palace_oh_suffix="_h_family_default_ef_v1",
         palace_diffuse_suffix="_joint_native_adam_invsky_p2_10000iter",
         verbose=True,
     ):

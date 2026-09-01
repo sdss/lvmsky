@@ -75,7 +75,7 @@ def populate_wavelength_cache(
     n_moon_knots: int,
     split_zodi: bool,
     n_zodi_knots: int,
-    palace_oh_suffix: str = "_joint_v2_updated",
+    palace_oh_suffix: str = "_h_family_default_ef_v1",
     palace_diffuse_suffix: str = "_joint_native_adam_invsky_p2_10000iter",
     verbose: bool = True,
 ) -> tuple[np.ndarray, np.ndarray] | tuple[None, None]:
@@ -192,7 +192,7 @@ def resolve_wavelengths_and_extinction(
     cache_path: Path,
     input_fits_for_basis: str | Path,
     use_fitted_extinction: bool = True,
-    palace_oh_suffix: str = "_joint_v2_updated",
+    palace_oh_suffix: str = "_h_family_default_ef_v1",
     palace_diffuse_suffix: str = "_joint_native_adam_invsky_p2_10000iter",
     n_wavelength_bins: int = 8,
     verbose: bool = True,

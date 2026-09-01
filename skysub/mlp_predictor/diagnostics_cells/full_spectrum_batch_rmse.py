@@ -284,7 +284,7 @@ else:
                 "Fall back to per-row reconstruct_with_lsf if this ever triggers on your dataset.")
     _lsf_model = SkyDecompLSFSurfaceIterative(
         _wave_ref_recon, lsf_sigma=1.0, n_spline_knots=N_MOON_KNOTS, base_dir=base_dir_guess,
-        palace_oh_suffix='_joint_v2_updated',
+        palace_oh_suffix='_h_family_default_ef_v1',
         palace_diffuse_suffix='_joint_native_adam_invsky_p2_10000iter',
         split_zodi=SPLIT_ZODI, n_zodi_spline_knots=N_ZODI_KNOTS,
     )
