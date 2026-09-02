@@ -47,7 +47,7 @@ e10_triplet = build_triplet_coef_dataset(
     sky_far_decomp_fits_path=EVERY10_FAR,
     sci_decomp_fits_path=EVERY10_SCI,
     context_columns=context_cols,
-    return_chi2=False,
+    return_chi2=True,
 )
 if '_augment_triplet_with_ecliptic' in globals():
     _augment_triplet_with_ecliptic(e10_triplet, meta_fits_path=EVERY10_INPUT)
@@ -73,8 +73,47 @@ _avail = np.where(_keep)[0]
 _rng = np.random.default_rng(rng_seed_atlas)
 _n_pick = int(min(n_sample_atlas, _avail.size))
 sel_pos = _rng.choice(_avail, size=_n_pick, replace=False)
-sel_rows = np.asarray(e10_triplet['row_index'], dtype=np.int64)[sel_pos]
 print(f'  atlas sample: n = {_n_pick} of {_avail.size} available every10 rows')
+
+# Drop rows whose DECOMPOSITION failed, using the same hard cap the training
+# corpus applies (data.apply_triplet_filters chi2_max).  This is a correctness
+# gate, not the tail-trimming the header warns against: the e10 corpus contains
+# rows with reduced_chi2 of order 1e30 (row 89 on the new-oh corpus), whose
+# "truth" spectrum is a broken QP solve.  Scoring the model against those is
+# meaningless, and because the sample is drawn with a fixed seed such a row sits
+# in every run, dominating any mean-based statistic.  The kappa/percentile
+# filters are still deliberately NOT applied.
+#
+# The gate is applied AFTER the draw, not before: `_rng.choice` indexes into
+# `_avail`, so shrinking the pool would resample every row and break
+# comparability with earlier runs.  Filtering the drawn sample instead keeps the
+# survivors a strict subset of the rows previous runs used.
+ATLAS_CHI2_MAX = 10.0
+_chi2_keys = ('chi2_near', 'chi2_far', 'chi2_sci')
+if all(_k in e10_triplet for _k in _chi2_keys):
+    _chi2_max_arm = np.nanmax(np.vstack(
+        [np.asarray(e10_triplet[_k], dtype=np.float64) for _k in _chi2_keys]), axis=0)
+    _chi2_ok_sel = (np.isfinite(_chi2_max_arm[sel_pos])
+                    & (_chi2_max_arm[sel_pos] <= ATLAS_CHI2_MAX))
+    _n_bad = int((~_chi2_ok_sel).sum())
+    if _n_bad:
+        print(f'  atlas chi2 gate (max-arm reduced_chi2 <= {ATLAS_CHI2_MAX:g}): '
+              f'dropped {_n_bad} failed-decomposition row(s) from the sample '
+              f'(worst chi2 = {np.nanmax(_chi2_max_arm[sel_pos][~_chi2_ok_sel]):.4g}, '
+              f'row_index '
+              f'{int(np.asarray(e10_triplet["row_index"])[sel_pos][~_chi2_ok_sel][np.nanargmax(_chi2_max_arm[sel_pos][~_chi2_ok_sel])])})')
+        sel_pos = sel_pos[_chi2_ok_sel]
+        _n_pick = int(sel_pos.size)
+        print(f'  atlas sample after gate: n = {_n_pick}')
+    else:
+        print(f'  atlas chi2 gate: all {_n_pick} sampled rows pass '
+              f'(max-arm reduced_chi2 <= {ATLAS_CHI2_MAX:g})')
+else:
+    _chi2_max_arm = None
+    print('  atlas chi2 gate: SKIPPED (triplet carries no chi2; '
+          'build with return_chi2=True)')
+
+sel_rows = np.asarray(e10_triplet['row_index'], dtype=np.int64)[sel_pos]
 
 # ML predictions for these rows.
 coef_sci_pred_atlas = predict_sci_coefficients_default(
@@ -122,7 +161,31 @@ def _precache_decomp_state(decomp_path):
 _state_sci = _precache_decomp_state(EVERY10_SCI)
 
 
+# Reconstruction components -> ML coefficient groups (§3.2).  'oh' and 'o2'
+# both belong to the mesospheric group; the rest are one-to-one.
+_ATLAS_COMPONENTS = {
+    'moon':                 ('moon',),
+    'zodi':                 ('zodi',),
+    'mesospheric (OH+O2)':  ('oh', 'o2'),
+    'continuum (diffuse)':  ('diffuse',),
+    'atomic':               ('atom',),
+    'ionospheric (ORC)':    ('orc',),
+}
+
+
+def _group_components(_comps):
+    """Sum the raw recon components into the six ML groups."""
+    _out = {}
+    for _gname, _keys in _ATLAS_COMPONENTS.items():
+        _acc = 0.0
+        for _k in _keys:
+            _acc = _acc + np.asarray(_comps.get(_k, 0.0), dtype=np.float64)
+        _out[_gname] = _acc
+    return _out
+
+
 def _reconstruct_sci_total(coef_row, row_idx, lsf_sigma_fallback):
+    """Return (total_flux, {group: component_flux}) for one row."""
     _lsf_state = None
     if _state_sci['has_lsf']:
         try:
@@ -140,17 +203,17 @@ def _reconstruct_sci_total(coef_row, row_idx, lsf_sigma_fallback):
         if _o2 is not None:
             _mats['o2'] = np.asarray(_o2, float).ravel()[None, :]
         _comps = _lsf_model._components_from_coef(np.asarray(coef_row, float).ravel(), _mats)
-        _total = (_comps['oh'] + _comps['moon'] + _comps.get('zodi', 0)
-                  + _comps['diffuse'] + _comps['atom'] + _comps['orc'] + _comps['o2'])
-        return np.asarray(_total, dtype=np.float64)
-    # Rare fallback.
-    _comps = reconstruct_with_lsf(
-        wave=_lsf_model.wave, coef=coef_row, lsf=lsf_sigma_fallback,
-        n_spline_knots=N_MOON_KNOTS, base_dir=base_dir_guess, o2_vector=_o2,
-        split_zodi=SPLIT_ZODI, n_zodi_spline_knots=N_ZODI_KNOTS)
-    _total = (_comps['oh'] + _comps['moon'] + _comps.get('zodi', 0)
-              + _comps['diffuse'] + _comps['atom'] + _comps['orc'] + _comps['o2'])
-    return np.asarray(_total, dtype=np.float64)
+    else:
+        # Rare fallback.
+        _comps = reconstruct_with_lsf(
+            wave=_lsf_model.wave, coef=coef_row, lsf=lsf_sigma_fallback,
+            n_spline_knots=N_MOON_KNOTS, base_dir=base_dir_guess, o2_vector=_o2,
+            split_zodi=SPLIT_ZODI, n_zodi_spline_knots=N_ZODI_KNOTS)
+    _by_group = _group_components(_comps)
+    _total = np.zeros_like(next(iter(_by_group.values())), dtype=np.float64)
+    for _v in _by_group.values():
+        _total = _total + _v
+    return np.asarray(_total, dtype=np.float64), _by_group
 
 
 # Reconstruct N rows: shape (n_pick, n_pix).
@@ -158,14 +221,27 @@ _n_pix = _wave_ref_recon.size
 _resid = np.full((_n_pick, _n_pix), np.nan, dtype=np.float64)
 _truth = np.full((_n_pick, _n_pix), np.nan, dtype=np.float64)
 
+# Per-component residual + truth stacks (float32: 2 x 6 groups x ~200 rows x
+# n_pix ~ 120 MB).  The truth stack is what lets the table report each group's
+# error in ITS OWN units, not just its share of the total flux.
+_resid_comp = {_g: np.full((_n_pick, _n_pix), np.nan, dtype=np.float32)
+               for _g in _ATLAS_COMPONENTS}
+_truth_comp = {_g: np.full((_n_pick, _n_pix), np.nan, dtype=np.float32)
+               for _g in _ATLAS_COMPONENTS}
+
 _t0 = _time.perf_counter()
 for _i, _rr in enumerate(sel_rows):
     _lsf_row = lsf_sci_arr if lsf_sci_arr.ndim == 1 else lsf_sci_arr[int(_rr)]
     _lsf_sigma_fb = _lsf_row / 2.35
-    _y_true = _reconstruct_sci_total(coef_sci_true_atlas[_i], _rr, _lsf_sigma_fb) / FACTOR
-    _y_pred = _reconstruct_sci_total(coef_sci_pred_atlas[_i], _rr, _lsf_sigma_fb) / FACTOR
+    _y_true, _c_true = _reconstruct_sci_total(coef_sci_true_atlas[_i], _rr, _lsf_sigma_fb)
+    _y_pred, _c_pred = _reconstruct_sci_total(coef_sci_pred_atlas[_i], _rr, _lsf_sigma_fb)
+    _y_true = _y_true / FACTOR
+    _y_pred = _y_pred / FACTOR
     _resid[_i, :] = _y_pred - _y_true
     _truth[_i, :] = _y_true
+    for _g in _ATLAS_COMPONENTS:
+        _resid_comp[_g][_i, :] = (_c_pred[_g] - _c_true[_g]) / FACTOR
+        _truth_comp[_g][_i, :] = _c_true[_g] / FACTOR
     if _i and _i % 50 == 0:
         print(f'  reconstructed {_i}/{_n_pick} rows ({_time.perf_counter() - _t0:.1f}s)')
 print(f'  atlas reconstruction: {_time.perf_counter() - _t0:.1f}s '
@@ -249,3 +325,162 @@ for _name, _lo, _hi in _bands:
     _mean_bias_frac = float(np.nanmean(_med_frac[_mask_lam]))
     print(f'  {_name:<20s} RMS|abs| = {_rms_abs:.3g}   '
           f'RMS|frac| = {_rms_frac:.3g}   mean_bias_frac = {_mean_bias_frac:+.3g}')
+
+# --- Per-component attribution -----------------------------------------------
+# Which coefficient group owns the residual in each band?  The decomposition is
+# done on a per-pixel MEAN rather than the median because the mean is linear:
+# sum_g mean_resid_g == mean_resid_total exactly, so the per-group numbers add
+# up to the total and each group's share is meaningful.  A plain mean is however
+# hostage to a single bad row, so the mean is TRIMMED: the worst TRIM_FRAC of
+# rows by mean |residual| are excluded here (they are reported separately in the
+# tail block below).  Trimming preserves additivity because it is still a mean,
+# just over a subset.  The median headline above is left untouched so it stays
+# comparable to earlier runs.
+TRIM_FRAC = 0.05
+
+_row_scale = np.nanmean(np.abs(_resid), axis=1)          # (n_pick,)
+_n_trim = int(np.ceil(TRIM_FRAC * _n_pick))
+_order = np.argsort(-np.nan_to_num(_row_scale, nan=-np.inf))
+_tail_rows, _keep_rows = _order[:_n_trim], _order[_n_trim:]
+
+_mean_tot = np.nanmean(_resid[_keep_rows], axis=0)
+_mean_comp = {_g: np.nanmean(_v[_keep_rows].astype(np.float64), axis=0)
+              for _g, _v in _resid_comp.items()}
+_truth_comp_mean = {_g: np.nanmean(_v[_keep_rows].astype(np.float64), axis=0)
+                    for _g, _v in _truth_comp.items()}
+_truth_mean = np.nanmean(_truth[_keep_rows], axis=0)
+_denom_mean = np.where(np.abs(_truth_mean) > 1e-30, _truth_mean, np.nan)
+
+_addit_err = float(np.nanmax(np.abs(sum(_mean_comp.values()) - _mean_tot)))
+_addit_scale = float(np.nanmax(np.abs(_mean_tot))) or 1.0
+print()
+print(f'Per-component attribution of the {int(100 * (1 - TRIM_FRAC))}%-TRIMMED '
+      f'MEAN residual, i.e. of the typical row '
+      f'({_n_pick - _n_trim} of {_n_pick} rows; additivity check: '
+      f'max|sum_g - total| = {_addit_err:.2e}, '
+      f'{100.0 * _addit_err / _addit_scale:.2g}% of peak).')
+print('  RMS|frac| is each group\'s mean residual over the band divided by the '
+      'TOTAL mean truth, so')
+print('  the column is directly comparable across groups.  bias_frac_% DOES sum '
+      'to the total (the')
+print('  mean is linear); share_of_total_% is a ratio of RMS and does NOT -- '
+      'independent components')
+print('  add in quadrature, so shares near ~40% each mean "no group dominates", '
+      'while a share near')
+print('  100% means that one group owns the band\'s residual outright.')
+print('  flux_share_% is the group\'s share of the band\'s truth flux; '
+      'self_bias_% is its summed')
+print('  residual over its OWN summed flux -- i.e. how wrong the group is in '
+      'its own units, which')
+print('  is the number to tune against.  A group can own the total bias while '
+      'being only slightly')
+print('  wrong in itself (large flux_share) or be badly wrong yet nearly '
+      'invisible (small share).')
+for _name, _lo, _hi in _bands:
+    _mask_lam = (_wave_ref_recon >= _lo) & (_wave_ref_recon < _hi)
+    if not _mask_lam.any():
+        continue
+    _rows_c = []
+    for _g in list(_ATLAS_COMPONENTS) + ['TOTAL']:
+        _v = _mean_tot if _g == 'TOTAL' else _mean_comp[_g]
+        _t = _truth_mean if _g == 'TOTAL' else _truth_comp_mean[_g]
+        _vf = _v / _denom_mean
+        # Band-integrated self-normalisation: divide the group's summed residual
+        # by its own summed truth flux over the band.  Integrating before
+        # dividing keeps this finite where a component's flux is ~0 at a given
+        # pixel (moon on moon-down rows, atomic away from its lines).
+        _t_band = float(np.nansum(np.abs(_t[_mask_lam])))
+        _self_bias = (100.0 * float(np.nansum(_v[_mask_lam])) / _t_band
+                      if _t_band > 0 else np.nan)
+        _rows_c.append({
+            'component': _g,
+            'RMS|abs|': float(np.sqrt(np.nanmean(_v[_mask_lam] ** 2))),
+            'RMS|frac|_%': 100.0 * float(np.sqrt(np.nanmean(_vf[_mask_lam] ** 2))),
+            'bias_frac_%': 100.0 * float(np.nanmean(_vf[_mask_lam])),
+            'flux_share_%': (100.0 * _t_band
+                             / max(float(np.nansum(np.abs(_truth_mean[_mask_lam]))), 1e-300)),
+            'self_bias_%': _self_bias,
+        })
+    _df_c = pd.DataFrame(_rows_c)
+    _tot_rms = float(_df_c.loc[_df_c['component'] == 'TOTAL', 'RMS|abs|'].iloc[0])
+    _df_c['share_of_total_%'] = np.where(
+        _df_c['component'] == 'TOTAL', np.nan,
+        100.0 * _df_c['RMS|abs|'] / max(_tot_rms, 1e-300))
+    print()
+    print(f'  --- band {_name} ---')
+    print(_df_c.to_string(index=False, float_format=lambda v: f'{v:.4g}',
+                          na_rep='-'))
+    _worst = _df_c[_df_c['component'] != 'TOTAL'].sort_values(
+        'RMS|abs|', ascending=False).iloc[0]
+    print(f"    dominant: {_worst['component']} "
+          f"({_worst['share_of_total_%']:.0f}% of the band's total residual RMS, "
+          f"bias {_worst['bias_frac_%']:+.2f}%)")
+
+# --- Tail concentration ------------------------------------------------------
+# How much did the trim above actually remove?  If the untrimmed mean is far
+# from the trimmed mean, a few rows carry the sample and any conclusion drawn
+# from an untrimmed statistic is a statement about them, not about the model.
+print()
+print(f'Tail concentration: per-band fractional bias computed three ways '
+      f'(n={_n_pick} rows, trim drops the worst {_n_trim}).')
+print('  If trimmed ~ median and both << mean, the mean-based attribution above '
+      'is a tail statement,')
+print('  not a description of the typical row -- fix the tail, not the group '
+      'weights.')
+_mean_raw = np.nanmean(_resid, axis=0)
+_denom_raw = np.nanmean(_truth, axis=0)
+_denom_raw = np.where(np.abs(_denom_raw) > 1e-30, _denom_raw, np.nan)
+_rows_t = []
+for _name, _lo, _hi in _bands:
+    _mask_lam = (_wave_ref_recon >= _lo) & (_wave_ref_recon < _hi)
+    if not _mask_lam.any():
+        continue
+    _rows_t.append({
+        'band': _name,
+        'bias_mean_%':   100.0 * float(np.nanmean((_mean_raw / _denom_raw)[_mask_lam])),
+        f'bias_trim{int(100 * TRIM_FRAC)}_%':
+            100.0 * float(np.nanmean((_mean_tot / _denom_mean)[_mask_lam])),
+        'bias_median_%': 100.0 * float(np.nanmean(_med_frac[_mask_lam])),
+    })
+print(pd.DataFrame(_rows_t).to_string(index=False,
+                                      float_format=lambda v: f'{v:+.3f}'))
+
+# Which rows, and what regime are they in?
+_ctx_names_e10 = list(e10_triplet['ctx_names'])
+_ctx_sci_e10 = np.asarray(e10_triplet['ctx_sci'], dtype=np.float64)[sel_pos]
+
+
+def _ctx_col(_nm):
+    return (_ctx_sci_e10[:, _ctx_names_e10.index(_nm)]
+            if _nm in _ctx_names_e10 else np.full(_n_pick, np.nan))
+
+
+_moon_alt_e10 = _ctx_col('moon_alt')
+_eclb_e10 = _ctx_col('ecl_beta_deg')
+_airm_e10 = _ctx_col('airmass')
+# chi2 of the sampled rows, so a tail row that is simply a hard observation can
+# be told apart from one whose decomposition failed (these survived the gate,
+# so all should be <= ATLAS_CHI2_MAX -- a value near the cap is still a warning).
+_chi2_sel = (_chi2_max_arm[sel_pos] if _chi2_max_arm is not None
+             else np.full(_n_pick, np.nan))
+print()
+print(f'Worst {_n_trim} rows by mean |residual| (they set the mean-based table):')
+_rows_w = []
+for _i in _tail_rows:
+    _dom = max(_ATLAS_COMPONENTS,
+               key=lambda _g: float(np.nanmean(np.abs(_resid_comp[_g][_i]))))
+    _rows_w.append({
+        'row_index': int(sel_rows[_i]),
+        'mean|resid|': float(_row_scale[_i]),
+        'x_median_row': float(_row_scale[_i] / max(np.nanmedian(_row_scale), 1e-300)),
+        'dominant_comp': _dom,
+        'chi2': float(_chi2_sel[_i]),
+        'moon_alt': float(_moon_alt_e10[_i]),
+        'ecl_beta': float(_eclb_e10[_i]),
+        'airmass': float(_airm_e10[_i]),
+    })
+print(pd.DataFrame(_rows_w).to_string(index=False,
+                                      float_format=lambda v: f'{v:.4g}'))
+_dom_counts = pd.Series([_r['dominant_comp'] for _r in _rows_w]).value_counts()
+print(f'  dominant component among the tail rows: '
+      f'{", ".join(f"{_k} x{_v}" for _k, _v in _dom_counts.items())}')

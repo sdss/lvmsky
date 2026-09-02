@@ -78,6 +78,16 @@ def train_compressed_group_mlp(
     mesospheric_group_weight=1.0,
     ionospheric_group_weight=1.0,
     blend_init_alpha=0.7,
+    # 2026-09-01: learning-rate multiplier for the blend-alpha parameters
+    # (``blend_alpha_direct`` + the ctx-alpha predictors).  At the default 1.0
+    # alpha barely moves from its init within the early-stopping budget -- the
+    # loss surface in alpha is nearly flat because the additive head absorbs any
+    # systematic part of a mis-set blend, and the ctx path is damped further by
+    # the sigmoid (sigma' = 0.25 at alpha=0.5, 0.128 at 0.85).  Measured travel
+    # over a run: scalar groups +0.08..+0.24, ctx groups +0.01..+0.05, always
+    # toward the near arm and still climbing at early stop.  Raising this lets
+    # alpha reach its own optimum so the init stops being a hyperparameter.
+    alpha_lr_mult=1.0,
     alpha_ctx_features=("moon_up_smooth", "ecl_beta_deg", "airmass"),
     zodi_ctx_restriction=(),
     continuum_ctx_restriction=(),
@@ -403,16 +413,27 @@ def train_compressed_group_mlp(
         moon_zodi_ctx_restriction=moon_zodi_ctx_restriction,
     ).to(device)
 
-    # Blend params (per-group alpha) get weight_decay=0 and are clamped
-    # to [eps, 1-eps] after each optimizer step.
+    # Blend params (per-group alpha) get weight_decay=0, an optional LR boost,
+    # and -- for the direct-parametrised ones -- clamping to [eps, 1-eps] after
+    # each optimizer step.  The ctx-alpha predictors join this group: they are
+    # blend parameters too, and leaving them under weight decay was never the
+    # intent.  (At alpha_lr_mult=1.0 that regrouping is numerically a no-op:
+    # decoupled decay would have shrunk them by lr*wd per step, i.e. <0.03% over
+    # a full run.)
     blend_pnames = {f'blend_alpha_direct.{_k}' for _k in model.blend_alpha_direct}
-    blend_params = [_p for _n, _p in model.named_parameters() if _n in blend_pnames]
-    other_params = [_p for _n, _p in model.named_parameters() if _n not in blend_pnames]
+    blend_params, other_params = [], []
+    for _n, _p in model.named_parameters():
+        if _n in blend_pnames or _n.startswith('alpha_predictors.'):
+            blend_params.append(_p)
+        else:
+            other_params.append(_p)
+    _alpha_lr = float(lr) * float(alpha_lr_mult)
     opt = torch.optim.AdamW(
-        [{'params': other_params, 'weight_decay': float(weight_decay)},
-         {'params': blend_params, 'weight_decay': 0.0}],
+        [{'params': other_params, 'weight_decay': float(weight_decay), 'lr': float(lr)},
+         {'params': blend_params, 'weight_decay': 0.0, 'lr': _alpha_lr}],
         lr=float(lr))
-    print(f"Blend optim: direct (n_blend_params={sum(p.numel() for p in blend_params)})")
+    print(f"Blend optim: direct (n_blend_params={sum(p.numel() for p in blend_params)}, "
+          f"alpha_lr={_alpha_lr:.2e} = {float(alpha_lr_mult):g} x lr)")
 
     def compressed_loss(pred_dict, yb, w_row, w_pe, row_idx_b):
         loss = torch.tensor(0.0, device=yb.device)
@@ -702,6 +723,7 @@ def train_compressed_group_mlp(
         'history': history,
         'blend_history': blend_history,
         'blend_init_alpha': float(blend_init_alpha),
+        'alpha_lr_mult': float(alpha_lr_mult),
         'best_val_loss': float(best_val),
         'best_epoch': int(best_epoch),
         'train_idx': train_idx, 'val_idx': val_idx, 'test_idx': test_idx,
@@ -728,6 +750,7 @@ def train_compressed_group_mlp(
             'mesospheric_group_weight': float(mesospheric_group_weight),
             'ionospheric_group_weight': float(ionospheric_group_weight),
             'blend_init_alpha': float(blend_init_alpha),
+            'alpha_lr_mult': float(alpha_lr_mult),
             'bright_moon_close_boost': float(bright_moon_close_boost),
             'bright_moon_close_fli_min': float(bright_moon_close_fli_min),
             'bright_moon_close_sep_max_deg': float(bright_moon_close_sep_max_deg),
@@ -827,6 +850,8 @@ default_dual_group_config: dict[str, Any] = {
     "continuum_head_extra_dims": (64,),
     "continuum_branch_dims": (128, 64),
     "moon_zodi_coupling_dims": (64, 32),
+    "blend_init_alpha": 0.7,
+    "alpha_lr_mult": 1.0,
     "weight_decay": 1.0e-4,
     "patience": 12,
     "moon_group_weight": 2.0,
@@ -950,8 +975,49 @@ class Trainer:
         )
     """
 
+    #: Every config key the Trainer actually reads.  ``_shared_train_kwargs``
+    #: reads all of these except ``ensemble_seeds`` / ``name``, which
+    #: ``run_ensemble`` handles.  Keep in sync when adding a knob -- the
+    #: ``test_consumed_cfg_keys_match_source`` check greps the class body for
+    #: ``c["..."]`` / ``c.get("...")`` and compares against this set.
+    _CONSUMED_CFG_KEYS = frozenset({
+        "name", "ensemble_seeds",
+        "n_epochs", "batch_size", "lr", "weight_decay", "patience",
+        "encoder_dims", "ctx_dims", "trunk_dims", "head_dim",
+        "zodi_head_extra_dims", "continuum_head_extra_dims",
+        "continuum_branch_dims", "moon_zodi_coupling_dims",
+        "moon_zodi_ctx_restriction", "zodi_ctx_restriction",
+        "continuum_ctx_restriction", "alpha_ctx_features",
+        "blend_init_alpha", "alpha_lr_mult",
+        "moon_group_weight", "zodi_group_weight", "continuum_group_weight",
+        "mesospheric_group_weight", "ionospheric_group_weight",
+        "bright_moon_close_boost", "bright_moon_close_fli_min",
+        "bright_moon_close_sep_max_deg",
+        "coef_err_sigma_floor_rel", "flux_mse_groups",
+    })
+
     def __init__(self, cfg=None):
         self.cfg = dict(cfg) if cfg is not None else dict(default_dual_group_config)
+        # Warn loudly about knobs the Trainer will not read.  The 2026-08-27d
+        # dead-code sweep removed a batch of them from the trainer signature
+        # but callers (notebook cell 9) still carry the pre-sweep list, so an
+        # edit to one of those entries silently does nothing -- exactly how a
+        # blend_init_alpha=0.5 A/B ran at the 0.7 default on 2026-09-01.
+        _ignored = sorted(set(self.cfg) - self._CONSUMED_CFG_KEYS)
+        if _ignored:
+            print(
+                f"[Trainer] WARNING: {len(_ignored)} config key(s) are NOT read by "
+                f"the trainer and will have no effect on this run:\n"
+                f"           {', '.join(_ignored)}\n"
+                f"           Remove them, or check the spelling if you meant to "
+                f"change behaviour."
+            )
+        _missing = sorted(self._CONSUMED_CFG_KEYS
+                          - {"name", "ensemble_seeds"} - set(self.cfg))
+        if _missing:
+            raise KeyError(
+                f"Trainer cfg is missing required key(s): {', '.join(_missing)}. "
+                f"Start from mlp_predictor.trainer.default_dual_group_config.")
 
     def _shared_train_kwargs(self, *, flux_basis_matrices, flux_geom_sc_sci):
         c = self.cfg
@@ -968,6 +1034,8 @@ class Trainer:
             continuum_branch_dims=tuple(int(v) for v in c["continuum_branch_dims"]),
             moon_zodi_ctx_restriction=c["moon_zodi_ctx_restriction"],
             moon_zodi_coupling_dims=tuple(int(v) for v in c["moon_zodi_coupling_dims"]),
+            blend_init_alpha=float(c["blend_init_alpha"]),
+            alpha_lr_mult=float(c["alpha_lr_mult"]),
             weight_decay=float(c["weight_decay"]),
             patience=int(c["patience"]),
             moon_group_weight=float(c["moon_group_weight"]),

@@ -66,6 +66,7 @@ from .data import (
     _build_group_indices,
     _decode_cyclic_context,
     _infer_base_dir_for_reconstruction,
+    _sun_ecliptic_longitude_deg,
 )
 from .metrics import (
     load_pixel_sigma_if_available,
@@ -129,6 +130,7 @@ def _base_globals() -> dict:
         "_build_group_indices": _build_group_indices,
         "_decode_cyclic_context": _decode_cyclic_context,
         "_infer_base_dir_for_reconstruction": _infer_base_dir_for_reconstruction,
+        "_sun_ecliptic_longitude_deg": _sun_ecliptic_longitude_deg,
         "airglow_geometry_scale": airglow_geometry_scale,
         "airglow_van_rhijn_matrix": airglow_van_rhijn_matrix,
         "airglow_extinction_matrix": airglow_extinction_matrix,
