@@ -6,14 +6,43 @@
 #                                       - c_far_g[j]/G_far_g[j])**2 ) / 2
 #     err_g(r)   = sqrt( mean_{j in g} (c_pred_g[j] - c_true_g[j])**2 )
 # Delta measures the gravity-wave / systematic noise seen simultaneously by
-# the two sky arms; err is what the ML head produced.  If err ~ Delta, the
-# model has reached the physically achievable floor -- pushing further is
-# limited by intrinsic sky variability, not by the network.
+# the two sky arms; err is what the ML head produced.
+#
+# WHERE THE FLOOR ACTUALLY IS.  err/Delta ~ 1 is NOT the floor -- reading it
+# that way over-states the headroom and has already cost one wasted training
+# run (2026-09-01, mesospheric_group_weight=1.75; see the changelog).  Take the
+# simplest model of the three pointings: a common field F plus an independent
+# per-pointing deviation delta (gravity waves, spatial structure) and an
+# independent per-row decomposition noise eps, with
+# sigma_tot^2 = sigma_delta^2 + sigma_eps^2.  Then
+#
+#     near - far  has variance 2*sigma_tot^2, so RMS = sqrt(2)*sigma_tot
+#     Delta       = 0.5 * sqrt(2) * sigma_tot  =  0.707 * sigma_tot
+#
+# and err is measured against a sci truth that carries its OWN independent
+# delta + eps.  So:
+#
+#     err/Delta ~ 1.41  an oracle that knows the common field F exactly
+#                       (err = sigma_tot)
+#     err/Delta ~ 1.73  the best you can do by averaging the two arms with no
+#                       extra information (err = sqrt(1.5)*sigma_tot)
+#     err/Delta ~ 2.00  copying a single arm (this is B0_copy_near in
+#                       naive_baseline, so the two cells are on one scale)
+#     err/Delta < 1.41  the head is predicting the sci-specific deviation from
+#                       context -- information the arms do not carry.  This is
+#                       a genuinely good result, not a suspicious one.
+#
+# Those landmarks assume the two arms are exchangeable and equidistant from
+# the sci pointing.  They are not: the learned blend alpha sits at 0.85-0.95
+# (§3.5), i.e. the near arm is much the more informative of the two, which
+# pushes the achievable value below 1.73.  Treat 1.41-1.73 as a band rather
+# than a line, and only read err/Delta well above ~1.8 as real headroom.
 #
 # Per group we report:
-#   median(err/Delta), P50(err), P50(Delta), and the fraction of rows where
-#   err <= 1.5 * Delta (on-floor).
-# Higher err/Delta = more headroom for ML improvement.
+#   median(err/Delta), P50(err), P50(Delta), and the fraction of rows with
+#   err <= 1.5 * Delta ('on-floor_frac' -- retained under that name for
+#   comparability with earlier runs, though 1.5 sits inside the band above,
+#   so it reads as "at or inside the noise band", not "beat the floor").
 
 required = ['filtered_triplet', 'compress_geom_kwargs', '_group_indices_compress',
             'coef_near_all', 'coef_far_all', 'coef_sci_all',
@@ -97,12 +126,31 @@ for regime, mask in _masks.items():
               float_format=lambda v: f'{v:.4g}'))
 
 print()
-print('Interpretation:')
-print('  p50_err/delta ~ 1  -> ML is at the sky-arm noise floor for this group/regime.')
-print('  p50_err/delta > 2  -> substantial ML headroom above the floor.')
-print('  p50_err/delta < 1  -> ML uses ctx information the arms do not carry (a '
-      'good sign: the head is genuinely predictive).')
-print('  on-floor_frac      -> fraction of rows where ML error <= 1.5 * Delta.')
+print('Interpretation -- the floor is NOT at err/delta = 1:')
+print('  With Delta = 0.5*RMS(near - far) and iid per-pointing scatter, '
+      'Delta ~ 0.707*sigma,')
+print('  while err is measured against a sci truth carrying its own '
+      'independent sigma.  So:')
+print('    err/delta ~ 1.41  <- an oracle that knows the common field exactly')
+print('    err/delta ~ 1.73  <- best possible from averaging the two arms alone')
+print('    err/delta ~ 2.00  <- copying one arm (= B0_copy_near in '
+      'naive_baseline)')
+print('    err/delta < 1.41  <- the head predicts the sci-specific deviation '
+      'from ctx;')
+print('                         information the arms do not carry.  A good '
+      'result.')
+print('    err/delta > ~1.8  <- the only regime that is genuinely ML headroom.')
+print('  The 1.41/1.73 landmarks assume the arms are exchangeable and '
+      'equidistant from sci.')
+print('  They are not (learned blend alpha is 0.85-0.95, so near dominates), '
+      'which lowers the')
+print('  achievable value -- treat 1.41-1.73 as a band, not a line.')
+print('  on-floor_frac      -> fraction of rows with err <= 1.5 * Delta, i.e. '
+      'at or inside that band.')
+print('  CAUTION: a group sitting at ~1.4 is at its floor, not 40% above it.  '
+      'Weighting such a')
+print('  group harder chases irreducible noise -- it overfits and drags the '
+      'shared trunk with it.')
 
 # --- Scatter plot: ML err vs Delta, one panel per group, on the "all" regime ---
 _n_g = len(_group_names)
