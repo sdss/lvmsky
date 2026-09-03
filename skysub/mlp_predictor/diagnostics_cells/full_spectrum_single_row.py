@@ -17,6 +17,10 @@ REQUESTED_ROW = 978
 # REQUESTED_ROW = 742
 # REQUESTED_ROW = 830
 
+# Overlay the frozen physical Moon/Zodi model on the three flux panels
+# (see 5b below).  Costs ~0.25 s per arm; set False to skip it entirely.
+SHOW_MOON_ZODI_MODEL = True
+
 required = [
     "mlp_artifacts",
     "predict_sci_coefficients_default",
@@ -461,6 +465,177 @@ else:
     _pct_subline = ''
 
 
+# 5b) Frozen physical Moon + Zodi model overlay (sky_decomp/moon_zodi_model.py).
+#     This is independent of both the decomposition and the ML: it predicts the
+#     scattered-moonlight and zodiacal continua from exposure-midpoint ephemeris
+#     geometry alone (ROLO albedo x solar SED x Rayleigh/HG scattering for the
+#     moon, Leinert B500 for the zodi).  Overlaying it on the three flux panels
+#     gives a physical reference for the amplitudes the QP assigned to Moon_bs /
+#     Zodi_bs, and for what the ML predicted at the sci pointing.  Each arm uses
+#     its own pointing and its own LSF.
+import warnings as _warnings
+
+
+class _MzOverlayDisabled(Exception):
+    """Internal sentinel: overlay switched off, not a failure."""
+
+
+_mz_overlay = {}
+if not SHOW_MOON_ZODI_MODEL:
+    print("  moon/zodi physical model overlay: disabled "
+          "(SHOW_MOON_ZODI_MODEL = False)")
+try:
+    if not SHOW_MOON_ZODI_MODEL:
+        raise _MzOverlayDisabled
+    from sky_decomp.moon_zodi_model import (
+        MoonZodiInvalidObservationError,
+        MoonZodiObservation,
+        MoonZodiPhysicalModel,
+    )
+
+    with fits.open(EVERY10_INPUT) as _hdul_mz:
+        _mz_meta = _hdul_mz["META"].data[idx_row]
+        _mz_meta_names = set(_hdul_mz["META"].columns.names or ())
+        _mz_lsf = {}
+        for _arm, _ext in (("near", "LSF_SKY_NEAR"),
+                           ("far", "LSF_SKY_FAR"),
+                           ("sci", "LSF_SCI")):
+            _a = (np.asarray(_hdul_mz[_ext].data, dtype=np.float64)
+                  if _ext in _hdul_mz else lsf_sci_arr)
+            _mz_lsf[_arm] = np.asarray(_a if _a.ndim == 1 else _a[idx_row],
+                                       dtype=np.float64)
+
+    # Exposure length: prefer a metadata column, else the pipeline's 900 s
+    # default (decompose_parallel._WORKER_EXPOSURE_SECONDS).
+    _mz_exp, _mz_exp_src = 900.0, "assumed_900s"
+    for _c in ("exposure_seconds", "exptime"):
+        if _c in _mz_meta_names:
+            _v = float(_mz_meta[_c])
+            if np.isfinite(_v) and _v > 0.0:
+                _mz_exp, _mz_exp_src = _v, "metadata"
+                break
+
+    _mz_date_obs = (_mz_meta["date_obs"].decode().strip()
+                    if isinstance(_mz_meta["date_obs"], bytes)
+                    else str(_mz_meta["date_obs"]).strip())
+    _mz_model = MoonZodiPhysicalModel()
+    _mz_roles = {
+        "near": ("sky_near", "sky_near_ra", "sky_near_dec"),
+        "far":  ("sky_far",  "sky_far_ra",  "sky_far_dec"),
+        "sci":  ("sci",      "sci_ra",      "sci_dec"),
+    }
+    for _arm, (_role, _rac, _decc) in _mz_roles.items():
+        _obs = MoonZodiObservation(
+            expnum=int(_mz_meta["expnum"]),
+            date_obs=_mz_date_obs,
+            role=_role,
+            target_ra_deg=float(_mz_meta[_rac]),
+            target_dec_deg=float(_mz_meta[_decc]),
+            exposure_seconds=_mz_exp,
+            exposure_seconds_source=_mz_exp_src,
+        )
+        try:
+            # astropy warns about IERS coverage for these epochs; the model
+            # deliberately pins the packaged table (compute_midpoint_geometry
+            # sets iers.conf.auto_download=False), so the warning is expected.
+            with _warnings.catch_warnings():
+                _warnings.simplefilter("ignore")
+                _pr = _mz_model.predict(wave_row, _mz_lsf[_arm], _obs,
+                                        physical_to_fit_flux_scale=FACTOR)
+            # predict() returns fit-flux units (scaled by FACTOR); divide back to
+            # physical so these match every other trace in this cell, which is
+            # stored physical and multiplied by FACTOR at plot time.
+            _mz_overlay[_arm] = {
+                "moon": np.asarray(_pr.moon, dtype=np.float64) / FACTOR,
+                "zodi": np.asarray(_pr.zodi, dtype=np.float64) / FACTOR,
+                "state": _pr.state,
+            }
+        except MoonZodiInvalidObservationError as _exc:
+            print(f"  moon/zodi model: {_arm} arm not modellable ({_exc.reason})")
+except _MzOverlayDisabled:
+    pass
+except Exception as _exc:  # missing data bundle, ephemeris, META columns, ...
+    print(f"  moon/zodi model overlay unavailable: "
+          f"{type(_exc).__name__}: {_exc}")
+
+if _mz_overlay:
+    # Compare the physical model against the amplitudes the QP actually fitted
+    # (and, for sci, against what the ML predicted).  Ratios are band-integrated
+    # so they are insensitive to per-pixel noise.
+    _mz_decomp = {
+        "near": comps_near_from_near,
+        "far": comps_far_from_far,
+        "sci": comps_sci_true,
+    }
+    _mz_rows = []
+    for _arm, _ov in _mz_overlay.items():
+        _geo = _ov["state"].geometry
+        _row = {
+            "arm": _arm,
+            "moon_alt": _geo.moon_altitude_deg,
+            "moon_sep": _geo.moon_separation_deg,
+            "phase": _geo.signed_phase_deg,
+            "zodi_b500": _geo.zodi_b500,
+        }
+        _mod_sum = _fit_sum = 0.0
+        for _fam in ("moon", "zodi"):
+            _mod = float(np.nansum(_ov[_fam]))
+            _fit = float(np.nansum(np.asarray(
+                _mz_decomp[_arm].get(_fam, 0.0), dtype=np.float64) / FACTOR))
+            _row[f"{_fam}_fit/model"] = (_fit / _mod if abs(_mod) > 0 else np.nan)
+            _mod_sum += _mod
+            _fit_sum += _fit
+        # moon and zodi are both reddened solar continua, so the QP can trade
+        # amplitude between them almost freely (§1.2.2).  The combined ratio is
+        # the identifiable quantity: if it sits near 1 while the two individual
+        # ratios are far off, the disagreement is a *split* problem, not an
+        # amplitude problem -- and only the split is degenerate.
+        _row["(moon+zodi)_fit/model"] = (_fit_sum / _mod_sum
+                                         if abs(_mod_sum) > 0 else np.nan)
+        _mz_rows.append(_row)
+    # Same ratio for the ML prediction at the sci pointing.
+    if "sci" in _mz_overlay:
+        _row = {"arm": "sci (ML pred)", "moon_alt": np.nan, "moon_sep": np.nan,
+                "phase": np.nan, "zodi_b500": np.nan}
+        _mod_sum = _pred_sum = 0.0
+        for _fam in ("moon", "zodi"):
+            _mod = float(np.nansum(_mz_overlay["sci"][_fam]))
+            _pred = float(np.nansum(np.asarray(
+                comps_sci.get(_fam, 0.0), dtype=np.float64) / FACTOR))
+            _row[f"{_fam}_fit/model"] = (_pred / _mod if abs(_mod) > 0 else np.nan)
+            _mod_sum += _mod
+            _pred_sum += _pred
+        _row["(moon+zodi)_fit/model"] = (_pred_sum / _mod_sum
+                                         if abs(_mod_sum) > 0 else np.nan)
+        _mz_rows.append(_row)
+    _mz_state0 = next(iter(_mz_overlay.values()))["state"]
+    print(f"  moon/zodi physical model {_mz_state0.model_id} "
+          f"({_mz_state0.formula_version}), exposure {_mz_exp:.0f}s "
+          f"[{_mz_exp_src}], flags={_mz_state0.flags}")
+    print(f"    scientific_status = {_mz_state0.scientific_status!r}")
+    print(f"    correction_scope  = {_mz_state0.correction_scope!r}")
+    print(pd.DataFrame(_mz_rows).to_string(
+        index=False, float_format=lambda v: f'{v:.3g}', na_rep='-'))
+    # Read the ratios with the model's own scope in mind.  The fitted
+    # correction is applied to the moon+zodi SUM (CORRECTION_SCOPE =
+    # 'moon_plus_zodi'), so the combined column is the only one the model is
+    # calibrated to reproduce.  The individual moon and zodi columns compare
+    # against vectors the fit never constrained separately, so a large split
+    # discrepancy there is NOT evidence that the QP mis-assigned the families
+    # -- the two are degenerate in the model exactly as they are in the QP.
+    print("    (moon+zodi)_fit/model is the calibrated comparison: ~1 means the "
+          "total continuum")
+    print("    amplitude agrees with the frozen physical prediction.  The "
+          "per-family columns are")
+    print("    indicative only -- the model's correction scope is the sum, so it "
+          "does not claim to")
+    print("    split moon from zodi any better than the decomposition does.")
+    print("    NB scientific_status marks this model diagnostic-only; use it as "
+          "a sanity reference,")
+    print("    not as truth.")
+    print()
+
+
 # 6) Four-panel diagnostic plot:
 #    row1: near observed vs reconstruction from near coefficients
 #    row2: far observed vs reconstruction from far coefficients
@@ -479,6 +654,35 @@ fig = make_subplots(
     ),
     row_heights=[0.24, 0.24, 0.34, 0.18],
 )
+
+# Physical Moon/Zodi model overlays, one pair per flux panel.  Dotted so they
+# read as an external reference rather than as data or reconstruction.
+def _add_mz_traces(_arm, _row):
+    _ov = _mz_overlay.get(_arm)
+    if _ov is None:
+        return
+    _mz_curves = (
+        ("moon", _ov["moon"], "#9467bd", "dot", 1.2),
+        ("zodi", _ov["zodi"], "#17becf", "dot", 1.2),
+        # The model's correction scope is moon_plus_zodi, so the sum is the only
+        # calibrated curve here -- drawn heavier than its two parts.
+        ("moon+zodi", _ov["moon"] + _ov["zodi"], "#8c564b", "dashdot", 1.7),
+    )
+    for _fam, _y, _color, _dash, _w in _mz_curves:
+        fig.add_trace(
+            go.Scattergl(
+                x=wave_row,
+                y=_y * FACTOR,
+                mode="lines",
+                name=f"{_fam} physical model",
+                legendgroup=f"mz_{_fam}",
+                showlegend=(_row == 1),
+                line=dict(color=_color, width=_w, dash=_dash),
+            ),
+            row=_row,
+            col=1,
+        )
+
 
 fig.add_trace(
     go.Scattergl(
@@ -502,6 +706,7 @@ fig.add_trace(
     row=1,
     col=1,
 )
+_add_mz_traces("near", 1)
 
 fig.add_trace(
     go.Scattergl(
@@ -525,6 +730,7 @@ fig.add_trace(
     row=2,
     col=1,
 )
+_add_mz_traces("far", 2)
 
 fig.add_trace(
     go.Scattergl(
@@ -559,6 +765,7 @@ fig.add_trace(
     row=3,
     col=1,
 )
+_add_mz_traces("sci", 3)
 
 fig.add_trace(
     go.Scattergl(
@@ -766,6 +973,27 @@ fig_continuum.update_layout(
 )
 fig_continuum.show()
 
+# Physical-model overlay for the single-family spline-spectrum panels below.
+# One trace per physical pointing: "sci true" and "pred default" share the sci
+# pointing, so the model contributes three curves, not four.
+def _add_mz_family_traces(_target_fig, _fam):
+    for _arm, _color in (("near", "#7f7f7f"), ("far", "#bdbdbd"), ("sci", "#1f78b4")):
+        _ov = _mz_overlay.get(_arm)
+        if _ov is None:
+            continue
+        _target_fig.add_trace(
+            go.Scattergl(
+                x=wave_row,
+                # comps[...] in these panels is plotted in fit units without a
+                # *FACTOR, while _mz_overlay is stored physical -- hence *FACTOR.
+                y=_ov[_fam] * FACTOR,
+                mode="lines",
+                name=f"{_arm} physical model",
+                line=dict(color=_color, width=1.6, dash="dot"),
+            )
+        )
+
+
 fig_moon_spectrum = go.Figure()
 for _arm, _comps in _comps_by_arm.items():
     fig_moon_spectrum.add_trace(
@@ -777,6 +1005,7 @@ for _arm, _comps in _comps_by_arm.items():
             line=dict(color=_arm_colors[_arm], width=1.2),
         )
     )
+_add_mz_family_traces(fig_moon_spectrum, "moon")
 fig_moon_spectrum.update_layout(
     template="plotly_white",
     title=dict(
@@ -806,6 +1035,7 @@ if 'zodi' in comps_sci:
                 line=dict(width=1.4),
             )
         )
+    _add_mz_family_traces(fig_zodi_spectrum, 'zodi')
     fig_zodi_spectrum.update_layout(
         template='plotly_white',
         title=dict(

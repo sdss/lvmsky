@@ -477,9 +477,15 @@ class Diagnostics:
         return int(matches[0])
 
     def full_spectrum_single_row(self, row: int | None = None,
-                                 expnum: int | None = None) -> dict:
+                                 expnum: int | None = None,
+                                 show_moon_zodi_model: bool = True) -> dict:
         """Reconstruct a single every10 row.  Pass ``row`` (every10 index)
-        or ``expnum`` (looked up via the every10 META FITS)."""
+        or ``expnum`` (looked up via the every10 META FITS).
+
+        ``show_moon_zodi_model`` overlays the frozen physical Moon/Zodi model
+        (``sky_decomp.moon_zodi_model``) on the near/far/sci flux panels and
+        prints its fit/model amplitude table; set False to skip it.
+        """
         if expnum is not None and row is not None:
             raise TypeError("pass row OR expnum, not both")
         if expnum is not None:
@@ -488,7 +494,11 @@ class Diagnostics:
             row = 978
         return self._run(
             "full_spectrum_single_row",
-            source_patches=[(r"^REQUESTED_ROW\s*=\s*\d+", f"REQUESTED_ROW = {int(row)}")],
+            source_patches=[
+                (r"^REQUESTED_ROW\s*=\s*\d+", f"REQUESTED_ROW = {int(row)}"),
+                (r"^SHOW_MOON_ZODI_MODEL\s*=\s*(?:True|False)",
+                 f"SHOW_MOON_ZODI_MODEL = {bool(show_moon_zodi_model)}"),
+            ],
         )
 
     def full_spectrum_batch_rmse(self, size: int = 100,
