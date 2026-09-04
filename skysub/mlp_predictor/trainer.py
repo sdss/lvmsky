@@ -1,17 +1,39 @@
-"""Ensemble trainer + inference for the compressed dual-encoder group-head MLP.
+"""Ensemble trainer and inference for the dual-encoder group-head MLP.
 
-Trimmed 2026-08-27 to the deployed split-zodi pipeline.  Removed knobs that
-were disabled in the shipped ``mlp_ensemble_split_zodi_current.pt`` config:
+Every knob in ``default_dual_group_config`` is read by ``Trainer``; the class
+asserts this on construction and warns about any config key it does not
+consume.
 
-- ``block_cov_loss_groups`` / ``relative_mse_groups`` (loss variants not used)
-- ``high_airmass_boost`` / ``moon_down_ecliptic_boost`` (never enabled)
-- ``blend_optim`` modes other than ``'direct'`` (dead)
-- ``moon_alt_conditional_alpha`` (dead)
-- ``coef_err_row_ceiling_factor`` (dead)
-- ``use_coef_err_weights=False`` fallback (deployed always True)
-- ``drop_vanrhijn_from_context``, ``head_extra_dims`` (dead)
-- ``moon_zodi_mode='shared_branch'`` and its ``moon_zodi_branch_dims`` etc.
-- ``flux_mse_eps_frac`` (deployed = 0; the epsilon math is a no-op)
+Training
+--------
+* Targets are per-group compressed *scores*, not raw coefficients: each group
+  is transformed (``sqrt`` for the continuum families, ``asinh`` for the 358
+  mesospheric coefficients), centred and scaled.  ``compress_coefs_to_scores``
+  and ``expand_scores_to_coefs`` are the two directions.
+* The loss is a per-group mean, weighted by ``group_loss_weight`` = the config
+  weight over ``sqrt(n_group)`` so a 358-coefficient group does not swamp a
+  3-coefficient one.  Row weights are uniform.
+* ``moon`` and ``zodi`` are scored in FLUX space rather than coefficient
+  space: their predicted scores are inverted through the compressor and their
+  own basis matrices to per-pixel flux, and the MSE is taken there.  This
+  replaces (not augments) the coefficient-space ``smooth_l1`` for those two
+  groups, and it is load-bearing -- removing it costs the moon 18 percentage
+  points of its gain over copying the near arm, and also degrades the
+  continuum and mesospheric groups, which have no flux term of their own,
+  through the shared trunk.
+* Remaining groups use ``smooth_l1`` weighted per element by
+  ``1/sigma^2`` from the decomposition's own ``COEF_ERR``, with a per-group
+  relative floor (``coef_err_sigma_floor_rel``) so near-zero uncertainties
+  cannot dominate.
+* The blend alphas train with their own learning-rate multiplier
+  (``alpha_lr_mult``); at the shared rate they do not move measurably.
+
+Ensembling and calibration
+--------------------------
+``run_ensemble`` trains one member per seed on a night-disjoint,
+moon-phase-stratified split, then fits a per-group scalar mean-bias
+correction (a Jensen-style lift, since the compressor transforms are convex)
+on the training and validation rows.
 """
 
 from __future__ import annotations
@@ -97,9 +119,6 @@ def train_compressed_group_mlp(
     flux_basis_matrices=None,
     flux_geom_sc_sci=None,
     # 2026-08-21 tight-mask bright-moon row boost (Phase A'').
-    bright_moon_close_boost=1.0,
-    bright_moon_close_fli_min=0.85,
-    bright_moon_close_sep_max_deg=45.0,
     # Heteroscedastic-Gaussian loss weighting from decomposition COEF_ERR.
     coef_err_sigma_floor_rel=None,
 ):
@@ -245,38 +264,14 @@ def train_compressed_group_mlp(
     ctx_far_n = np.clip(ctx_scaler.transform(ctx_far), -25.0, 25.0).astype(np.float32)
     ctx_sci_n = np.clip(ctx_scaler.transform(ctx_sci), -25.0, 25.0).astype(np.float32)
 
-    # Row weights: bright-moon-close boost only.  See §12 for the rationale
-    # behind rejecting the high_airmass and moon_down_ecliptic boosts.
-    _ctx_names_local = list(filtered['ctx_names'])
+    # Row weights are uniform.  Every per-row reweighting scheme tried was
+    # rejected on measurement: high_airmass and moon_down_ecliptic boosts never
+    # helped, and the bright-moon-close boost (fli>=0.90, sep<=30 deg, alt>0,
+    # x1.5) was carried at 1.0 (= off) because it leaked into the blue atlas
+    # band (+23% RMS|frac|) for a mid-band gain the flux-space loss now
+    # provides directly.  Kept as a named constant rather than a knob so the
+    # loss has one less silent degree of freedom.
     _row_weights_np = np.ones(ctx_sci.shape[0], dtype=np.float32)
-    _has_ma = 'moon_alt' in _ctx_names_local
-    _has_ms = 'moon_sep' in _ctx_names_local
-    _has_pc = ('moon_phase_sin' in _ctx_names_local
-               and 'moon_phase_cos' in _ctx_names_local)
-    if _has_ma and _has_ms and _has_pc and float(bright_moon_close_boost) > 1.0:
-        _ma = ctx_sci[:, _ctx_names_local.index('moon_alt')]
-        _ms = ctx_sci[:, _ctx_names_local.index('moon_sep')]
-        _pc = ctx_sci[:, _ctx_names_local.index('moon_phase_cos')]
-        _fli = np.clip(0.5 * (1.0 - _pc), 0.0, 1.0)
-        _mask_bmc = ((_ma > 0.0)
-                     & (_fli >= float(bright_moon_close_fli_min))
-                     & (_ms <= float(bright_moon_close_sep_max_deg)))
-        _factor = float(bright_moon_close_boost)
-        _n_all = int(_mask_bmc.sum())
-        if _n_all > 0:
-            _row_weights_np = np.where(_mask_bmc, _row_weights_np * _factor,
-                                       _row_weights_np).astype(np.float32)
-            print(f'Row weights: bright_moon (fli>={float(bright_moon_close_fli_min):.2f}, '
-                  f'sep<={float(bright_moon_close_sep_max_deg):.0f}, alt>0) '
-                  f'x{_factor:.2f}  n_all={_n_all}, '
-                  f'n_train={int(_mask_bmc[train_idx].sum())}, '
-                  f'n_val={int(_mask_bmc[val_idx].sum())}')
-    _train_mean_w = float(np.mean(_row_weights_np[train_idx]))
-    if _train_mean_w > 1e-9 and abs(_train_mean_w - 1.0) > 1e-6:
-        _row_weights_np = (_row_weights_np / _train_mean_w).astype(np.float32)
-        print(f'Row weights: normalized to train-mean=1 '
-              f'(pre-norm train-mean={_train_mean_w:.3f}, '
-              f'post-norm max={float(np.max(_row_weights_np[train_idx])):.3f}).')
 
     # ------------------------------------------------------------------
     # Per-pixel flux MSE precomputation for moon / zodi (deployed default).
@@ -751,9 +746,6 @@ def train_compressed_group_mlp(
             'ionospheric_group_weight': float(ionospheric_group_weight),
             'blend_init_alpha': float(blend_init_alpha),
             'alpha_lr_mult': float(alpha_lr_mult),
-            'bright_moon_close_boost': float(bright_moon_close_boost),
-            'bright_moon_close_fli_min': float(bright_moon_close_fli_min),
-            'bright_moon_close_sep_max_deg': float(bright_moon_close_sep_max_deg),
             'flux_mse_groups': tuple(flux_mse_groups),
             'coef_err_sigma_floor_rel': _resolved_floor_by_group,
         },
@@ -860,9 +852,6 @@ default_dual_group_config: dict[str, Any] = {
     "mesospheric_group_weight": 1.0,
     "ionospheric_group_weight": 1.0,
     "flux_mse_groups": ("moon", "zodi"),
-    "bright_moon_close_boost": 1.5,
-    "bright_moon_close_fli_min": 0.90,
-    "bright_moon_close_sep_max_deg": 30.0,
     "coef_err_sigma_floor_rel": dict(DEFAULT_COEF_ERR_SIGMA_FLOOR_BY_GROUP),
     "ensemble_seeds": (42, 43, 44, 45, 46, 47, 48, 49, 50, 51),
     "zodi_ctx_restriction": (
@@ -991,8 +980,6 @@ class Trainer:
         "blend_init_alpha", "alpha_lr_mult",
         "moon_group_weight", "zodi_group_weight", "continuum_group_weight",
         "mesospheric_group_weight", "ionospheric_group_weight",
-        "bright_moon_close_boost", "bright_moon_close_fli_min",
-        "bright_moon_close_sep_max_deg",
         "coef_err_sigma_floor_rel", "flux_mse_groups",
     })
 
@@ -1043,9 +1030,6 @@ class Trainer:
             continuum_group_weight=float(c["continuum_group_weight"]),
             mesospheric_group_weight=float(c["mesospheric_group_weight"]),
             ionospheric_group_weight=float(c["ionospheric_group_weight"]),
-            bright_moon_close_boost=float(c["bright_moon_close_boost"]),
-            bright_moon_close_fli_min=float(c["bright_moon_close_fli_min"]),
-            bright_moon_close_sep_max_deg=float(c["bright_moon_close_sep_max_deg"]),
             coef_err_sigma_floor_rel=c["coef_err_sigma_floor_rel"],
             zodi_ctx_restriction=c["zodi_ctx_restriction"],
             continuum_ctx_restriction=c["continuum_ctx_restriction"],

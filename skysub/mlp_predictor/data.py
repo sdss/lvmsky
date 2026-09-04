@@ -2171,6 +2171,167 @@ def _kappa_mad_row_mask(x, kappa=4.0, n_iter=3):
     return keep
 
 
+def _loglog_slopes(component, log_wave, min_pixels=200):
+    """Row-wise log-log slope of ``component`` against wavelength.
+
+    Fits ``log f = a + b log(lambda)`` per row over finite, strictly positive
+    samples only (the QP leaves exact zeros wherever a family is switched off,
+    and those carry no colour information).  Returns NaN for rows with fewer
+    than ``min_pixels`` usable samples or a degenerate lever arm.
+    """
+    flux = np.asarray(component, dtype=np.float64)
+    x = np.asarray(log_wave, dtype=np.float64)[None, :]
+    good = np.isfinite(flux) & (flux > 0.0)
+    y = np.log(np.where(good, flux, 1.0))
+    n = good.sum(axis=1).astype(np.float64)
+    sx = np.where(good, x, 0.0).sum(axis=1)
+    sy = np.where(good, y, 0.0).sum(axis=1)
+    sxx = np.where(good, x * x, 0.0).sum(axis=1)
+    sxy = np.where(good, x * y, 0.0).sum(axis=1)
+    den = n * sxx - sx * sx
+    ok = (n >= float(min_pixels)) & (den > 0.0)
+    slope = np.full(flux.shape[0], np.nan, dtype=np.float64)
+    np.divide(n * sxy - sx * sy, den, out=slope, where=ok)
+    slope[~ok] = np.nan
+    return slope
+
+
+def split_zodi_reversal_diagnostics(
+    decomp_fits_paths,
+    row_index,
+    wave,
+    chunk_rows=256,
+    min_component_frac=0.05,
+):
+    """Per-arm moon/zodi colours and role-reversal flags for the given rows.
+
+    A *reversal* is a row where the fitted moon continuum is REDDER than the
+    fitted zodi continuum -- ``moon_slope > zodi_slope`` -- i.e. the two
+    families have swapped roles.  Physics puts the moon near -3.7 (scattered
+    sunlight, Rayleigh-dominated) and the zodi near -0.3 (Leinert reddening),
+    so the ordering is unambiguous when both families carry flux.
+
+    Reversed rows are actively harmful to the ML stage rather than merely
+    noisy: the moon coefficients of a reversed row describe zodiacal light and
+    vice versa, so the network is asked to learn a moon-geometry mapping from
+    zodi-shaped targets.  That is the same corruption the moon/zodi coupling
+    head was quietly absorbing.
+
+    Rows where one family is essentially switched off carry no ordering
+    information and are NOT flagged: the test only applies where the moon's
+    share of the moon+zodi continuum lies inside
+    ``[min_component_frac, 1 - min_component_frac]``.  Dark-time rows sit at a
+    moon share of ~0.02 under the current decomposition priors and are exempt
+    by construction.
+
+    Reads the refined ``COMP_MOON`` / ``COMP_ZODI`` component spectra written
+    by ``decompose_parallel``, so no basis is rebuilt and no reconstruction
+    convention has to be reproduced here.
+
+    Returns ``{arm: {'moon_slope', 'zodi_slope', 'moon_frac', 'reversed',
+    'testable'}}`` with one entry per requested row.
+    """
+    idx = np.asarray(row_index, dtype=np.int64)
+    log_wave = np.log(np.asarray(wave, dtype=np.float64))
+    out = {}
+    for arm, path in dict(decomp_fits_paths).items():
+        moon_slope = np.full(idx.size, np.nan)
+        zodi_slope = np.full(idx.size, np.nan)
+        moon_frac = np.full(idx.size, np.nan)
+        try:
+            with fits.open(path, memmap=True) as hdul:
+                if 'COMP_MOON' not in hdul or 'COMP_ZODI' not in hdul:
+                    print(f"  reversal check: {arm} has no COMP_MOON/COMP_ZODI HDU; skipping arm.")
+                    continue
+                for start in range(0, idx.size, int(chunk_rows)):
+                    sel = idx[start:start + int(chunk_rows)]
+                    moon = np.asarray(hdul['COMP_MOON'].data[sel], dtype=np.float64)
+                    zodi = np.asarray(hdul['COMP_ZODI'].data[sel], dtype=np.float64)
+                    sl = slice(start, start + sel.size)
+                    moon_slope[sl] = _loglog_slopes(moon, log_wave)
+                    zodi_slope[sl] = _loglog_slopes(zodi, log_wave)
+                    m_tot = np.nansum(np.where(moon > 0, moon, 0.0), axis=1)
+                    z_tot = np.nansum(np.where(zodi > 0, zodi, 0.0), axis=1)
+                    total = m_tot + z_tot
+                    moon_frac[sl] = np.where(total > 0, m_tot / np.maximum(total, 1e-300), np.nan)
+        except FileNotFoundError:
+            print(f"  reversal check: {arm} decomposition not found at {path}; skipping arm.")
+            continue
+        frac_lo = float(min_component_frac)
+        testable = (
+            np.isfinite(moon_slope) & np.isfinite(zodi_slope) & np.isfinite(moon_frac)
+            & (moon_frac >= frac_lo) & (moon_frac <= 1.0 - frac_lo)
+        )
+        out[arm] = {
+            'moon_slope': moon_slope,
+            'zodi_slope': zodi_slope,
+            'moon_frac': moon_frac,
+            'separation': zodi_slope - moon_slope,
+            'testable': testable,
+        }
+    return out
+
+
+def split_zodi_decomp_paths(data_root, stem, suffix, every10=True):
+    """Per-arm decomposition FITS paths, keyed the way the reversal helpers want."""
+    base = f'{data_root}/{stem}' + ('_every10' if every10 else '')
+    return {'near': f'{base}_decomp_sky1{suffix}.fits',
+            'far':  f'{base}_decomp_sky2{suffix}.fits',
+            'sci':  f'{base}_decomp_sci{suffix}.fits'}
+
+
+def split_zodi_reversal_keep_mask(
+    decomp_fits_paths,
+    row_index,
+    wave,
+    min_component_frac=0.05,
+    min_separation=0.0,
+    label='sample',
+    verbose=True,
+):
+    """Keep-mask (True = usable) dropping moon/zodi role-reversed rows.
+
+    For the every10-derived DIAGNOSTIC samples.  These deliberately skip the
+    training-time target filters (hard coefficient bounds, kappa-sigma) so the
+    model's hardest genuine cases stay in the evaluation set -- but a reversal
+    is not a hard case, it is a MISLABELLED one: the row's moon coefficients
+    describe zodiacal light.  Scoring a prediction against swapped labels
+    measures nothing, and such rows show up as spurious outliers in the moon
+    panel while never having been trained on.  So this belongs with the chi2
+    decomposition-failure gate, not with the target-outlier filters.
+
+    Returns a boolean mask over ``row_index``; rows whose reversal state cannot
+    be determined (one family switched off) are kept.
+    """
+    idx = np.asarray(row_index, dtype=np.int64)
+    try:
+        stats = split_zodi_reversal_diagnostics(
+            decomp_fits_paths, idx, wave,
+            min_component_frac=float(min_component_frac))
+    except Exception as exc:  # missing COMP_* HDU, absent file, ...
+        if verbose:
+            print(f'  {label} reversal gate SKIPPED '
+                  f'({type(exc).__name__}: {exc})')
+        return np.ones(idx.size, dtype=bool)
+    if not stats:
+        if verbose:
+            print(f'  {label} reversal gate SKIPPED (no arm had COMP_MOON/COMP_ZODI)')
+        return np.ones(idx.size, dtype=bool)
+    reversed_any = np.zeros(idx.size, dtype=bool)
+    testable_any = np.zeros(idx.size, dtype=bool)
+    for st in stats.values():
+        reversed_any |= st['testable'] & (st['separation'] < float(min_separation))
+        testable_any |= st['testable']
+    keep = ~reversed_any
+    if verbose:
+        print(f'  {label} moon/zodi reversal gate: dropped '
+              f'{int(reversed_any.sum())}/{idx.size} row(s) with swapped '
+              f'moon/zodi colours in any arm '
+              f'({int(testable_any.sum())} testable, '
+              f'{int((~testable_any).sum())} with one family switched off)')
+    return keep
+
+
 def apply_triplet_filters(
     triplet_data,
     thin_every_n=1,
@@ -2184,6 +2345,10 @@ def apply_triplet_filters(
     oh_kappa_iter=3,
     exclude_field_regions=None,
     airmass_max=3.0,
+    reversal_decomp_fits=None,
+    reversal_wave=None,
+    reversal_min_component_frac=0.05,
+    reversal_min_separation=0.0,
 ):
     if hard_coef_bounds is None:
         hard_coef_bounds = {'feo': (0.0, 1.0), 'atom_k': (0.0, 1.0)}
@@ -2381,6 +2546,69 @@ def apply_triplet_filters(
                 f"({100.0 * oh_mask.mean():.1f}%)"
             )
 
+    # Moon/zodi role-reversal filter.  A reversed row hands the ML a
+    # moon-labelled zodi spectrum, so it corrupts the geometry mapping the
+    # network exists to learn rather than just adding noise -- one bad arm
+    # disqualifies the observation, matching the chi2 filter's convention.
+    reversal_stats = None
+    if reversal_decomp_fits:
+        if reversal_wave is None:
+            print("Moon/zodi reversal filter: reversal_wave not given; skipping. "
+                  "Pass the native wavelength grid (e.g. from "
+                  "cfg.data.input_fits_for_basis).")
+        else:
+            reversal_stats = split_zodi_reversal_diagnostics(
+                reversal_decomp_fits,
+                np.asarray(triplet_data['row_index'], dtype=np.int64),
+                reversal_wave,
+                min_component_frac=float(reversal_min_component_frac),
+            )
+            rev_any = np.zeros(n0, dtype=bool)
+            testable_any = np.zeros(n0, dtype=bool)
+            moon_absent_all = np.ones(n0, dtype=bool)
+            for arm, st in reversal_stats.items():
+                # Which side is missing, for the untestable rows: a moon-absent
+                # row (dark time, moon pinned near a 0.02 share) has no moon to
+                # mislabel, whereas a zodi-absent row hides an undetermined
+                # zodi colour.  They are not the same blind spot.
+                moon_absent_all &= (
+                    np.isfinite(st['moon_frac'])
+                    & (st['moon_frac'] < float(reversal_min_component_frac))
+                )
+                arm_rev = st['testable'] & (st['separation'] < float(reversal_min_separation))
+                st['reversed'] = arm_rev
+                rev_any |= arm_rev
+                testable_any |= st['testable']
+                n_test = int(st['testable'].sum())
+                if n_test == 0:
+                    print(f"  {arm:>4s}: no rows with both families present")
+                    continue
+                t = st['testable']
+                print(
+                    f"  {arm:>4s}: reversed {int(arm_rev.sum())}/{n_test} testable "
+                    f"({100.0 * arm_rev.sum() / n_test:.2f}%), "
+                    f"median moon slope {np.nanmedian(st['moon_slope'][t]):+.2f}, "
+                    f"zodi {np.nanmedian(st['zodi_slope'][t]):+.2f}, "
+                    f"margin p10 {np.nanpercentile(st['separation'][t], 10):+.2f}"
+                )
+            rev_mask = ~rev_any
+            keep &= rev_mask
+            print(
+                f"Moon/zodi reversal filter (moon_slope > zodi_slope in ANY arm, "
+                f"tested where {reversal_min_component_frac:.2f} <= moon share <= "
+                f"{1.0 - reversal_min_component_frac:.2f}): "
+                f"kept {int(rev_mask.sum())}/{len(rev_mask)} "
+                f"({100.0 * rev_mask.mean():.1f}%); "
+                f"{int(rev_any.sum())} rows reversed, "
+                f"{int((~testable_any).sum())} rows had no arm with both families present"
+                f" (of those, {int((~testable_any & moon_absent_all).sum())} moon-absent"
+                f" in every arm -- nothing to mislabel -- and"
+                f" {int((~testable_any & ~moon_absent_all).sum())} with a"
+                f" negligible zodi somewhere)"
+            )
+    else:
+        print("Moon/zodi reversal filter: reversal_decomp_fits not given; skipping.")
+
     coef_concat = np.hstack([coef_near, coef_far, coef_sci]).astype(np.float32)
     kappa_mask = _kappa_sigma_row_mask(coef_concat, kappa=float(kappa), n_iter=int(kappa_iter))
     keep &= kappa_mask
@@ -2425,6 +2653,21 @@ def apply_triplet_filters(
             out[k] = np.asarray(triplet_data[k])[keep]
     if 'sci_radec_source' in triplet_data:
         out['sci_radec_source'] = triplet_data['sci_radec_source']
+    if reversal_stats:
+        # Per-arm fitted colours, so the split can be audited without
+        # re-reading the decomposition.  ``reversal`` is subset to the
+        # surviving rows to line up with coef_*/ctx_*; ``reversal_all`` keeps
+        # FULL-LENGTH arrays over the original rows, because the rows the
+        # filter removed are the ones worth inspecting and they are by
+        # definition absent from the subset.  ``mask`` selects survivors.
+        out['reversal'] = {
+            arm: {k: np.asarray(v)[keep] for k, v in st.items()}
+            for arm, st in reversal_stats.items()
+        }
+        out['reversal_all'] = {
+            arm: {k: np.asarray(v) for k, v in st.items()}
+            for arm, st in reversal_stats.items()
+        }
 
     print(
         f"Filtered triplet shapes: near={out['coef_near'].shape}, far={out['coef_far'].shape}, "

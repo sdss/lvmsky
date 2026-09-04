@@ -1,25 +1,34 @@
-"""Symmetric dual-encoder group-head MLP (deployed split-zodi variant).
+"""Symmetric dual-encoder group-head MLP for sky-coefficient transfer.
 
-Trimmed 2026-08-27 to remove branches no longer reachable under the deployed
-configuration.  Removed knobs (all confirmed disabled in the saved
-``mlp_ensemble_split_zodi_current.pt`` config):
+Maps the two sky arms' decomposition coefficients plus per-arm observing
+context onto the science arm's coefficients.  One class,
+``DualEncoderGroupHeadMLPCompressed``; every construction argument below is
+live and exercised by the deployed configuration.
 
-- ``drop_vanrhijn_from_context`` / ``VAN_RHIJN_FEATURES`` masking
-- ``head_extra_dims`` (deployed = empty; shared-trunk heads are always 2-layer)
-- ``blend_use_direct=False`` and its ``blend_logit`` sigmoid parametrization
-- ``moon_alt_conditional_alpha`` and its per-alt-sign lookup tables
-- ``moon_zodi_mode='shared_branch'`` and its ``moon_zodi_branch`` /
-  ``moon_zodi_moon_head`` / ``moon_zodi_zodi_head`` triple
-- ``moon_zodi_branch_dims``, ``moon_zodi_moon_head_extra_dims``,
-  ``moon_zodi_zodi_head_extra_dims`` (only read under shared_branch)
-- ``alpha_ctx_features=None`` / ``alpha_ctx_groups=None`` fallback paths
-- ``zodi_ctx_restriction=None`` / ``continuum_ctx_restriction=None`` /
-  ``moon_zodi_ctx_restriction=None`` fallback paths (deployed always sets them)
-
-The baseline ``DualEncoderGroupHeadMLP`` uncompressed model was removed as a
-top-level class (only its inner subclass, ``DualEncoderGroupHeadMLPCompressed``,
-was ever instantiated).  Its helpers ``_make_mlp`` and ``_make_group_head`` are
-inlined below.
+Forward path
+------------
+1.  ``sky_encoder`` -- one shared MLP applied to each arm's ``(score, ctx)``
+    concatenation, so the two arms are treated symmetrically.
+2.  The two arm embeddings are combined as ``(mean, diff, |diff|)``.  ``diff``
+    carries the near/far disagreement, which is the only direct evidence of how
+    much the sky varies across the field; ``|diff|`` lets the trunk use its
+    magnitude without its sign.
+3.  ``ctx_encoder`` embeds the science-arm context; ``trunk`` fuses all four.
+4.  Six per-group heads (moon, zodi, continuum, mesospheric, ionospheric,
+    atomic) emit signed score-space predictions from the trunk output.
+5.  Each group's prediction is added to a blend of the two arms' own scores,
+    ``alpha * near + (1 - alpha) * far``.  For ``moon``, ``zodi`` and
+    ``continuum`` alpha is per-row, ``sigmoid`` of a linear function of three
+    context features; the other three groups use a learned scalar.
+6.  ``zodi`` and ``continuum`` additionally route through isolated branches fed
+    only physically-motivated context subsets, keeping their predictions from
+    depending on the full context vector.
+7.  ``moon`` and ``zodi`` are coupled: a shared branch over the moon-scatter
+    plus zodi-geometry context union produces a latent, projected additively
+    into both heads by zero-initialised linear maps.  The coupling supplies the
+    moon head -- which sits on the shared trunk -- with the restricted context
+    it would otherwise never see, and is worth ~4.5 percentage points of the
+    moon's accuracy gain over copying the near arm.
 """
 
 from __future__ import annotations

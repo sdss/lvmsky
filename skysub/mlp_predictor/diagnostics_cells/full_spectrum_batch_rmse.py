@@ -111,6 +111,17 @@ else:
     else:
         print("  every10 chi2 filter skipped: chi2 columns not in triplet.")
 
+    # Moon/zodi role-reversal gate.  Grouped with the chi2 gate above, not with
+    # the training-time target filters: a reversed row's moon coefficients
+    # describe zodiacal light, so scoring against them measures nothing and the
+    # row appears as a spurious moon-panel outlier that was never trained on.
+    with fits.open(EVERY10_INPUT) as _hw:
+        _e10_wave = np.asarray(_hw["WAVE"].data, dtype=float)
+        _e10_wave = _e10_wave if _e10_wave.ndim == 1 else _e10_wave[0]
+    _e10_keep &= split_zodi_reversal_keep_mask(
+        {"near": EVERY10_NEAR, "far": EVERY10_FAR, "sci": EVERY10_SCI},
+        row_index_e10, _e10_wave, label="every10")
+
     _e10_valid_pos = np.flatnonzero(_e10_keep)
     n_rows = int(_e10_valid_pos.size)
     print(

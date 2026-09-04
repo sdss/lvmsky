@@ -113,6 +113,23 @@ else:
     print('  atlas chi2 gate: SKIPPED (triplet carries no chi2; '
           'build with return_chi2=True)')
 
+# Moon/zodi role-reversal gate, applied to the drawn sample for the same reason
+# and in the same way as the chi2 gate above: a reversed row's moon
+# coefficients describe zodiacal light, so the per-component attribution below
+# would credit the wrong family.  Filtering after the draw keeps the survivors a
+# strict subset of the rows earlier runs used.
+with fits.open(EVERY10_INPUT) as _hdul_rev:
+    _wave_rev = np.asarray(_hdul_rev['WAVE'].data, dtype=np.float64)
+_wave_rev = _wave_rev if _wave_rev.ndim == 1 else _wave_rev[0]
+_rev_keep_sel = split_zodi_reversal_keep_mask(
+    {'near': EVERY10_NEAR, 'far': EVERY10_FAR, 'sci': EVERY10_SCI},
+    np.asarray(e10_triplet['row_index'], dtype=np.int64)[sel_pos],
+    _wave_rev, label='atlas')
+if not bool(np.all(_rev_keep_sel)):
+    sel_pos = sel_pos[_rev_keep_sel]
+    _n_pick = int(sel_pos.size)
+    print(f'  atlas sample after reversal gate: n = {_n_pick}')
+
 sel_rows = np.asarray(e10_triplet['row_index'], dtype=np.int64)[sel_pos]
 
 # ML predictions for these rows.
