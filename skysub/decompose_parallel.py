@@ -98,12 +98,43 @@ SPLIT_ZODI_FIT_MODEL = "lsf-surface-iterative-split-zodi"
 
 # Defaults for the SkyDecompLSFSurfaceIterative(split_zodi=True) knobs; match the
 # settings validated on the p40_p70 every10 identifiability notebook.
-SPLIT_ZODI_N_KNOTS_DEFAULT = 3
+SPLIT_ZODI_N_KNOTS_DEFAULT = 1
 SPLIT_ZODI_SMOOTH_LAMBDA_DEFAULT = 1.0e-1
 SPLIT_ZODI_MOON_ALBEDO_PHASE_DEG = 30.0
 SPLIT_ZODI_COLOR_EXPONENT = 0.26
-# Moon_bs interior-knot count; matches SkyDecomp.__init__ default in fit.py.
-MOON_N_KNOTS_DEFAULT = 25
+# --- split-zodi identifiability defaults (validated 2026-09-03) --------------
+# Without these the split is degenerate in a way fit quality cannot see: on 200
+# lunation-stratified sky spectra the deployed configuration put the moon and
+# zodi colours in the WRONG ORDER on 164 of 168 moon-up spectra (fitted moon
+# log-log slope +0.21 where physics says -3.7, zodi -4.04 where physics says
+# -0.3), left the moon family holding 45% of the continuum with the moon 37 deg
+# BELOW the horizon, and had the fitted zodi tracking lunar illumination at
+# rho = +0.95 while retaining only rho = 0.09 of its Leinert B500 dependence.
+#
+# The four knobs below fix those, and they are not interchangeable:
+#   * the RATIO BOUNDS fix the colour ordering (reversals 164 -> 2 of 168) and
+#     stop a spline zeroing out mid-band, which is how the old fit reached a
+#     lower rms -- it used the moon family as piecewise scratch space;
+#   * the FRACTION bracket fixes dark time (moon share 0.45 -> 0.02);
+#   * the absolute LEINERT ANCHOR fixes the amplitude geometry
+#     (rho(zodi, B500) 0.09 -> 0.90, rho(zodi, FLI) 0.94 -> 0.12).
+# Dropping the anchor keeps the reversals fixed but leaves the zodi amplitude
+# tracking the moon; dropping the bounds re-opens the reversals.
+#
+# Cost: median rms x1.01 over the sample, concentrated entirely at bright moon
+# (x1.49 median for FLI > 0.8, ~1% of the continuum, blue-weighted).  Part of
+# that is the baseline overfitting via the spline hole described above.
+SPLIT_ZODI_MOON_RATIO_BOUND = 0.7
+SPLIT_ZODI_ZODI_RATIO_BOUND = 0.7
+SPLIT_ZODI_AMP_PRIOR_TOL = 3.0
+SPLIT_ZODI_ZODI_AMP_BOUND = 2.0
+# Moon_bs interior-knot count.  Deliberately NOT SkyDecomp.__init__'s default
+# (25, with n_zodi_spline_knots 3): the deployed corpus and every measurement
+# behind the SPLIT_ZODI_* bounds above use 11 moon / 1 zodi interior knots.
+# The ratio bounds are per ADJACENT KNOT PAIR, so the same beta is looser the
+# more knots there are -- changing these without re-validating the bounds
+# changes how much colour freedom each family actually has.
+MOON_N_KNOTS_DEFAULT = 11
 
 
 def init_worker(
@@ -166,7 +197,9 @@ def init_worker(
         "sky1": np.asarray(_WORKER_HDU["FLUX_SKY_NEAR"].data),
         "sky2": np.asarray(_WORKER_HDU["FLUX_SKY_FAR"].data),
     }
-    if fit_model == MOON_ZODI_FIT_MODEL:
+    # split-zodi needs the same LSF + META as the model-based mode: its
+    # amplitude priors are geometry predictions, one per spectrum.
+    if fit_model in (MOON_ZODI_FIT_MODEL, SPLIT_ZODI_FIT_MODEL):
         _WORKER_LSF = {
             "sci": np.asarray(_WORKER_HDU["LSF_SCI"].data),
             "sky1": np.asarray(_WORKER_HDU["LSF_SKY_NEAR"].data),
@@ -233,6 +266,10 @@ def init_worker(
             zodi_smooth_lambda=float(zodi_smooth_lambda),
             moon_albedo_fiducial_phase_deg=SPLIT_ZODI_MOON_ALBEDO_PHASE_DEG,
             zodi_color_exponent=SPLIT_ZODI_COLOR_EXPONENT,
+            moon_ratio_bound=SPLIT_ZODI_MOON_RATIO_BOUND,
+            zodi_ratio_bound=SPLIT_ZODI_ZODI_RATIO_BOUND,
+            amp_prior_tol=SPLIT_ZODI_AMP_PRIOR_TOL,
+            zodi_amp_bound=SPLIT_ZODI_ZODI_AMP_BOUND,
             config=LSFSurfaceIterativeConfig(
                 n_refinement_cycles=n_refinement_cycles,
             ),
@@ -337,6 +374,40 @@ def _moon_zodi_observation(kind, row_index):
     )
 
 
+def _install_split_zodi_amplitude_prior(kind, row_index):
+    """Install this spectrum's geometry amplitude prior before fitting.
+
+    The split-zodi priors are per-spectrum: the moon-share bracket and the
+    absolute Leinert zodi bracket both come from a geometry prediction for this
+    exposure and this telescope.  Only scalars are installed, so the design
+    matrix is untouched and the basis stays identical for every row -- which is
+    what lets the ML side reconstruct from coefficients with a single
+    decomposer.
+
+    Geometry that cannot be modelled (target below the horizon) clears the
+    prior for that row instead of failing it: the fit then falls back to the
+    shape bounds alone, which is exactly the pre-prior behaviour.
+    """
+    from skysub.sky_decomp.moon_zodi_model import (
+        MoonZodiInvalidObservationError,
+        geometry_amplitude_prior,
+    )
+
+    if _WORKER_META is None or not _WORKER_LSF:
+        return
+    try:
+        fraction, zodi_total, _target_airmass = geometry_amplitude_prior(
+            _WORKER_DECOMPOSER.wave,
+            np.asarray(_WORKER_LSF[kind][row_index], dtype=np.float64),
+            _moon_zodi_observation(kind, row_index),
+            physical_to_fit_flux_scale=float(_WORKER_FACTOR),
+        )
+    except MoonZodiInvalidObservationError:
+        _WORKER_DECOMPOSER.set_amplitude_prior(None, None)
+        return
+    _WORKER_DECOMPOSER.set_amplitude_prior(fraction, zodi_total)
+
+
 def fit_chunk_worker(args):
     """Fit one chunk of spectra using the worker-local SkyDecomp instance."""
     global _WORKER_DECOMPOSER, _WORKER_FACTOR, _WORKER_PROGRESS_QUEUE, _WORKER_FIT_MODEL
@@ -363,6 +434,7 @@ def fit_chunk_worker(args):
                 verbose=False,
             )
         elif _WORKER_FIT_MODEL == SPLIT_ZODI_FIT_MODEL:
+            _install_split_zodi_amplitude_prior(kind, idx)
             result = _WORKER_DECOMPOSER.fit(
                 flux_row,
                 ivar_row,

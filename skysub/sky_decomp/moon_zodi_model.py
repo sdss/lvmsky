@@ -1018,6 +1018,81 @@ class MoonZodiPhysicalModel:
         )
 
 
+_AMPLITUDE_PRIOR_MODELS: dict[str, "MoonZodiPhysicalModel"] = {}
+
+
+def _physics_only_model(data_dir: str | Path) -> "MoonZodiPhysicalModel":
+    """Cached predictor with the LEARNED scale factors set to unity.
+
+    Keeps only ``moon_below_horizon_suppression``, which is a geometric taper
+    rather than a calibration: without it the moon carrier is built at a
+    fictitious 0.01 deg altitude whenever the moon is down and no amount of
+    downstream clipping recovers the right answer.
+
+    The other ten parameters are dropped on purpose.  They were fitted with
+    ``CORRECTION_SCOPE = 'moon_plus_zodi'``, i.e. the training only ever
+    constrained the SUM, so the split they imply is not independently
+    calibrated -- and ``zodi_target_airmass_log = 1.28`` (zodi growing as
+    X^1.28, where extinction should make it fall) looks like it absorbed the
+    same moon-into-zodi leakage the amplitude prior exists to remove.  Using it
+    would feed that leakage back in as a prior.  In practice the two variants
+    agree on the moon fraction to a few percent, so this costs nothing.
+    """
+    key = str(Path(data_dir).resolve())
+    model = _AMPLITUDE_PRIOR_MODELS.get(key)
+    if model is None:
+        model = MoonZodiPhysicalModel(data_dir=data_dir)
+        values = np.array(model.parameter_values, dtype=float).copy()
+        horizon = values[MODEL_PARAMETER_NAMES.index("moon_below_horizon_suppression")]
+        values[:] = 0.0
+        values[MODEL_PARAMETER_NAMES.index("moon_below_horizon_suppression")] = horizon
+        model.parameter_values = values
+        _AMPLITUDE_PRIOR_MODELS[key] = model
+    return model
+
+
+def geometry_amplitude_prior(
+    wave_air_angstrom: np.ndarray,
+    detector_lsf_fwhm_air_angstrom: np.ndarray,
+    observation: MoonZodiObservation,
+    *,
+    physical_to_fit_flux_scale: float,
+    data_dir: str | Path = DEFAULT_DATA_DIR,
+) -> tuple[float, float, float]:
+    """Geometry priors for ``SkyDecomp.set_amplitude_prior`` on one spectrum.
+
+    Returns ``(moon_fraction, zodi_total, target_airmass)``:
+
+    * ``moon_fraction`` -- ``int(moon) / int(moon + zodi)``.  Calibration-free:
+      both carriers leave the model through the same solid-angle and flux
+      conversion, so the ratio is independent of throughput and of
+      ``physical_to_fit_flux_scale``.
+    * ``zodi_total`` -- ``int(zodi)`` in FIT flux units, for the absolute
+      Leinert bracket.  This one is NOT calibration-free, so
+      ``physical_to_fit_flux_scale`` must equal the FACTOR the flux being
+      fitted was multiplied by.
+    * ``target_airmass`` -- from the same geometry solve, for
+      ``set_target_airmass``.
+
+    Both predictions come from a single ``predict`` call so the shared
+    conversion cancels in the ratio.  Raises
+    ``MoonZodiInvalidObservationError`` for geometry that cannot be modelled
+    (target below the horizon); callers should skip the prior for that row
+    rather than fail the fit.
+    """
+    prediction = _physics_only_model(data_dir).predict(
+        wave_air_angstrom,
+        detector_lsf_fwhm_air_angstrom,
+        observation,
+        physical_to_fit_flux_scale=physical_to_fit_flux_scale,
+    )
+    moon_total = float(np.nansum(prediction.moon))
+    zodi_total = float(np.nansum(prediction.zodi))
+    denominator = moon_total + zodi_total
+    fraction = moon_total / denominator if denominator > 0.0 else np.nan
+    return fraction, zodi_total, float(prediction.state.geometry.target_airmass)
+
+
 __all__ = [
     "CORRECTION_SCOPE",
     "DATA_BUNDLE_ID",
@@ -1044,6 +1119,7 @@ __all__ = [
     "build_projection_operator",
     "compute_midpoint_geometry",
     "file_sha256",
+    "geometry_amplitude_prior",
     "validate_decomposition_data_root",
     "wave_sha256",
 ]

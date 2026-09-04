@@ -268,6 +268,69 @@ def _build_d2_operator(n_par: int) -> np.ndarray:
     return d2
 
 
+# Rayleigh / aerosol optical depths at LCO.  These mirror the closed forms in
+# ``moon_zodi_model`` (``_rayleigh_optical_depth`` and its aerosol companion) so
+# the split-zodi colour envelopes below agree with the frozen physical model
+# they were calibrated against; they are duplicated rather than imported to keep
+# this module free of the astropy-coordinates / IERS import chain.
+def _rayleigh_tau(wave_angstrom: np.ndarray, pressure_hpa: float = 744.0) -> np.ndarray:
+    wave_micron = np.asarray(wave_angstrom, dtype=float) / 1.0e4
+    inv_sq = wave_micron ** -2
+    return (
+        0.008569
+        * wave_micron ** -4
+        * (1.0 + 0.0113 * inv_sq + 0.00013 * inv_sq ** 2)
+        * (pressure_hpa / 1013.25)
+    )
+
+
+def _aerosol_tau(wave_angstrom: np.ndarray) -> np.ndarray:
+    return 0.0336 * (np.asarray(wave_angstrom, dtype=float) / 5000.0) ** -1.38
+
+
+def _stable_phi(value: np.ndarray) -> np.ndarray:
+    """(1 - exp(-t)) / t, series-continued through t -> 0.
+
+    The airmass-difference integral of the scattering source term along the
+    line of sight.  Mirrors ``moon_zodi_model._stable_phi``.
+    """
+    value = np.asarray(value, dtype=np.float64)
+    small = np.abs(value) < 1.0e-4
+    safe = np.where(small, 1.0, value)
+    direct = -np.expm1(-value) / safe
+    series = 1.0 - value / 2.0 + value**2 / 6.0 - value**3 / 24.0
+    return np.where(small, series, direct)
+
+
+def _rayleigh_phase(cosine: float, depolarization: float = 0.0148) -> float:
+    """Rayleigh scattering phase function.  Mirrors the frozen model."""
+    return float(
+        3.0 * (1.0 - depolarization)
+        / (16.0 * np.pi * (1.0 + 2.0 * depolarization))
+        * (1.0 + (1.0 + 3.0 * depolarization) / (1.0 - depolarization) * cosine**2)
+    )
+
+
+def _henyey_greenstein_phase(cosine: float, g: float = 0.8) -> float:
+    """Forward-peaked aerosol phase function.  Mirrors the frozen model."""
+    return float((1.0 - g**2)
+                 / (4.0 * np.pi * (1.0 + g**2 - 2.0 * g * cosine) ** 1.5))
+
+
+def _unit_median(vec: np.ndarray) -> np.ndarray:
+    """Normalise a colour/attenuation shape to unit median.
+
+    Every envelope factor in this module is median-normalised so that the shape
+    change does not move the coefficient scale.  For the airmass-dependent zodi
+    factor this also makes the envelope SHAPE-ONLY: the fitted amplitude keeps
+    the meaning it has today, so Chapter 2 of the ML notebook (which applies
+    geometry factor 1.0 to moon and zodi) needs no matching change.
+    """
+    vec = np.asarray(vec, dtype=float)
+    med = float(np.nanmedian(vec))
+    return (vec / med) if np.isfinite(med) and med > 0.0 else vec
+
+
 @dataclass(slots=True)
 class SkyDecompResult:
     coef: np.ndarray
@@ -345,6 +408,16 @@ class SkyDecomp:
         palace_diffuse_suffix: str | None = None,
         o2_min_valid_frac: float = O2_MIN_VALID_FRAC,
         moon_smooth_lambda: float = 1e-3,
+        moon_ratio_bound: float = 0.0,
+        zodi_ratio_bound: float = 0.0,
+        moon_ratio_relax_window: tuple[float, float] | None = None,
+        moon_ratio_relax_bound: float = 0.0,
+        amp_prior_tol: float = 0.0,
+        amp_prior_floor: float = 0.02,
+        zodi_amp_bound: float = 0.0,
+        moon_scatter_envelope: bool = False,
+        moon_ms_coeff: float = 3.5,
+        moon_relax_gate: tuple[float, float] | None = None,
         moon_interline_boost: float = 0.0,
         moon_interline_red_min: float = 7454.0,
         moon_interline_exclusion_a: float = 3.0,
@@ -361,6 +434,127 @@ class SkyDecomp:
         self.n_spline_knots = int(n_spline_knots)
         self.o2_min_valid_frac = float(np.clip(o2_min_valid_frac, 0.0, 1.0))
         self.moon_smooth_lambda = max(float(moon_smooth_lambda), 0.0)
+        # Hard shape bounds, beta in (0, 1); 0 disables.  Preferred over the
+        # slope penalties above: scale-invariant and no likelihood trade-off.
+        self.moon_ratio_bound = float(moon_ratio_bound)
+        self.zodi_ratio_bound = float(zodi_ratio_bound)
+        # Per-knot relaxation of the MOON ratio bound over one wavelength
+        # window.  Motivation: with the zodi bound applied, the only place the
+        # fit degrades is a narrow blue band -- 4000-4200 A carries 61-170% of
+        # the net excess residual on all three arms (far/near/sci), with
+        # 13-15 of 31 bands actually improving and the net cost ~0% of the
+        # total |residual|.  That band is where the solar SED both families are
+        # built on has its densest line blanketing (Ca II H&K, H-delta, CN,
+        # Fe I), so it looks like a template or blue-throughput defect rather
+        # than a missing continuum component.  Relaxing the MOON knots there
+        # lets the moon family absorb the artifact while zodi stays pinned
+        # everywhere -- deliberately asymmetric, because 4000-4200 A is also
+        # where the two colour envelopes are most alike and relaxing zodi would
+        # reopen the role swap exactly where it is easiest.
+        #
+        # This is a WORKAROUND, not a fix: if the excess is a calibration or
+        # solar-template defect it should be corrected at source, and this
+        # relaxation will hide it until then.
+        self.moon_ratio_relax_window = (
+            None if moon_ratio_relax_window is None
+            else (float(min(moon_ratio_relax_window)),
+                  float(max(moon_ratio_relax_window))))
+        self.moon_ratio_relax_bound = float(moon_ratio_relax_bound)
+        self._moon_full_knots = None
+        self._moon_relaxed_basis = None
+        self.target_airmass = None
+        # Amplitude bracket on the moon's share of the moon+zodi continuum,
+        # f = int(moon) / int(moon + zodi).  The ratio bounds above fix the two
+        # families' COLOURS but leave their amplitudes free, and measurement on
+        # 100 lunation-stratified sky spectra shows the amplitudes are wrong in
+        # a way colour alone cannot reach:
+        #   * fitted f is flat at 0.20-0.30 from new moon to full, where the
+        #     geometry predicts 0.00 -> 0.26 -> 0.52 -> 0.68 -> 0.86 -> 0.94;
+        #   * fitted int(zodi) tracks lunar illumination at rho = +0.95 (it must
+        #     not: the zodiacal light does not care about the moon) and retains
+        #     only rho = 0.26 of its Leinert B500 dependence, against 0.996 for
+        #     the prediction -- the "zodi" family is largely moonlight;
+        #   * with the moon 37 deg BELOW the horizon the moon family still takes
+        #     31-43% of the continuum, where geometry predicts 2e-5.
+        # `set_amplitude_prior` supplies f_pred per row; `amp_prior_tol` is the
+        # multiplicative tolerance kappa (<=1 disables) allowed either side of
+        # it, imposed as two hard linear inequalities on the fitted totals.
+        #
+        # Constraining the FRACTION, not either absolute amplitude, is what
+        # makes this calibration-free: both predictions leave the physical
+        # model through the same solid-angle/flux conversion, so their ratio is
+        # independent of throughput and of physical_to_fit_flux_scale.  An
+        # earlier attempt (removed 2026-08-26) instead put a soft quadratic
+        # prior on the absolute zodi amplitude, anchored by a self-calibrated
+        # median(int_zodi / B500) taken over moon-down rows -- circular, since
+        # those rows carry the 43% spurious moon share measured above.  Being
+        # homogeneous in c these rows are also scale-invariant, so unlike a
+        # quadratic penalty they carry no hidden data_scale**2 (see the D2 note
+        # in the solver) and never bid against the likelihood.
+        self.amp_prior_tol = float(amp_prior_tol)
+        # Slack kept at both ends of the bracket: the moon may always take up
+        # to `amp_prior_floor` of the continuum and the zodi is never squeezed
+        # below it.  Guards the two places the prediction is least trustworthy
+        # -- the below-horizon suppression is a learned extrapolation fitted
+        # only down to -7 deg altitude, and ROLO phase coverage runs out on
+        # thin crescents -- and keeps the bracket strictly inside (0, 1).
+        self.amp_prior_floor = float(np.clip(amp_prior_floor, 0.0, 0.499))
+        self._amp_prior_moon_fraction = None
+        # Absolute bracket on int(zodi) against the Leinert prediction, as a
+        # multiplicative tolerance (<=1 disables).  The fraction bracket above
+        # is RELATIVE, so it cannot restore the zodi's ecliptic dependence: it
+        # only divides whatever total the two splines hold between them.  On
+        # the same 100 spectra the fitted zodi tracks Leinert B500 at rho=+0.52
+        # in dark time but only +0.17 with the moon up, and sits at 4.5x its
+        # predicted amplitude there (q90 = 18x) -- the family is fine until a
+        # moon is present and then becomes moonlight.  Only an absolute anchor
+        # reaches that.
+        #
+        # Unlike the fraction rows this one has a non-zero right-hand side, so
+        # it is stated in native flux units: `set_amplitude_prior` must be
+        # given zodi_total on the same scale as the flux being fitted (i.e.
+        # multiplied by the same FACTOR), because unlike the fraction the
+        # absolute amplitude does NOT cancel the flux calibration.
+        #
+        # Its empirical licence is the dark-time measurement above: with the
+        # shape bounds on and no moon, fitted/predicted int(zodi) is 0.94 with
+        # 0.16 dex scatter, so the literature absolute scale is good to ~6%
+        # median and a factor ~1.4 spread.  Do not tighten kappa below that
+        # spread.
+        self.zodi_amp_bound = float(zodi_amp_bound)
+        self._amp_prior_zodi_total = None
+        # Two-channel (Rayleigh + aerosol) scattered-moonlight envelope with a
+        # multiple-scattering enhancement, installed per row by
+        # `set_moon_geometry`.  Off by default: the envelope is then the
+        # Rayleigh-only shape below and the design matrix is unchanged.
+        # `moon_ms_coeff` is the c in the (1 + c X tau_R) enhancement; the
+        # frozen model uses 3.5.
+        self.moon_scatter_envelope = bool(moon_scatter_envelope)
+        self.moon_ms_coeff = float(moon_ms_coeff)
+        # Gate the blue moon relaxation on how much the moon actually
+        # contributes, as (f_lo, f_hi) on the geometry-predicted moon fraction
+        # installed by `set_amplitude_prior`.  Below f_lo the relaxed knots
+        # keep the tight bound; above f_hi they get the full
+        # `moon_ratio_relax_bound`; between, beta interpolates.
+        #
+        # The point is that the two regimes are disjoint.  Reversals live in
+        # the faint-moon corner -- rho(separation margin, FLI) = +0.62 and every
+        # thin-margin row has a faint moon -- while the blue residual cost lives
+        # at FLI > 0.6, where the margin's minimum over 56 spectra is +2.81.
+        # An ungated relaxation buys blue freedom everywhere and pays for it
+        # where the moon component is too weak to determine its own shape; the
+        # gate buys it only where the data can support it.
+        #
+        # Using the PREDICTED fraction rather than the fitted one keeps this
+        # from being circular: the fit cannot widen its own bound by putting
+        # more flux in the moon.
+        self.moon_relax_gate = (
+            None if moon_relax_gate is None
+            else (float(min(moon_relax_gate)), float(max(moon_relax_gate))))
+        self.moon_scatter_shape = None
+        self._moon_envelope_base = None
+        self._moon_envelope_base_hr = None
+        self._moon_bspl = None
         self.moon_interline_boost = max(float(moon_interline_boost), 0.0)
         self.moon_interline_red_min = float(moon_interline_red_min)
         self.moon_interline_exclusion_a = max(float(moon_interline_exclusion_a), 0.0)
@@ -431,6 +625,10 @@ class SkyDecomp:
         # populated in _build_moon / _build_zodi.  Shape is (n_par - 2, n_par).
         self._d2_moon = np.zeros((0, 0), dtype=float)
         self._d2_zodi = np.zeros((0, 0), dtype=float)
+        self._zodi_bspl = None
+        self._zodi_envelope_base = None
+        self.zodi_extinction_shape = None
+        self.moon_rayleigh_shape = None
 
         self._build_static_basis()
 
@@ -1019,6 +1217,17 @@ class SkyDecomp:
             p_dense_local = aw.T @ aw
 
             # Penalize curvature of moon-spline coefficients to suppress oscillations.
+            #
+            # NB these D2 penalties are brightness-dependent in effect.  After
+            # the rescaling above `aw` has unit-norm columns and `yw` unit RMS,
+            # so the DATA term is brightness-invariant -- but `col_scale` is
+            # derived after the data_scale division, so col_scale ~ 1/data_scale
+            # and a penalty built as D/col_scale carries an extra data_scale**2.
+            # The effective strength of moon_smooth_lambda / zodi_smooth_lambda
+            # therefore scales as flux**2: over a 13x brightness range the same
+            # lambda acts ~170x more strongly on the brightest row.  Left as-is
+            # because it is the deployed behaviour, but it is a trap for anyone
+            # calibrating these against a mixed-brightness sample.
             if self.moon_smooth_lambda > 0.0 and moon_slice_local is not None:
                 i0 = moon_slice_local.start or 0
                 i1 = moon_slice_local.stop or i0
@@ -1040,13 +1249,141 @@ class SkyDecomp:
                     d2z_scaled = d2z / col_scale[i0z:i1z][None, :]
                     p_dense_local[i0z:i1z, i0z:i1z] += 2.0 * self.zodi_smooth_lambda * (d2z_scaled.T @ d2z_scaled)
 
-            # Amplitude priors were removed 2026-08-26; ecliptic split alone carries identifiability.
             q_local = -(aw.T @ yw)
             p_local = sp.csc_matrix((p_dense_local + p_dense_local.T) / 2.0)
             p_local = sp.triu(p_local).tocsc()
-            a_con = -sp.eye(n_par_local, format="csc")
-            b_con = np.zeros(n_par_local, dtype=np.float64)
-            cones = [clarabel.NonnegativeConeT(n_par_local)]
+
+            # --- Adjacent-knot ratio bounds on the moon / zodi spline shape ---
+            # beta * c_k <= c_{k+1} <= c_k / beta on the NATIVE coefficients,
+            # which bounds how fast a family's multiplier may vary with
+            # wavelength and therefore forbids either family reproducing the
+            # other's colour.  Unlike the D1 penalties above these are hard
+            # linear inequalities, so they do not bid against the likelihood:
+            # the fit is free to place the amplitude anywhere and only the shape
+            # excursion is capped.  Being homogeneous in c they are also
+            # scale-invariant by construction -- no brightness calibration.
+            #
+            # The solve runs on x = c * col_scale, so c_k = x_k / s_k and each
+            # bound picks up the neighbouring col_scale ratio.  Rows are stated
+            # as G x <= 0 and appended to the nonnegative cone: Clarabel solves
+            # A x + s = b with s in K, so A = G, b = 0 gives s = -G x >= 0.
+            #
+            # NB with c >= 0 already enforced, a ratio bound makes a block
+            # all-positive or all-zero: if c_k = 0 then c_{k+1} <= 0.  That is
+            # physically reasonable (a family is present with a bounded shape,
+            # or absent) but it does change the active-set structure that the
+            # coefficient covariance of 1.9 is built from.
+            ratio_rows: list[np.ndarray] = []
+            for _fam_name, _sl_local, _beta in (
+                ('moon', moon_slice_local, getattr(self, 'moon_ratio_bound', 0.0)),
+                ('zodi', zodi_slice_local, getattr(self, 'zodi_ratio_bound', 0.0)),
+            ):
+                if _sl_local is None:
+                    continue
+                _lo = _sl_local.start or 0
+                _hi = _sl_local.stop or _lo
+                _n_blk = _hi - _lo
+                # One beta per adjacent PAIR, so the moon bound can be relaxed
+                # over a wavelength window while staying tight elsewhere.  A
+                # pair is relaxed when either of its two knots is in the window.
+                _betas = np.full(max(_n_blk - 1, 0), float(_beta), dtype=float)
+                if _fam_name == 'moon':
+                    _mask = getattr(self, '_moon_relaxed_basis', None)
+                    # Guard the interline refit, which solves a submatrix whose
+                    # moon sub-block may not be the full basis.
+                    if (_mask is not None and _mask.size == _n_blk and _mask.any()):
+                        _br = self._gated_moon_relax_bound(float(_beta))
+                        for _p in range(_betas.size):
+                            if _mask[_p] or _mask[_p + 1]:
+                                _betas[_p] = _br
+                if not np.any((_betas > 0.0) & (_betas < 1.0)):
+                    continue
+                for _pair_i, _k in enumerate(range(_lo, _hi - 1)):
+                    _b = float(_betas[_pair_i])
+                    if not (0.0 < _b < 1.0):
+                        continue
+                    _sk, _sk1 = col_scale[_k], col_scale[_k + 1]
+                    # beta * c_k - c_{k+1} <= 0
+                    _row = np.zeros(n_par_local, dtype=np.float64)
+                    _row[_k] = _b / _sk
+                    _row[_k + 1] = -1.0 / _sk1
+                    ratio_rows.append(_row)
+                    # c_{k+1} - c_k / beta <= 0
+                    _row = np.zeros(n_par_local, dtype=np.float64)
+                    _row[_k] = -1.0 / (_b * _sk)
+                    _row[_k + 1] = 1.0 / _sk1
+                    ratio_rows.append(_row)
+
+            # --- Amplitude bracket on the moon share of the moon+zodi total ---
+            # f_lo <= u / (u + v) <= f_hi with u = int(moon), v = int(zodi),
+            # from the geometry prediction supplied by set_amplitude_prior.
+            # Both are linear in c, so each side is one linear inequality:
+            #   u/(u+v) <= f_hi   <=>   (1 - f_hi) u - f_hi v <= 0
+            #   u/(u+v) >= f_lo   <=>   f_lo v - (1 - f_lo) u <= 0
+            # The per-column weights are the UNWEIGHTED design integrals, so u
+            # and v are the same band-integrated component fluxes the
+            # diagnostics report, not ivar-weighted surrogates.
+            _amp_f = getattr(self, '_amp_prior_moon_fraction', None)
+            _amp_kappa = float(getattr(self, 'amp_prior_tol', 0.0))
+            if (_amp_f is not None and np.isfinite(_amp_f) and _amp_kappa > 1.0
+                    and moon_slice_local is not None and zodi_slice_local is not None):
+                _eps = float(getattr(self, 'amp_prior_floor', 0.02))
+                _f = float(np.clip(_amp_f, 0.0, 1.0))
+                _f_hi = min(max(_amp_kappa * _f, _eps), 1.0 - _eps)
+                _f_lo = min(max(_f / _amp_kappa, 0.0), _f_hi)
+                # Column integrals over the good pixels, mapped into x-space
+                # (the solve runs on x = c * col_scale).
+                _col_int = np.asarray(a_mat.sum(axis=0), dtype=np.float64) / col_scale
+                _m_sel = np.zeros(n_par_local, dtype=np.float64)
+                _z_sel = np.zeros(n_par_local, dtype=np.float64)
+                _m_sel[moon_slice_local] = _col_int[moon_slice_local]
+                _z_sel[zodi_slice_local] = _col_int[zodi_slice_local]
+                if np.any(_m_sel > 0.0) and np.any(_z_sel > 0.0):
+                    for _row in ((1.0 - _f_hi) * _m_sel - _f_hi * _z_sel,
+                                 _f_lo * _z_sel - (1.0 - _f_lo) * _m_sel):
+                        _norm = float(np.max(np.abs(_row)))
+                        if _norm > 0.0:
+                            ratio_rows.append(_row / _norm)
+
+            # Every row above is homogeneous (G x <= 0); the absolute zodi
+            # bracket below is the only one with a right-hand side.
+            ratio_rhs: list[float] = [0.0] * len(ratio_rows)
+
+            # --- Absolute bracket on int(zodi) against the Leinert prediction --
+            #   Z_pred / kappa <= v <= kappa * Z_pred
+            # stated in native flux units, so `a_mat` enters unscaled and only
+            # the x-space mapping (c = x / col_scale) is applied.
+            _amp_z = getattr(self, '_amp_prior_zodi_total', None)
+            _z_kappa = float(getattr(self, 'zodi_amp_bound', 0.0))
+            if (_amp_z is not None and np.isfinite(_amp_z) and _amp_z > 0.0
+                    and _z_kappa > 1.0 and zodi_slice_local is not None):
+                _zint = np.zeros(n_par_local, dtype=np.float64)
+                _zcol = np.asarray(a_mat.sum(axis=0), dtype=np.float64) / col_scale
+                _zint[zodi_slice_local] = _zcol[zodi_slice_local]
+                _znorm = float(np.max(np.abs(_zint)))
+                if _znorm > 0.0:
+                    _zint = _zint / _znorm
+                    _zt = float(_amp_z) / _znorm
+                    # v <= kappa * Z_pred
+                    ratio_rows.append(_zint.copy())
+                    ratio_rhs.append(_z_kappa * _zt)
+                    # -v <= -Z_pred / kappa
+                    ratio_rows.append(-_zint)
+                    ratio_rhs.append(-_zt / _z_kappa)
+
+            if ratio_rows:
+                g_mat = np.vstack(ratio_rows)
+                a_con = sp.vstack(
+                    [-sp.eye(n_par_local, format="csc"), sp.csc_matrix(g_mat)],
+                    format="csc")
+                b_con = np.concatenate([
+                    np.zeros(n_par_local, dtype=np.float64),
+                    np.asarray(ratio_rhs, dtype=np.float64)])
+                cones = [clarabel.NonnegativeConeT(n_par_local + g_mat.shape[0])]
+            else:
+                a_con = -sp.eye(n_par_local, format="csc")
+                b_con = np.zeros(n_par_local, dtype=np.float64)
+                cones = [clarabel.NonnegativeConeT(n_par_local)]
             settings = clarabel.DefaultSettings()
             settings.verbose = False
 
@@ -1401,20 +1738,89 @@ class SkyDecomp:
 
         t_knots = np.r_[(w0,) * 4, interior, (w1,) * 4]
         matrix_bspl = BSpline.design_matrix(self.wave, t_knots, 3).toarray()
-        # Colour envelope: solar × moon_albedo when split_zodi, else solar alone.
+        # Colour envelope: solar × moon_albedo × Rayleigh when split_zodi, else
+        # solar alone.
+        #
+        # The Rayleigh factor is what makes a shape prior possible at all.
+        # Scattered moonlight is Rayleigh-dominated and therefore steeply blue
+        # (the frozen physical model gives log-log slope ~-3.7), while
+        # solar × albedo alone is nearly flat (~+0.2).  Without the factor the
+        # 15 spline knots have to manufacture the entire lambda^-4 tilt
+        # themselves: reproducing the physical moon then needs a 50x
+        # coefficient swing, ||D1 c||/mean ~ 2.0, which no tight prior can
+        # coexist with.  With it, the same target needs a 1.4x swing and
+        # ||D1 c||/mean ~ 0.15-0.24 (0.58 worst case over airmass), so the
+        # spline is back to being a mild correction and D1 can be pinned.
+        # Deliberately NOT airmass-dependent: the moon's own airmass response
+        # lives in the scattering source term, and an extra line-of-sight
+        # extinction factor here double-counts it (measured: the requirement
+        # rises from 0.18 to 0.51 at X=2.8 when applied).
         if getattr(self, 'split_zodi', False):
             self.moon_albedo_shape = self._load_moon_albedo_shape()
-            envelope = solar_rb * self.moon_albedo_shape
-            envelope_hr = solar_hr * self.moon_albedo_shape
+            self.moon_rayleigh_shape = _unit_median(_rayleigh_tau(self.wave))
+            # Base = the geometry-free part.  `set_moon_geometry` multiplies in
+            # the two-channel scattering shape when moon_scatter_envelope is on;
+            # otherwise the Rayleigh-only shape below is used, unchanged.
+            self._moon_envelope_base = solar_rb * self.moon_albedo_shape
+            self._moon_envelope_base_hr = solar_hr * self.moon_albedo_shape
+            self._moon_bspl = matrix_bspl
+            shape = (self.moon_scatter_shape
+                     if getattr(self, 'moon_scatter_shape', None) is not None
+                     else self.moon_rayleigh_shape)
+            envelope = self._moon_envelope_base * shape
+            envelope_hr = self._moon_envelope_base_hr * shape
         else:
             envelope = solar_rb
             envelope_hr = solar_hr
         matrix_moon = (envelope[:, None] * matrix_bspl).T
         self.matrix_moon_hr = (envelope_hr[:, None] * matrix_bspl).T
         moon_names = [f"Moon_bs{i:02d}" for i in range(matrix_moon.shape[0])]
-        # Precompute the moon curvature penalty operator once (depends only on n_par).
+        # Precompute the moon penalty operators once (depend only on n_par).
         self._d2_moon = _build_d2_operator(matrix_moon.shape[0])
+        self._moon_full_knots = np.asarray(t_knots, dtype=float)
+        self._moon_relaxed_basis = self._moon_relaxed_mask(matrix_moon.shape[0])
         return matrix_moon, moon_names
+
+    def _gated_moon_relax_bound(self, beta_tight: float) -> float:
+        """Blue-relaxation bound for this row, gated on moon dominance.
+
+        Returns ``moon_ratio_relax_bound`` unchanged when no gate is
+        configured or no prediction is installed.  With a gate, interpolates
+        from ``beta_tight`` (no extra freedom, faint moon) to the relax bound
+        (full freedom, moon dominates) across the ``moon_relax_gate`` window in
+        predicted moon fraction.
+        """
+        relax = float(getattr(self, 'moon_ratio_relax_bound', 0.0))
+        gate = getattr(self, 'moon_relax_gate', None)
+        frac = getattr(self, '_amp_prior_moon_fraction', None)
+        if gate is None or frac is None or not np.isfinite(frac):
+            return relax
+        lo, hi = gate
+        span = hi - lo
+        s = 1.0 if span <= 0.0 else float(np.clip((float(frac) - lo) / span, 0.0, 1.0))
+        return float(beta_tight + (relax - beta_tight) * s)
+
+    def _moon_relaxed_mask(self, n_basis: int) -> np.ndarray:
+        """Moon basis functions positioned inside the relaxation window.
+
+        Position is the Greville abscissa, ``xi_j = (t[j+1]+t[j+2]+t[j+3])/3``,
+        which is where cubic basis function ``j`` actually sits.  Selecting on
+        SUPPORT overlap instead would be far too blunt: with 11 interior knots
+        over 3600-9800 A each support spans ~2070 A, so a 3800-4400 A window
+        would drag in 5 of 15 knots reaching out to 6183 A.  On the Greville
+        abscissa the same window selects the one knot that belongs to it.
+        """
+        win = getattr(self, 'moon_ratio_relax_window', None)
+        knots = getattr(self, '_moon_full_knots', None)
+        mask = np.zeros(int(n_basis), dtype=bool)
+        if win is None or knots is None:
+            return mask
+        lo, hi = float(win[0]), float(win[1])
+        for j in range(int(n_basis)):
+            if j + 3 < knots.size:
+                xi = float(knots[j + 1] + knots[j + 2] + knots[j + 3]) / 3.0
+                mask[j] = (lo <= xi <= hi)
+        return mask
 
     def _load_moon_albedo_shape(self) -> np.ndarray:
         """Interpolate ROLO lunar albedo at the fiducial phase onto the fit grid."""
@@ -1466,13 +1872,191 @@ class SkyDecomp:
         t_knots = np.r_[(w0,) * 4, interior, (w1,) * 4]
         matrix_bspl = BSpline.design_matrix(self.wave, t_knots, 3).toarray()
         envelope = solar_rb * self.zodi_color_shape
+        # Airmass-free base, kept so ``set_target_airmass`` can re-derive the
+        # attenuated matrices per row without rebuilding the B-spline basis.
+        self._zodi_bspl = matrix_bspl
+        self._zodi_envelope_base = envelope
         matrix_zodi = (envelope[:, None] * matrix_bspl).T
         # HR twin: identical for now; LSF refit convolves it channelwise if used.
         self.matrix_zodi_hr = matrix_zodi.copy()
         zodi_names = [f'Zodi_bs{i:02d}' for i in range(matrix_zodi.shape[0])]
-        # Precompute the zodi curvature penalty operator (depends only on n_par).
+        # Precompute the zodi penalty operators (depend only on n_par).
         self._d2_zodi = _build_d2_operator(matrix_zodi.shape[0])
         return matrix_zodi, zodi_names
+
+    def _zodi_extinction_shape(self, target_airmass: float) -> np.ndarray:
+        """Median-normalised zodi attenuation shape at one target airmass.
+
+        Zodiacal light is attenuated along the line of sight, so unlike the
+        moon's Rayleigh factor this one genuinely depends on airmass, and the
+        dependence is large enough to matter: without it the spline shape needed
+        to reproduce the physical zodi grows from ||D1 c||/mean = 0.16 at X=1 to
+        0.40 at X=2.8, and a prior tight enough to forbid the role swap would
+        clip that real extinction colour instead.  With it the requirement is
+        0.15-0.18 flat across the whole airmass range.
+
+        The half optical depth follows the frozen physical model
+        (``exp(-X (0.5 tau_ray + 0.5 tau_aer))``) and the extended-source
+        argument in the notebook's 2.5.2: photons scattered out of the beam are
+        largely replaced from adjacent lines of sight, so a stellar curve
+        over-corrects.  Target airmass is clipped to the physical range [1, 3];
+        the moon's own (unbounded) airmass is not used here.
+        """
+        x = float(target_airmass)
+        if not np.isfinite(x):
+            return np.ones_like(self.wave, dtype=float)
+        x = min(max(x, 1.0), 3.0)
+        tau_half = 0.5 * (_rayleigh_tau(self.wave) + _aerosol_tau(self.wave))
+        return _unit_median(np.exp(-(x - 1.0) * tau_half))
+
+    def set_target_airmass(self, target_airmass: float | None) -> None:
+        """Install the per-row zodi extinction envelope (split_zodi only).
+
+        Call before ``fit`` for each row.  ``None`` restores the airmass-free
+        envelope.  Rebuilds the design matrix, mirroring what the Moon/Zodi
+        variant does after installing its per-row prediction.
+        """
+        if not getattr(self, 'split_zodi', False):
+            return
+        if getattr(self, '_zodi_envelope_base', None) is None:
+            return
+        self.target_airmass = (None if target_airmass is None
+                               else float(target_airmass))
+        shape = (np.ones_like(self.wave, dtype=float) if target_airmass is None
+                 else self._zodi_extinction_shape(target_airmass))
+        self.zodi_extinction_shape = shape
+        envelope = self._zodi_envelope_base * shape
+        self.matrix_zodi = (envelope[:, None] * self._zodi_bspl).T
+        self.matrix_zodi_hr = self.matrix_zodi.copy()
+        self.design_matrix = self._assemble_design_matrix()
+
+    def _moon_scatter_shape(self, moon_sep_deg: float, moon_airmass: float,
+                            target_airmass: float) -> np.ndarray:
+        """Two-channel scattered-moonlight colour shape, unit-median normalised.
+
+        Reproduces the frozen model's moon carrier wavelength dependence:
+
+            tau_R * P_Rayleigh(cos t) + 0.97 * tau_a * P_HG(cos t)   (channels)
+          * (1 + c * X_t * tau_R) / (1 + c * X_t * tau_R(5000))      (multiple
+                                                                      scattering)
+          * exp(-tau_tot * X_t) * phi(tau_tot * (X_m - X_t))         (path)
+
+        Three things the Rayleigh-only envelope it replaces cannot express:
+
+        * The AEROSOL channel.  tau_a ~ lambda^-1.38 against Rayleigh's
+          lambda^-4, so the mixture is much redder than Rayleigh alone, and the
+          mixing ratio is set by the two phase functions at the moon-target
+          separation.  Henyey-Greenstein (g = 0.8) is strongly forward-peaked,
+          so close to the moon the red aerosol channel dominates while at large
+          separation Rayleigh does.  The fitted moon colour therefore has to
+          vary with separation, which a fixed envelope cannot do -- and the
+          worst single fit in the 200-spectrum sample (row 12, both telescopes,
+          rms 20x the sample median) sits at 18-25 deg separation, exactly
+          where the missing channel matters most.
+        * MULTIPLE SCATTERING, the (1 + c X tau_R) enhancement.  Modest at LCO
+          (~9% in the blue at X = 1.5) but the right sign and shape.
+        * The atmospheric path terms, which carry their own mild colour.
+
+        Measured motivation: with a Rayleigh-only envelope the fit drives the
+        moon to log-log slope -4.1 (tighter zodi bounds push it to -5.6)
+        against the -3.7 the model predicts, i.e. bluer than physics, which is
+        what a missing red channel looks like.  The cost is concentrated where
+        the moon dominates: rho(rms cost, FLI) = +0.91, and +49% rms at
+        FLI > 0.8 against +1.5% below 0.6.
+        """
+        cos_t = float(np.cos(np.deg2rad(float(moon_sep_deg))))
+        x_t = float(np.clip(target_airmass, 1.0, 3.0))
+        x_m = float(moon_airmass) if np.isfinite(moon_airmass) else x_t
+        # The moon itself may sit at high airmass (unlike the telescope), but
+        # cap it so a moon at/below the horizon cannot produce an absurd path.
+        x_m = float(np.clip(x_m, 1.0, 40.0))
+        tau_r = _rayleigh_tau(self.wave)
+        tau_a = _aerosol_tau(self.wave)
+        tau_tot = tau_r + tau_a
+        channels = (tau_r * _rayleigh_phase(cos_t)
+                    + 0.97 * tau_a * _henyey_greenstein_phase(cos_t))
+        c_ms = float(getattr(self, 'moon_ms_coeff', 3.5))
+        tau_r_500 = float(_rayleigh_tau(np.asarray([5000.0]))[0])
+        multiple = ((1.0 + c_ms * x_t * tau_r)
+                    / (1.0 + c_ms * x_t * tau_r_500))
+        path = np.exp(-tau_tot * x_t) * _stable_phi(tau_tot * (x_m - x_t))
+        return _unit_median(channels * multiple * path)
+
+    def set_moon_geometry(self, moon_sep_deg: float | None,
+                          moon_airmass: float | None = None,
+                          target_airmass: float | None = None) -> None:
+        """Install the per-row moon scattering envelope (split_zodi only).
+
+        Active only when ``moon_scatter_envelope=True``; ``None`` for
+        ``moon_sep_deg`` restores the geometry-free Rayleigh-only envelope.
+        Call before ``fit`` for each row.  Rebuilds the moon block and the
+        design matrix, so it is the expensive setter -- unlike
+        ``set_amplitude_prior``, which only stores scalars.
+
+        ``target_airmass`` defaults to whatever ``set_target_airmass`` last
+        installed, so the usual per-row order is ``set_target_airmass`` then
+        ``set_moon_geometry``.
+        """
+        if not getattr(self, 'split_zodi', False):
+            return
+        if not getattr(self, 'moon_scatter_envelope', False):
+            return
+        if getattr(self, '_moon_envelope_base', None) is None:
+            return
+        if moon_sep_deg is None or not np.isfinite(moon_sep_deg):
+            self.moon_scatter_shape = None
+            shape = self.moon_rayleigh_shape
+        else:
+            if target_airmass is None:
+                target_airmass = self.target_airmass
+            if target_airmass is None or not np.isfinite(target_airmass):
+                target_airmass = 1.0
+            if moon_airmass is None or not np.isfinite(moon_airmass):
+                moon_airmass = float(target_airmass)
+            shape = self._moon_scatter_shape(moon_sep_deg, moon_airmass,
+                                             target_airmass)
+            self.moon_scatter_shape = shape
+        self.matrix_moon = (
+            (self._moon_envelope_base * shape)[:, None] * self._moon_bspl).T
+        self.matrix_moon_hr = (
+            (self._moon_envelope_base_hr * shape)[:, None] * self._moon_bspl).T
+        self.design_matrix = self._assemble_design_matrix()
+
+    def set_amplitude_prior(self, moon_fraction: float | None,
+                            zodi_total: float | None = None) -> None:
+        """Install the per-row amplitude prior centres (split_zodi only).
+
+        ``moon_fraction`` is the geometry-predicted
+        ``int(moon) / int(moon + zodi)`` over the fitted band; ``None`` (the
+        default state) leaves the amplitudes unconstrained.  Call before
+        ``fit`` for each row.  Takes effect only when ``amp_prior_tol > 1``.
+
+        ``zodi_total`` is the predicted ``int(zodi)`` for the absolute Leinert
+        bracket, active only when ``zodi_amp_bound > 1``.  It must be on the
+        same flux scale as the array passed to ``fit`` -- pass the same
+        ``physical_to_fit_flux_scale`` to ``predict`` as the FACTOR the flux
+        was multiplied by.  The fraction above is calibration-free; this is
+        not.
+
+        The caller owns the prediction so this module stays free of ephemeris
+        and coordinate machinery: build a ``MoonZodiObservation`` and take
+        ``sum(pred.moon) / sum(pred.moon + pred.zodi)`` from
+        ``MoonZodiPhysicalModel.predict``.  Only the ratio is used, so the
+        prediction's absolute normalisation is irrelevant -- but its moon and
+        zodi must come from the SAME predict() call, or the shared conversion
+        factor no longer cancels.
+
+        Unlike ``set_target_airmass`` this does not touch the design matrix, so
+        it is cheap to call per row.
+        """
+        if not getattr(self, 'split_zodi', False):
+            return
+        self._amp_prior_moon_fraction = (
+            None if moon_fraction is None or not np.isfinite(moon_fraction)
+            else float(np.clip(moon_fraction, 0.0, 1.0)))
+        self._amp_prior_zodi_total = (
+            None if zodi_total is None or not np.isfinite(zodi_total)
+            or float(zodi_total) <= 0.0 else float(zodi_total))
 
     @staticmethod
     def _uniform_moon_knots(w0: float, w1: float, n_knots: int) -> np.ndarray:
