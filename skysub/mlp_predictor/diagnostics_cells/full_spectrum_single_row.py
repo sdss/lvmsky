@@ -656,7 +656,11 @@ fig = make_subplots(
 )
 
 # Physical Moon/Zodi model overlays, one pair per flux panel.  Dotted so they
-# read as an external reference rather than as data or reconstruction.
+# read as an external reference rather than as data or reconstruction, and
+# added BEFORE each panel's data traces so plotly draws them underneath: the
+# data and reconstructions are what we are reading off these panels, and the
+# model curves are thick enough to hide a reconstruction that lands on top of
+# them.
 def _add_mz_traces(_arm, _row):
     _ov = _mz_overlay.get(_arm)
     if _ov is None:
@@ -684,6 +688,8 @@ def _add_mz_traces(_arm, _row):
         )
 
 
+_add_mz_traces("near", 1)
+
 fig.add_trace(
     go.Scattergl(
         x=wave_row,
@@ -706,7 +712,7 @@ fig.add_trace(
     row=1,
     col=1,
 )
-_add_mz_traces("near", 1)
+_add_mz_traces("far", 2)
 
 fig.add_trace(
     go.Scattergl(
@@ -730,7 +736,7 @@ fig.add_trace(
     row=2,
     col=1,
 )
-_add_mz_traces("far", 2)
+_add_mz_traces("sci", 3)
 
 fig.add_trace(
     go.Scattergl(
@@ -765,7 +771,6 @@ fig.add_trace(
     row=3,
     col=1,
 )
-_add_mz_traces("sci", 3)
 
 fig.add_trace(
     go.Scattergl(
@@ -995,6 +1000,7 @@ def _add_mz_family_traces(_target_fig, _fam):
 
 
 fig_moon_spectrum = go.Figure()
+_add_mz_family_traces(fig_moon_spectrum, "moon")
 for _arm, _comps in _comps_by_arm.items():
     fig_moon_spectrum.add_trace(
         go.Scattergl(
@@ -1005,7 +1011,6 @@ for _arm, _comps in _comps_by_arm.items():
             line=dict(color=_arm_colors[_arm], width=1.2),
         )
     )
-_add_mz_family_traces(fig_moon_spectrum, "moon")
 fig_moon_spectrum.update_layout(
     template="plotly_white",
     title=dict(
@@ -1025,17 +1030,19 @@ fig_moon_spectrum.show()
 # Reconstructed zodi spline spectrum (split_zodi Zodi_bs family).
 if 'zodi' in comps_sci:
     fig_zodi_spectrum = go.Figure()
+    _add_mz_family_traces(fig_zodi_spectrum, 'zodi')
     for _arm, _comps in _comps_by_arm.items():
+        # Colour explicitly (as the moon panel does): the model traces now come
+        # first, so leaving these to the default colorway would recolour them.
         fig_zodi_spectrum.add_trace(
             go.Scattergl(
                 x=wave_row,
                 y=_zodi_spectrum(_comps),
                 mode='lines',
                 name=_arm,
-                line=dict(width=1.4),
+                line=dict(color=_arm_colors[_arm], width=1.4),
             )
         )
-    _add_mz_family_traces(fig_zodi_spectrum, 'zodi')
     fig_zodi_spectrum.update_layout(
         template='plotly_white',
         title=dict(

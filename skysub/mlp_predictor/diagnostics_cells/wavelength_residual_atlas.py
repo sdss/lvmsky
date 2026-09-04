@@ -25,7 +25,7 @@ required = ['filtered_triplet', 'mlp_artifacts', 'predict_sci_coefficients_defau
             'context_cols', 'build_triplet_coef_dataset',
             'reconstruct_component_spectra', 'reconstruct_with_lsf',
             'load_lsf_state_if_available', 'load_o2_vector_if_available',
-            '_infer_base_dir_for_reconstruction', 'FACTOR']
+            '_infer_base_dir_for_reconstruction']
 _missing = [k for k in required if k not in globals()]
 if _missing:
     raise RuntimeError('Missing kernel state: ' + ', '.join(_missing))
@@ -252,13 +252,13 @@ for _i, _rr in enumerate(sel_rows):
     _lsf_sigma_fb = _lsf_row / 2.35
     _y_true, _c_true = _reconstruct_sci_total(coef_sci_true_atlas[_i], _rr, _lsf_sigma_fb)
     _y_pred, _c_pred = _reconstruct_sci_total(coef_sci_pred_atlas[_i], _rr, _lsf_sigma_fb)
-    _y_true = _y_true / FACTOR
-    _y_pred = _y_pred / FACTOR
+    _y_true = _y_true
+    _y_pred = _y_pred
     _resid[_i, :] = _y_pred - _y_true
     _truth[_i, :] = _y_true
     for _g in _ATLAS_COMPONENTS:
-        _resid_comp[_g][_i, :] = (_c_pred[_g] - _c_true[_g]) / FACTOR
-        _truth_comp[_g][_i, :] = _c_true[_g] / FACTOR
+        _resid_comp[_g][_i, :] = (_c_pred[_g] - _c_true[_g])
+        _truth_comp[_g][_i, :] = _c_true[_g]
     if _i and _i % 50 == 0:
         print(f'  reconstructed {_i}/{_n_pick} rows ({_time.perf_counter() - _t0:.1f}s)')
 print(f'  atlas reconstruction: {_time.perf_counter() - _t0:.1f}s '
@@ -317,10 +317,10 @@ _fig.add_trace(go.Scatter(x=_wave_ref_recon, y=_truth_med,
     mode='lines', line=dict(color='gray', width=1),
     showlegend=False), row=3, col=1)
 
-_fig.update_yaxes(title_text='pred - true (flux units)', row=1, col=1)
+_fig.update_yaxes(title_text='pred - true (1e-14)', row=1, col=1)
 _fig.update_yaxes(title_text='(pred - true) / truth_median', row=2, col=1,
                   range=[-0.5, 0.5])
-_fig.update_yaxes(title_text='truth median flux', row=3, col=1, type='log')
+_fig.update_yaxes(title_text='truth median flux (1e-14)', row=3, col=1, type='log')
 _fig.update_xaxes(title_text='wavelength [Å]', row=3, col=1)
 _fig.update_layout(height=850, width=1200,
                    title=f'Wavelength residual atlas (n = {_n_pick} rows, '

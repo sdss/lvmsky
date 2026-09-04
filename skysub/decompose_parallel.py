@@ -128,6 +128,67 @@ SPLIT_ZODI_MOON_RATIO_BOUND = 0.7
 SPLIT_ZODI_ZODI_RATIO_BOUND = 0.7
 SPLIT_ZODI_AMP_PRIOR_TOL = 3.0
 SPLIT_ZODI_ZODI_AMP_BOUND = 2.0
+# Absolute recentring of the Leinert anchor.  The anchor brackets the fitted
+# zodi total to [Z_pred/kappa_z, kappa_z * Z_pred], and Z_pred comes from
+# _physics_only_model, whose learned scale factors are deliberately zeroed --
+# so nothing has ever calibrated its ABSOLUTE normalisation.  Measured on the
+# new-oh-2 ML test split (1113 rows) by comparing each fitted zodi total with
+# that prediction, the anchor turned out to be SATURATED: 67.7% of all rows and
+# 93.1% of moon-up rows sat exactly on the ceiling, every percentile p10-p99 of
+# log10(Z_fit/Z_pred) equal to +0.3010 = log10(2.0) to four decimals.  The fit
+# was not measuring zodi there, it was reporting kappa_z.
+#
+# The gap is multiplicative, not a pedestal: log10(Z_fit/Z_pred) has slope
+# +0.08 (rho = +0.07) against log10(Z_pred), and a two-parameter c*Z + p fit
+# does no better than pure c (23.2% vs 23.5% median error) with an unphysical
+# NEGATIVE p.  So Zodi_bs is not absorbing a non-zodiacal continuum; the
+# normalisation is simply low.
+#
+# The size must be measured where there is no moonlight to leak, and with the
+# censoring undone -- the interior rows are interior BECAUSE |r| < log10(2), so
+# their median is biased toward 1.  A censored-Gaussian MLE gives:
+#     moon down  1.61x (sigma 0.274 dex)   <- leakage-free, this is the number
+#     moon up    8.32x                     <- not calibration: a calibration
+#                                             offset cannot depend on the moon
+#                                             (per-quartile: 3.1/9.4/3.8/3.8x)
+# The moon carrier is independently 1.35x low (uncensored, IQR 0.120 dex), so
+# one shared physical_to_fit_flux_scale error of ~1.4x explains both families.
+# That is why the correction is applied to the zodi TOTAL only: the moon
+# FRACTION is a ratio through the same conversion, so a shared factor cancels
+# and SPLIT_ZODI_AMP_PRIOR_TOL keeps policing moon-into-zodi leakage unchanged.
+#
+# Checked on the same 200 lunation-stratified sky spectra the bounds were
+# adopted on.  Every guardrail holds -- reversals 2/167 (was 2/164), dark-time
+# moon share 0.0234 (unchanged to four digits), median rms 0.987x -- and the
+# improvement is concentrated where the anchor was worst: rows pinned to a
+# bound fall 77% -> 64% overall and 86% -> 71% with the moon up.
+#
+# Choosing the WIDTH matters as much as the centre, because the bracket is
+# [c/kappa_z, c*kappa_z] * Z_raw and Z_true ~ 1.6 * Z_raw, so kappa_z sets the
+# bracket in physical units.  Swept at c = 1.6:
+#   kappa_z  physical bracket   pinned all/up/dark   rms    rms(FLI>0.8)
+#     1.25   [0.80, 1.25]         88% / 90% / 75%   1.0000     1.0000
+#     2.00   [0.50, 2.00]         64% / 71% / 21%   0.9867     0.9805
+#     3.00   [0.33, 3.00]         44% / 51% /  0%   0.9783     0.9558
+# kappa_z = 2.0 is kept: it is ~1.1 sigma of the measured 0.274 dex dark-time
+# spread, so it BOUNDS the zodi without dictating it.  1.25 reproduces today's
+# fits almost exactly (rms 1.0000 in every lunation bin) because everything
+# still sits on a barely-moved ceiling, and it makes 75% of dark-time targets
+# synthetic; 3.0 frees dark time completely but gives bright-moon zodi 3x
+# headroom against a QP that already demands 8.3x.
+#
+# Two things NOT to conclude from the surrounding diagnostics.  (a) Tightening
+# SPLIT_ZODI_AMP_PRIOR_TOL does not substitute for this: at kappa_f 1.5 and 1.2
+# reversals rose to 6 and 10 of 167, and at c = 1.0 tightening it changed
+# nothing at all (zodi_tot x1.000) because the anchor already pins the rows it
+# would act on.  (b) rho(zodi, B500) and rho(zodi, FLI) are NOT trustworthy
+# while the anchor binds: on a bound, zodi_tot == kappa_z * c * Z_pred exactly,
+# so those correlations partly measure the constraint.  On rows interior in
+# both c = 1.0 and c = 1.6 the fitted zodi is identical to machine precision
+# (1.000x, IQR 0.0000) and every config gives the same rho(B500) ~ 0.74,
+# rho(FLI) ~ 0.08 and partial rho(FLI | B500) ~ -0.12.  Judge this constraint
+# by pinning fraction, reversals and rms, not by those correlations.
+SPLIT_ZODI_ZODI_PRIOR_CALIBRATION = 1.6
 # Moon_bs interior-knot count.  Deliberately NOT SkyDecomp.__init__'s default
 # (25, with n_zodi_spline_knots 3): the deployed corpus and every measurement
 # behind the SPLIT_ZODI_* bounds above use 11 moon / 1 zodi interior knots.
@@ -387,6 +448,11 @@ def _install_split_zodi_amplitude_prior(kind, row_index):
     Geometry that cannot be modelled (target below the horizon) clears the
     prior for that row instead of failing it: the fit then falls back to the
     shape bounds alone, which is exactly the pre-prior behaviour.
+
+    The zodi total is recentred by SPLIT_ZODI_ZODI_PRIOR_CALIBRATION before it
+    is installed; see that constant for the measurement.  The moon fraction is
+    passed through untouched -- it is calibration-free by construction, so
+    scaling it here would corrupt the one constraint that is not.
     """
     from skysub.sky_decomp.moon_zodi_model import (
         MoonZodiInvalidObservationError,
@@ -405,7 +471,9 @@ def _install_split_zodi_amplitude_prior(kind, row_index):
     except MoonZodiInvalidObservationError:
         _WORKER_DECOMPOSER.set_amplitude_prior(None, None)
         return
-    _WORKER_DECOMPOSER.set_amplitude_prior(fraction, zodi_total)
+    _WORKER_DECOMPOSER.set_amplitude_prior(
+        fraction, zodi_total * SPLIT_ZODI_ZODI_PRIOR_CALIBRATION
+    )
 
 
 def fit_chunk_worker(args):
