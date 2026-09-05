@@ -116,6 +116,8 @@ def train_compressed_group_mlp(
     moon_zodi_ctx_restriction=(),
     # 2026-08-25c per-pixel flux MSE for moon and/or zodi (deployed default).
     flux_mse_groups=(),
+    flux_amp_lambda=0.0,
+    flux_amp_floor_frac=0.05,
     flux_basis_matrices=None,
     flux_geom_sc_sci=None,
     # 2026-08-21 tight-mask bright-moon row boost (Phase A'').
@@ -328,6 +330,19 @@ def train_compressed_group_mlp(
                             if _tr_diag_fm.size else 1.0)
             _scale_match_fm = (_med_diag_fm / max(_median_flux_norm, 1e-30)
                                if _med_diag_fm > 0 else 1.0)
+            # Floor for the log-amplitude term (step 2).  The term is
+            # log((A_pred + eps)/(A_true + eps))**2 on the WAVELENGTH-INTEGRATED
+            # flux, so eps decides where it stops caring: rows whose true
+            # amplitude is well below eps contribute ~0.  Set from the median
+            # train amplitude of this group so it is scale-free, and computed
+            # with the geometry scale applied, exactly as the loss does.
+            _amp_true_train = ((_c_true_train
+                                * _sc_sci_g_np[train_idx].astype(np.float64))
+                               @ _A_g.astype(np.float64)).sum(axis=1)
+            _amp_pos = _amp_true_train[np.isfinite(_amp_true_train)
+                                       & (_amp_true_train > 0.0)]
+            _amp_med = float(np.median(_amp_pos)) if _amp_pos.size else 1.0
+            _amp_eps_fm = float(flux_amp_floor_frac) * _amp_med
             _flux_mse_state_by_group[_g_fm] = {
                 'A': _A_g,
                 'basis_T': _comp_fm['basis'].T.astype(np.float32),
@@ -338,12 +353,17 @@ def train_compressed_group_mlp(
                 'g_scale_sci': _sc_sci_g_np,
                 'scale_match': float(_scale_match_fm),
                 'median_flux_norm': float(_median_flux_norm),
+                'amp_eps': _amp_eps_fm,
+                'amp_median': _amp_med,
             }
             print(f'  [flux-mse] {_g_fm}: n_coef={_gidx_fm.size}, '
                   f'n_wave_ds={_A_g.shape[1]}, '
                   f'median mean(flux^2)={_median_flux_norm:.3g}, '
                   f'scale-match={_scale_match_fm:.4g} '
-                  f'(median diag={_med_diag_fm:.4g}).')
+                  f'(median diag={_med_diag_fm:.4g}); '
+                  f'amp median={_amp_med:.4g}, amp eps={_amp_eps_fm:.4g} '
+                  f'({100*float(flux_amp_floor_frac):g}% of median), '
+                  f'amp lambda={flux_amp_lambda!r}.')
 
     # Device selection.
     if torch.cuda.is_available():
@@ -367,6 +387,7 @@ def train_compressed_group_mlp(
             'score_center': torch.from_numpy(_st_fm['score_center']).to(device),
             'g_scale_sci':  torch.from_numpy(_st_fm['g_scale_sci']).to(device),
             'scale_match':  float(_st_fm['scale_match']),
+            'amp_eps':      float(_st_fm['amp_eps']),
         }
     _row_idx_all_np = np.arange(int(coef_sci.shape[0]), dtype=np.int64)
 
@@ -430,14 +451,35 @@ def train_compressed_group_mlp(
     print(f"Blend optim: direct (n_blend_params={sum(p.numel() for p in blend_params)}, "
           f"alpha_lr={_alpha_lr:.2e} = {float(alpha_lr_mult):g} x lr)")
 
+    # lambda may be a scalar (every flux group) or a per-group dict.  Per-group
+    # matters: measured
+    # 2026-09-04: a global lambda helps the MOON (median relative integrated
+    # amplitude error 0.0774 -> 0.0613 at lambda 1-5) and monotonically wrecks
+    # the ZODI (gain over copy-near +38.3% -> +21.8%, tail +25%, amp share
+    # 0.877 -> 0.765 at lambda 20).  The zodi amplitude is already pinned by
+    # the decomposition's absolute Leinert anchor -- 93% of moon-up rows sit
+    # exactly on the kappa_z ceiling, so it is a deterministic function of
+    # geometry -- and penalising it harder only trades colour for amplitude
+    # the network already had.  Hence per-group.
+    if isinstance(flux_amp_lambda, dict):
+        _amp_lambda_by_group = {str(k): float(v)
+                                for k, v in flux_amp_lambda.items()}
+    else:
+        _amp_lambda_by_group = {str(g): float(flux_amp_lambda)
+                                for g in _flux_mse_torch_by_group}
+    if any(v > 0.0 for v in _amp_lambda_by_group.values()):
+        print('  [flux-amp] lambda by group: '
+              + ', '.join(f'{g}={_amp_lambda_by_group.get(g, 0.0):g}'
+                          for g in _flux_mse_torch_by_group))
+
     def compressed_loss(pred_dict, yb, w_row, w_pe, row_idx_b):
         loss = torch.tensor(0.0, device=yb.device)
         for g, y_head in pred_dict.items():
             lo, hi = score_slices[g]
             target = yb[:, lo:hi].contiguous()
             if g in _flux_mse_torch_by_group:
-                # Per-pixel flux MSE for moon and/or zodi.  Inverse compressor
-                # in torch: undo RobustScaler, PCA, sqrt, geometry.
+                # Per-pixel flux MSE for the groups that have a basis.  Inverse
+                # compressor in torch: undo RobustScaler, PCA, sqrt, geometry.
                 _st_fm = _flux_mse_torch_by_group[g]
                 _raw_target = target * _st_fm['score_scale'] + _st_fm['score_center']
                 _raw_pred   = y_head * _st_fm['score_scale'] + _st_fm['score_center']
@@ -450,7 +492,24 @@ def train_compressed_group_mlp(
                 _g_row = _st_fm['g_scale_sci'][row_idx_b, :]
                 _flux_true = (_em_true * _g_row) @ _st_fm['A']
                 _flux_pred = (_em_pred * _g_row) @ _st_fm['A']
-                _per_row = ((_flux_pred - _flux_true) ** 2).mean(dim=1) * float(_st_fm['scale_match'])
+                _per_row = (((_flux_pred - _flux_true) ** 2).mean(dim=1)
+                            * float(_st_fm['scale_match']))
+                _amp_lambda = _amp_lambda_by_group.get(g, 0.0)
+                if _amp_lambda > 0.0:
+                    # Log-amplitude term.  The flux MSE above is ABSOLUTE, so
+                    # it is dominated by the brightest rows and is nearly blind
+                    # to a 20% brightness miss on a faint one -- yet 83% of the
+                    # moon tail's MSE and 89% of the zodi tail's is removed by a
+                    # single per-row rescale, i.e. the error is brightness, not
+                    # colour, across a 16x amplitude range.  This term is scale
+                    # free: it penalises the same fractional miss equally at
+                    # every brightness.  Additive, not a replacement -- dropping
+                    # the per-pixel term entirely (ablation A3) was catastrophic.
+                    _a_true = _flux_true.sum(dim=1).clamp(min=0.0)
+                    _a_pred = _flux_pred.sum(dim=1).clamp(min=0.0)
+                    _eps_a = float(_st_fm['amp_eps'])
+                    _d_log = torch.log((_a_pred + _eps_a) / (_a_true + _eps_a))
+                    _per_row = _per_row + _amp_lambda * _d_log ** 2
             else:
                 w_pe_g = w_pe[:, lo:hi].contiguous()
                 _per_elem = F.smooth_l1_loss(y_head, target, reduction='none') * w_pe_g
@@ -747,6 +806,10 @@ def train_compressed_group_mlp(
             'blend_init_alpha': float(blend_init_alpha),
             'alpha_lr_mult': float(alpha_lr_mult),
             'flux_mse_groups': tuple(flux_mse_groups),
+            'flux_amp_lambda': (dict(flux_amp_lambda)
+                                if isinstance(flux_amp_lambda, dict)
+                                else float(flux_amp_lambda)),
+            'flux_amp_floor_frac': float(flux_amp_floor_frac),
             'coef_err_sigma_floor_rel': _resolved_floor_by_group,
         },
     }
@@ -852,6 +915,8 @@ default_dual_group_config: dict[str, Any] = {
     "mesospheric_group_weight": 1.0,
     "ionospheric_group_weight": 1.0,
     "flux_mse_groups": ("moon", "zodi"),
+    "flux_amp_lambda": 0.0,
+    "flux_amp_floor_frac": 0.05,
     "coef_err_sigma_floor_rel": dict(DEFAULT_COEF_ERR_SIGMA_FLOOR_BY_GROUP),
     "ensemble_seeds": (42, 43, 44, 45, 46, 47, 48, 49, 50, 51),
     "zodi_ctx_restriction": (
@@ -918,6 +983,31 @@ def _precompute_flux_basis_and_geometry(
         flux_basis_matrices["zodi"] = np.asarray(
             model.matrix_zodi[:, stride], dtype=np.float32
         )
+    # The diffuse continuum (HO2 + FeO + O2Ac) has its own basis in exactly the
+    # same layout, and until 2026-09-04 it simply was not wired up here -- so
+    # `continuum` in flux_mse_groups silently did nothing.  It matters: with no
+    # flux-space term the group is fit purely in compressed coefficient space,
+    # and the trainer's empirical calibration corrects its MEAN COEFFICIENT,
+    # which is not its flux-weighted bias because the three basis functions have
+    # very different flux integrals.  Measured on new-oh-2: continuum flux bias
+    # -3.8%, against moon and zodi inside +/-0.5%.
+    _diffuse = getattr(model, "matrix_diffuse", None)
+    if _diffuse is not None and np.asarray(_diffuse).shape[0] > 0:
+        # Row order is ["HO2", "FeO", "O2Ac"] from _build_diffuse(); the loss
+        # indexes the group by position, so a reordering upstream would silently
+        # pair each coefficient with the wrong basis row.  The count check in
+        # the loss cannot see that, so assert the order here.
+        _dnames = [str(n) for n in getattr(model, "diffuse_names", ())]
+        _cnames = [str(n) for n in filtered_triplet["coef_names"]]
+        _seen = [n for n in _cnames if n in set(_dnames)]
+        if _dnames and _seen != _dnames:
+            raise RuntimeError(
+                f"diffuse basis row order {_dnames} does not match the order the "
+                f"same names appear in coef_names ({_seen}); the continuum flux "
+                f"term would pair coefficients with the wrong basis rows.")
+        flux_basis_matrices["continuum"] = np.asarray(
+            _diffuse[:, stride], dtype=np.float32
+        )
     flux_geom_sc_sci = airglow_geometry_scale(
         filtered_triplet["ctx_sci"], **compress_geom_kwargs
     ).astype(np.float32)
@@ -981,6 +1071,7 @@ class Trainer:
         "moon_group_weight", "zodi_group_weight", "continuum_group_weight",
         "mesospheric_group_weight", "ionospheric_group_weight",
         "coef_err_sigma_floor_rel", "flux_mse_groups",
+        "flux_amp_lambda", "flux_amp_floor_frac",
     })
 
     def __init__(self, cfg=None):
@@ -1035,6 +1126,10 @@ class Trainer:
             continuum_ctx_restriction=c["continuum_ctx_restriction"],
             alpha_ctx_features=c["alpha_ctx_features"],
             flux_mse_groups=tuple(c.get("flux_mse_groups", ())),
+            flux_amp_lambda=(dict(c["flux_amp_lambda"])
+                             if isinstance(c["flux_amp_lambda"], dict)
+                             else float(c["flux_amp_lambda"])),
+            flux_amp_floor_frac=float(c["flux_amp_floor_frac"]),
             flux_basis_matrices=flux_basis_matrices,
             flux_geom_sc_sci=flux_geom_sc_sci,
         )

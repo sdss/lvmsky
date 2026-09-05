@@ -189,6 +189,13 @@ class DualEncoderGroupHeadMLPCompressed(nn.Module):
         self.register_buffer("alpha_ctx_idx", torch.tensor(idx, dtype=torch.long))
         _alpha_groups = tuple(g for g in self._ALPHA_CTX_GROUPS if g in group_score_dims)
         self.alpha_ctx_groups = _alpha_groups
+        # alpha is a pure AMPLITUDE knob: it interpolates the two arms' scores
+        # and cannot change their colour.  It reads the SCIENCE context only.
+        # Feeding it the near/far contexts as well, and giving it depth, were
+        # both measured (2026-09-04) and both made the moon tail WORSE -- and
+        # the leverage measurement showed alpha already commands 1.3-1.5x the
+        # amplitude range the tail error needs, so it was never short of reach.
+        # See ablations.RETIRED for the numbers.
         self.alpha_predictors = nn.ModuleDict({
             g: nn.Linear(len(idx), 1) for g in _alpha_groups
         })
