@@ -435,6 +435,51 @@ def _moon_zodi_observation(kind, row_index):
     )
 
 
+_LSF_REPAIR_COUNT = {"rows": 0, "pixels": 0, "reported": False}
+
+
+def _sanitised_lsf_row(kind, row_index):
+    """Return this row's detector LSF FWHM with unusable pixels interpolated.
+
+    The LSF is produced upstream and is normally clean: new-oh-3 has zero bad
+    pixels in 17260 rows x 3 arms.  The gaia1over100 selection exposed a
+    different set of fibres, 9 of which carry a single LSF pixel of exactly 0.0
+    at a spectrograph arm join -- 8 at 5800.0 A (b/r) and 1 at 7570.0 A (r/z),
+    10 bad pixels in 179 million.  ``MoonZodiPhysicalModel.predict`` rightly
+    rejects a non-positive FWHM, which killed the whole worker chunk.
+
+    Repairing by interpolation is safe HERE specifically because the caller
+    wants scalar band integrals (a moon fraction and a zodi total) out of the
+    prediction, so a one-pixel correction at an arm edge cannot move them
+    measurably.  Do not reuse this to paper over a genuinely broken LSF: if a
+    row has no usable pixels at all it is returned as None so the caller can
+    skip the prior rather than fit a fabricated one.
+    """
+    lsf = np.asarray(_WORKER_LSF[kind][row_index], dtype=np.float64)
+    good = np.isfinite(lsf) & (lsf > 0.0)
+    if good.all():
+        return lsf
+    if not good.any():
+        return None
+    idx = np.arange(lsf.size)
+    repaired = lsf.copy()
+    repaired[~good] = np.interp(idx[~good], idx[good], lsf[good])
+    _LSF_REPAIR_COUNT["rows"] += 1
+    _LSF_REPAIR_COUNT["pixels"] += int((~good).sum())
+    if not _LSF_REPAIR_COUNT["reported"]:
+        _LSF_REPAIR_COUNT["reported"] = True
+        _bad_w = _WORKER_DECOMPOSER.wave[~good]
+        print(
+            f"  [lsf-repair] {kind} row {row_index}: interpolated "
+            f"{int((~good).sum())} non-positive/non-finite LSF pixel(s) at "
+            f"{', '.join(f'{x:.1f}' for x in _bad_w[:4])} A"
+            f"{' ...' if _bad_w.size > 4 else ''}.  Further repairs in this "
+            f"worker are silent; the total is reported at the end.",
+            flush=True,
+        )
+    return repaired
+
+
 def _install_split_zodi_amplitude_prior(kind, row_index):
     """Install this spectrum's geometry amplitude prior before fitting.
 
@@ -461,10 +506,16 @@ def _install_split_zodi_amplitude_prior(kind, row_index):
 
     if _WORKER_META is None or not _WORKER_LSF:
         return
+    _lsf = _sanitised_lsf_row(kind, row_index)
+    if _lsf is None:
+        # No usable LSF anywhere in this row: fall back to the shape bounds
+        # alone, exactly as for geometry that cannot be modelled.
+        _WORKER_DECOMPOSER.set_amplitude_prior(None, None)
+        return
     try:
         fraction, zodi_total, _target_airmass = geometry_amplitude_prior(
             _WORKER_DECOMPOSER.wave,
-            np.asarray(_WORKER_LSF[kind][row_index], dtype=np.float64),
+            _lsf,
             _moon_zodi_observation(kind, row_index),
             physical_to_fit_flux_scale=float(_WORKER_FACTOR),
         )
@@ -512,7 +563,16 @@ def fit_chunk_worker(args):
             # Preserve invalid source pixels; zero IVAR excludes them without
             # interpolating, imputing, cropping, or changing the native grid.
             ivar_row = np.isfinite(flux_row).astype(np.float64)
-            lsf_row = np.asarray(_WORKER_LSF[kind][idx], dtype=np.float64)
+            # Same one-pixel arm-join LSF holes as the split-zodi prior path.
+            # Here the LSF drives the CONVOLUTION, not just a scalar prior, so
+            # a row with no usable LSF at all cannot be fitted in this mode --
+            # _sanitised_lsf_row returns None and the row is failed explicitly
+            # rather than fitted against a fabricated LSF.
+            lsf_row = _sanitised_lsf_row(kind, idx)
+            if lsf_row is None:
+                raise ValueError(
+                    f"row {idx} ({kind}) has no finite positive LSF pixel; "
+                    f"cannot fit with {MOON_ZODI_FIT_MODEL}")
             result = _WORKER_DECOMPOSER.fit(
                 flux_row,
                 ivar_row,
