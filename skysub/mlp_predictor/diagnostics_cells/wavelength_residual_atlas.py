@@ -100,8 +100,12 @@ if all(_k in e10_triplet for _k in _chi2_keys):
         print(f'  atlas chi2 gate (max-arm reduced_chi2 <= {ATLAS_CHI2_MAX:g}): '
               f'dropped {_n_bad} failed-decomposition row(s) from the sample '
               f'(worst chi2 = {np.nanmax(_chi2_max_arm[sel_pos][~_chi2_ok_sel]):.4g}, '
-              f'row_index '
-              f'{int(np.asarray(e10_triplet["row_index"])[sel_pos][~_chi2_ok_sel][np.nanargmax(_chi2_max_arm[sel_pos][~_chi2_ok_sel])])})')
+              f'at ' + str(canonical_row_labels(
+                  EVERY10_INPUT,
+                  [int(np.asarray(e10_triplet["row_index"])[sel_pos][~_chi2_ok_sel][
+                      np.nanargmax(_chi2_max_arm[sel_pos][~_chi2_ok_sel])])],
+                  corpus_meta_fits=f'{DECOMP_DATA_ROOT}/{DECOMP_STEM}_meta_only.fits'
+              )['label'][0]) + ')')
         sel_pos = sel_pos[_chi2_ok_sel]
         _n_pick = int(sel_pos.size)
         print(f'  atlas sample after gate: n = {_n_pick}')
@@ -130,7 +134,26 @@ if not bool(np.all(_rev_keep_sel)):
     _n_pick = int(sel_pos.size)
     print(f'  atlas sample after reversal gate: n = {_n_pick}')
 
+# Science-continuum colour gate, same placement and rationale: where the
+# science fibre's continuum colour disagrees with both sky arms, the Moon_bs
+# spline has absorbed field continuum, so the per-component attribution below
+# would charge the moon for something that is not sky.
+_col_keep_sel = sci_continuum_colour_keep_mask(
+    EVERY10_INPUT,
+    np.asarray(e10_triplet['row_index'], dtype=np.int64)[sel_pos],
+    label='atlas')
+if not bool(np.all(_col_keep_sel)):
+    sel_pos = sel_pos[_col_keep_sel]
+    _n_pick = int(sel_pos.size)
+    print(f'  atlas sample after science-continuum colour gate: n = {_n_pick}')
+
 sel_rows = np.asarray(e10_triplet['row_index'], dtype=np.int64)[sel_pos]
+# sel_rows index the every10 arrays; labels must use the canonical identity
+# because every10 row N != corpus row N (measured: every10 493 is corpus 4930).
+_row_ident = canonical_row_labels(
+    EVERY10_INPUT, sel_rows,
+    corpus_meta_fits=f'{DECOMP_DATA_ROOT}/{DECOMP_STEM}_meta_only.fits')
+_row_label = list(_row_ident['label'])
 
 # ML predictions for these rows.
 coef_sci_pred_atlas = predict_sci_coefficients_default(

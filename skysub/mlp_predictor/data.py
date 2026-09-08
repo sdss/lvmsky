@@ -2171,6 +2171,64 @@ def _kappa_mad_row_mask(x, kappa=4.0, n_iter=3):
     return keep
 
 
+def canonical_row_labels(source_meta_fits, source_row_index,
+                         corpus_meta_fits=None):
+    """Universal row identity for diagnostic labels and plot tooltips.
+
+    A triplet's ``row_index`` is the row of the FITS file it was BUILT FROM.
+    For the every10 products that is the every10 file, whose row N is a
+    DIFFERENT SPECTRUM from row N of the full-corpus tables -- so an every10
+    label looked up in a decomposition FITS silently returns the wrong object.
+    Measured on both corpora: every10 row 493 is corpus row 4930.  That
+    mismatch caused a real misdiagnosis (four rows analysed as dark-time
+    floor-pinned objects were in fact bright-moon rows three positions away),
+    so diagnostics should label rows with this function rather than with a
+    bare ``row_index``.
+
+    Returns per-row arrays plus a preformatted ``label``:
+
+    ``expnum``
+        Unique within every META table in both corpora, and the SAME value for
+        the same spectrum across selections.  The universal key: look a row up
+        by this in any table and you get the right object.
+    ``input_index``
+        Row of the upstream pre-selection input (0..17259).  Stable across
+        selections, but NOT an index into any corpus table -- the gaia
+        selection keeps 14469 of 17260 rows, so it is not the corpus row there.
+    ``corpus_row``
+        Row in the full-corpus tables, resolved by matching ``input_index``.
+        -1 where ``corpus_meta_fits`` is not supplied or a row has no match.
+    ``source_row``
+        Row in the file the triplet was built from (the input ``row_index``).
+    """
+    src = np.asarray(source_row_index, dtype=np.int64)
+    meta = fits.getdata(str(source_meta_fits), 'META')
+    names = set(meta.dtype.names or ())
+    expnum = (np.asarray(meta['expnum'], dtype=np.int64)[src]
+              if 'expnum' in names else np.full(src.size, -1, dtype=np.int64))
+    inp = (np.asarray(meta['input_index'], dtype=np.int64)[src]
+           if 'input_index' in names else np.full(src.size, -1, dtype=np.int64))
+
+    corpus_row = np.full(src.size, -1, dtype=np.int64)
+    if corpus_meta_fits is not None and 'input_index' in names:
+        cmeta = fits.getdata(str(corpus_meta_fits), 'META')
+        if 'input_index' in set(cmeta.dtype.names or ()):
+            c_inp = np.asarray(cmeta['input_index'], dtype=np.int64)
+            order = np.argsort(c_inp)
+            pos = np.searchsorted(c_inp[order], inp)
+            pos = np.clip(pos, 0, order.size - 1)
+            cand = order[pos]
+            corpus_row = np.where(c_inp[cand] == inp, cand, -1)
+
+    label = np.array([
+        (f'expnum {int(e)}' if e >= 0 else f'row {int(r)}')
+        + (f' | corpus row {int(c)}' if c >= 0 else '')
+        + f' | src row {int(r)}'
+        for e, c, r in zip(expnum, corpus_row, src)], dtype=object)
+    return dict(expnum=expnum, input_index=inp, corpus_row=corpus_row,
+                source_row=src, label=label)
+
+
 def _loglog_slopes(component, log_wave, min_pixels=200):
     """Row-wise log-log slope of ``component`` against wavelength.
 
@@ -2332,6 +2390,149 @@ def split_zodi_reversal_keep_mask(
     return keep
 
 
+SCI_COLOUR_BLUE_BAND = (4150.0, 4400.0)
+SCI_COLOUR_RED_BAND = (6050.0, 6250.0)
+SCI_COLOUR_EXCESS_MAX = 0.05
+
+
+def sci_continuum_colour_excess(
+    input_fits_path,
+    row_index,
+    blue_band=SCI_COLOUR_BLUE_BAND,
+    red_band=SCI_COLOUR_RED_BAND,
+):
+    """Per-row red/blue continuum colour of the science fibre minus the sky arms'.
+
+    ``dC = log10(R/B)_sci - mean(log10(R/B)_near, log10(R/B)_far)`` on median
+    fluxes in two line-free continuum windows.  It is a pure colour ratio, so a
+    throughput or exposure-time difference between the three telescopes cancels
+    and only a difference in continuum SHAPE survives.
+
+    Why this and not the fitted coefficients: when the science fibre carries
+    continuum the sky model cannot represent, the QP has to put it somewhere,
+    and the 15-knot Moon_bs spline is the only flexible continuum in the basis
+    (the zodi total is pinned by the Leinert anchor and the three diffuse
+    species have fixed shapes).  So the moon coefficients absorb it and the
+    row's moon target stops being a description of scattered moonlight.
+    Traced from every10 row 493 / corpus row 4930 (expnum 41932): sci/near
+    observed flux ratio 1.005 over 3600-4500 A against 1.35 over 4500-5500 and
+    1.46 over 5500-7000, and the fitted sci moon spline responds by sitting
+    exactly on the beta = 0.7 adjacent-knot bound -- 0.7000000004,
+    0.7000000010, then 1.4285714256 = 1/0.7 from Moon_bs03 (4664 A) to
+    Moon_bs04 (5159 A) -- which is what puts a physically impossible kink at
+    ~5000 A into the moon.  Integrated moon sci/near on that row: 1.329.
+
+    Measured on gaia-stars (14 232 usable rows), against the sci-minus-near
+    moon spline colour distortion, and with the far-minus-near sky-arm pair as
+    the control:
+
+        rho(dC, moon colour distortion)  = +0.405   control +0.034
+        same, moon-up rows only          = +0.416
+        rho(dC, signed ML moon amplitude error), moon-up = -0.331  control +0.069
+
+    The sign is the expected one: a redder science continuum inflates the
+    fitted moon, so the network -- which sees only the two sky arms, neither of
+    which knows anything about the science field -- under-predicts it.
+
+    Do NOT substitute a shape test on the fitted moon spline for this.  A bump
+    in the moon spline is NOT diagnostic: on moon-up rows with real moon flux
+    in all three arms, a mid-optical bump above 1.05 fires on 54.2% of science
+    rows and 55.3% / 57.2% of the near / far rows, and above 1.50 on 13.8%
+    against 13.4% / 13.9%.  The bump is generic to this decomposition in every
+    arm.  Only the science-minus-sky-arm DIFFERENCE carries information, and it
+    is much weaker than dC (rho 0.194 against 0.405).
+
+    Returns a dict with ``excess`` (dC), the three per-arm colours, and
+    ``usable`` (False where any band median is non-positive or non-finite).
+    """
+    idx = np.asarray(row_index, dtype=np.int64)
+    with fits.open(input_fits_path, memmap=True) as hdul:
+        wave = np.asarray(hdul['WAVE'].data, dtype=np.float64)
+        wave = wave if wave.ndim == 1 else wave[0]
+
+        def _band(lo, hi):
+            i0, i1 = np.searchsorted(wave, [float(lo), float(hi)])
+            if int(i1) <= int(i0):
+                raise ValueError(
+                    f'Continuum band {lo}-{hi} A is empty on this wavelength grid')
+            return slice(int(i0), int(i1))
+
+        blue = _band(*blue_band)
+        red = _band(*red_band)
+        out = {}
+        for arm, ext in (('sci', 'FLUX_SCI'),
+                         ('near', 'FLUX_SKY_NEAR'),
+                         ('far', 'FLUX_SKY_FAR')):
+            section = hdul[ext].section
+            b = np.nanmedian(section[:, blue], axis=1)[idx]
+            r = np.nanmedian(section[:, red], axis=1)[idx]
+            good = np.isfinite(b) & np.isfinite(r) & (b > 0) & (r > 0)
+            colour = np.full(idx.size, np.nan, dtype=np.float64)
+            np.divide(r, b, out=colour, where=good)
+            with np.errstate(invalid='ignore', divide='ignore'):
+                colour = np.where(good, np.log10(colour), np.nan)
+            out[f'colour_{arm}'] = colour
+    excess = out['colour_sci'] - 0.5 * (out['colour_near'] + out['colour_far'])
+    out['excess'] = excess
+    out['usable'] = np.isfinite(excess)
+    return out
+
+
+def sci_continuum_colour_keep_mask(
+    input_fits_path,
+    row_index,
+    max_excess=SCI_COLOUR_EXCESS_MAX,
+    blue_band=SCI_COLOUR_BLUE_BAND,
+    red_band=SCI_COLOUR_RED_BAND,
+    label='sample',
+    verbose=True,
+):
+    """Keep-mask (True = usable) dropping rows whose science continuum colour
+    disagrees with both sky arms by more than ``max_excess`` dex.
+
+    Belongs with the chi2 and moon/zodi-reversal gates rather than with the
+    target-outlier filters: like a reversal, this is a MISLABELLED row, not a
+    hard one.  Its moon coefficients are partly describing something in the
+    science field, so scoring a prediction against them measures nothing, and
+    the row shows up as a moon-panel outlier that no amount of training could
+    have fixed.  Apply it to the every10 diagnostic samples for the same
+    reason it is applied to the training corpus.
+
+    Default threshold 0.05 dex is set by the sky-arm control: two genuine sky
+    fibres, pointing 7-80 deg apart, differ in this colour by a signed
+    far-minus-near p90 of +0.037 dex, so 0.05 sits just outside the spread the
+    measurement itself produces on rows where nothing is wrong.  It costs 7.1%
+    of the gaia-stars corpus and 7.1% of its every10 sample.
+
+    Rows whose colour cannot be measured (a non-positive band median) are KEPT,
+    matching the reversal gate's convention that an undeterminable row is not
+    an excluded one.
+    """
+    idx = np.asarray(row_index, dtype=np.int64)
+    try:
+        stats = sci_continuum_colour_excess(
+            input_fits_path, idx, blue_band=blue_band, red_band=red_band)
+    except Exception as exc:  # absent file, missing FLUX_* HDU, empty band, ...
+        if verbose:
+            print(f'  {label} science-continuum colour gate SKIPPED '
+                  f'({type(exc).__name__}: {exc})')
+        return np.ones(idx.size, dtype=bool)
+    excess = stats['excess']
+    usable = stats['usable']
+    drop = usable & (excess > float(max_excess))
+    keep = ~drop
+    if verbose:
+        _u = excess[usable]
+        print(f'  {label} science-continuum colour gate '
+              f'(dC > {float(max_excess):.3f} dex, red {red_band[0]:.0f}-'
+              f'{red_band[1]:.0f} A over blue {blue_band[0]:.0f}-'
+              f'{blue_band[1]:.0f} A): dropped {int(drop.sum())}/{idx.size} '
+              f'row(s); dC median {np.median(_u):+.4f}, p90 '
+              f'{np.percentile(_u, 90):+.4f} over {int(usable.sum())} '
+              f'measurable, {int((~usable).sum())} unmeasurable kept')
+    return keep
+
+
 def apply_triplet_filters(
     triplet_data,
     thin_every_n=1,
@@ -2349,6 +2550,8 @@ def apply_triplet_filters(
     reversal_wave=None,
     reversal_min_component_frac=0.05,
     reversal_min_separation=0.0,
+    colour_excess_input_fits=None,
+    colour_excess_max=SCI_COLOUR_EXCESS_MAX,
 ):
     if hard_coef_bounds is None:
         hard_coef_bounds = {'feo': (0.0, 1.0), 'atom_k': (0.0, 1.0)}
@@ -2609,12 +2812,102 @@ def apply_triplet_filters(
     else:
         print("Moon/zodi reversal filter: reversal_decomp_fits not given; skipping.")
 
-    coef_concat = np.hstack([coef_near, coef_far, coef_sci]).astype(np.float32)
+    # Final outlier gate.  It runs on the SMALL, DENSE coefficient groups only
+    # and deliberately EXCLUDES the mesospheric (OH + O2_b01) block, for two
+    # reasons.
+    #
+    # (1) OH already has a purpose-built robust filter upstream -- the
+    #     per-row-mean MAD gate at `oh_kappa` -- so including it here is a
+    #     second pass over already-filtered columns.
+    # (2) This gate uses a NON-robust mean/std, and the OH block carries
+    #     decomposition failures at 1e13-1e15 that inflate their own column's
+    #     sigma until the gate on that column is effectively disarmed.  How
+    #     badly this happens is a property of the corpus, not of any row: on
+    #     two corpora whose OH bulk distributions are statistically identical
+    #     (median MAD 0.051 vs 0.056) the median std/MAD ratio differed by a
+    #     factor of 2.5e9, and retention differed by 18 percentage points
+    #     (89.4% vs 71.1%).  A row-quality filter must not depend on which
+    #     corpus the row arrived in.
+    #
+    # Restricting to the 30 non-mesospheric coefficients x 3 arms fixes both.
+    # Measured: retention 89.4% -> 96.2% and 71.1% -> 90.5% on the two corpora
+    # (spread 18.3pp -> 5.7pp), while the chi2 ratio between rejected and kept
+    # rows -- i.e. whether the gate actually finds bad fits -- IMPROVES on the
+    # first corpus (3.42/4.01/4.17 -> 4.40/6.92/4.47 for near/far/sci) and
+    # sharpens markedly on the second corpus's science arm (4.75x -> 13.7x).
+    #
+    # Do NOT switch this to _kappa_mad_row_mask: with 1164 columns ANDed a MAD
+    # threshold is far too tight and the result is degenerate (measured: 2 rows
+    # kept on one corpus, all rows on the other, the latter because that
+    # function silently returns the previous mask when a pass would reject
+    # everything).
+    _gate_group_map = _build_group_indices(coef_names_local)
+    _gate_cols = np.sort(np.concatenate(
+        [np.asarray(idx, dtype=int) for g, idx in _gate_group_map.items()
+         if g != 'mesospheric']))
+    coef_concat = np.hstack([coef_near[:, _gate_cols],
+                             coef_far[:, _gate_cols],
+                             coef_sci[:, _gate_cols]]).astype(np.float32)
     kappa_mask = _kappa_sigma_row_mask(coef_concat, kappa=float(kappa), n_iter=int(kappa_iter))
     keep &= kappa_mask
     print(
-        f"Kappa-sigma filter (kappa={kappa:.1f}): kept {kappa_mask.sum()}/{len(kappa_mask)} ({100.0 * kappa_mask.mean():.1f}%)"
+        f"Kappa-sigma filter (kappa={kappa:.1f}, {coef_concat.shape[1]} cols = "
+        f"{len(_gate_cols)} non-mesospheric coefs x 3 arms; the OH block is "
+        f"covered by the oh_kappa MAD gate above): "
+        f"kept {kappa_mask.sum()}/{len(kappa_mask)} ({100.0 * kappa_mask.mean():.1f}%)"
     )
+
+    # Science-continuum colour gate.  Drops rows where the science fibre's
+    # red/blue continuum ratio disagrees with BOTH sky arms, which is the
+    # condition under which coef_sci stops being a description of sky: the
+    # Moon_bs spline is the basis's only flexible continuum, so whatever the
+    # science field adds is absorbed there and the row's moon target is
+    # contaminated.  See sci_continuum_colour_excess for the measurements
+    # (rho = +0.405 against the moon colour distortion, sky-arm control
+    # +0.034) and for why a shape test on the fitted spline is NOT a
+    # substitute.
+    #
+    # Runs LAST of the real filters purely so its printed cost is the MARGINAL
+    # one.  Every gate in this function is an independent per-row mask ANDed
+    # into `keep` -- including the kappa-sigma gate, whose mean/std are
+    # computed over all n0 rows, not over the survivors -- so the returned
+    # sample does not depend on the order at all.  Reported cost does: run
+    # against the full corpus this gate flags 995/14 447 rows (6.9%), but only
+    # 256 of those are rows the other filters were not already removing, and
+    # that second number is the one that matters.
+    #
+    # It is NOT redundant with chi2, and tightening chi2 is not a substitute.
+    # chi2 asks whether the model fitted the data; this asks whether it fitted
+    # the right thing, and the failure mode here is a GOOD fit to the wrong
+    # target.  Measured: 394 flagged rows have chi2_sci <= 1 -- median 0.120,
+    # BETTER than the clean median of 0.170 -- while their median moon colour
+    # distortion is +0.269 dex against -0.0003 for clean good-fit rows.  Among
+    # rows that already pass chi2_sci <= 10, dC still predicts the moon
+    # distortion at rho = +0.273 while chi2_sci itself gives +0.005, i.e. no
+    # information.  chi2 does track severity at the top end (median distortion
+    # +0.269 / +0.647 / +0.827 for chi2_sci <=1 / 1-10 / >10, and the existing
+    # chi2 <= 10 cut already removes 43% of flagged rows), but tightening it
+    # from 10 to 1 buys 179 more flagged rows at the price of 989 clean ones.
+    # Row 493 / corpus row 4930, the row this gate was built from, has
+    # chi2_sci = 0.731: no chi2 threshold reaches it.
+    if colour_excess_input_fits:
+        colour_mask = sci_continuum_colour_keep_mask(
+            colour_excess_input_fits,
+            np.asarray(triplet_data['row_index'], dtype=np.int64),
+            max_excess=float(colour_excess_max),
+            label='corpus',
+            verbose=True,
+        )
+        _colour_marginal = int((keep & ~colour_mask).sum())
+        keep &= colour_mask
+        print(f"Science-continuum colour filter: flagged "
+              f"{int((~colour_mask).sum())}/{len(colour_mask)} rows "
+              f"({100.0 * (~colour_mask).mean():.1f}%), of which "
+              f"{_colour_marginal} were not already removed by the filters "
+              f"above (marginal cost); {int(keep.sum())} rows remain")
+    else:
+        print("Science-continuum colour filter: colour_excess_input_fits not "
+              "given; skipping.")
 
     # Thinning is applied LAST so the filter-fraction prints above reflect
     # counts against the full pre-thinning dataset.  It selects every N-th row

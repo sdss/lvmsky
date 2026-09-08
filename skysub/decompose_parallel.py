@@ -86,6 +86,9 @@ _WORKER_META = None
 _WORKER_PROGRESS_QUEUE = None
 _WORKER_FIT_MODEL = "baseline"
 _WORKER_EXPOSURE_SECONDS = 900.0
+_WORKER_SCIENCE_LINE_MASK = None
+_WORKER_SCIENCE_LINE_FWHM = None
+_WORKER_SCIENCE_LINE_CENTRE = True  # overwritten by init_worker
 
 FIT_MODEL_SUFFIXES = {
     "baseline": "",
@@ -197,6 +200,239 @@ SPLIT_ZODI_ZODI_PRIOR_CALIBRATION = 1.6
 # changes how much colour freedom each family actually has.
 MOON_N_KNOTS_DEFAULT = 11
 
+# --- Science emission-line mask -------------------------------------------
+# Nebular lines from the SCIENCE field are not sky, and NONE of them exists in
+# the 388-component basis, so the QP is forced to absorb them into whatever it
+# has.  Measured on every10 row 773 (expnum 39622, galactic b = +0.48, an
+# inner-plane H II region): Halpha equivalent width 62.4 A in the science fibre
+# against 10.0 and 2.8 in the two sky arms, and the FITTED OH component runs
+# 6.7x its sideband level inside the Halpha/[NII] window and 2.0x inside
+# [SII].  So the absorber is OH -- the only narrow-line family with lines
+# there -- not the moon or zodi splines, which is why the science-continuum
+# colour gate in mlp_predictor.data does not see these rows and why nebular
+# equivalent width shows no corpus-wide correlation with moon or zodi
+# distortion (rho -0.107 and +0.044).
+#
+# Zeroing IVAR is the whole mechanism: SkyDecompBase._fit_design selects on
+# `np.isfinite(flux) & np.isfinite(ivar) & (ivar > 0)`, so masked pixels leave
+# the QP, chi2, the dof count and R2 together, with no interpolation and no
+# change to the wavelength grid.
+#
+# COST, measured against the EXACT deployed basis -- design matrix rebuilt
+# from the stored per-row LSF surface and validated to 7e-16 against the
+# stored COMP_OH.  A design matrix built from the INITIAL LSF instead is wrong
+# by a factor of 12 on OH and must not be used for this; it also mislocates OH
+# line peaks, which made [OIII]4959 look coincident with OH_314 when it is not.
+#
+# At the deployed widths (1.5 x FWHM, so +/-2.04 A at Halpha) the mask covers
+# 85/12401 pixels = 0.69% and removes 0.96% of the OH model, 0.95% of the
+# moon, 0.70% of the zodi, 0.76% of the diffuse block and 0.00% of ATOM.
+# Three OH components lose more than 20% of their own support -- OH_316 64%,
+# OH_144 45%, OH_341 32% -- carrying 0.238% of the OH flux between them
+# (ranks 81-217 of 357), and each keeps support elsewhere: OH_341 at
+# 4034-5475 A, OH_316 at 3964-8175, and OH_144 its 6555.5 A line, which the
+# window leaves outside while masking its 6561.5 A one.
+#
+# Almost all of that cost is Halpha and [NII]6583.  [OII]3726/3729,
+# [OIII]4959 and [OIII]5007 cost NOTHING -- no component loses even 10%.
+# WIDTH IS THE SENSITIVE KNOB, and it is asymmetric: widening buys very little
+# line flux (the core is already covered) and costs OH support quickly --
+# 2.0 x FWHM takes OH from 0.96% to 1.09% and pulls OH_285 past 20%, and a
+# +/-8 A window would take OH_144 to 94% (its whole support is two lines, at
+# 6555.5 and 6561.5 A) and add OH_150.  Re-measure before widening.
+#
+# Both [NII] and both [SII] and [OIII]4959 are included even though only the
+# brighter partner was asked for: they are fixed-ratio partners of lines
+# already masked (1/3 of [NII]6583 and of [OIII]5007), they sit inside or
+# beside the same windows, and leaving one of a doublet unmasked leaves the
+# contaminant in the fit at a third of its strength.
+SCIENCE_EMISSION_LINES = (
+    ("[OII]3726", 3726.03),
+    ("[OII]3729", 3728.82),
+    ("Hbeta", 4861.33),
+    ("[OIII]4959", 4958.91),
+    ("[OIII]5007", 5006.84),
+    ("[NII]6548", 6548.05),
+    ("Halpha", 6562.80),
+    ("[NII]6583", 6583.45),
+    ("[SII]6716", 6716.44),
+    ("[SII]6731", 6730.82),
+)
+# Half-width = max(MIN, FWHM_MULTIPLE * FWHM(lambda)) + lambda * v/c, scaled
+# off the detector FWHM at each line rather than one assumed resolution.
+#
+# 1.5 x FWHM (3.53 sigma) masks the bright core, which is where essentially all
+# the contaminating flux is, and deliberately leaves the wings in: doubling the
+# window to 2.0 x FWHM buys almost no extra line flux while taking OH from
+# 0.96% to 1.09% and pulling a fourth component past 20% support loss.
+#
+# A displaced line is not a wing effect -- the core itself moves -- so instead
+# of widening the windows the mask SLIDES them, using a Halpha velocity
+# measured per row (SCIENCE_LINE_MASK_CENTRE_ON_HALPHA).  The extra widening
+# term SCIENCE_LINE_MASK_VELOCITY_KM_S is therefore 0 by default.
+#
+# THE CENTROID MUST BE MEASURED AGAINST A SKY REFERENCE.  There are OH lines
+# directly under Halpha -- OH_144 at 6555.5/6561.5 A, OH_157 at 6559.5/6562.5,
+# OH_285 at 6557.5/6561.5, OH_316 at 6563.0 -- and they are bright enough to
+# drag the centroid: the two SKY fibres, which are essentially pure OH in this
+# window, centroid at -3.08 and -4.20 A.  Measured on 2697 science fibres with
+# Halpha EW excess > 10 A:
+#
+#   raw science flux      median -0.71 A (-32 km/s), p1 -4.33, p99 +4.12,
+#                         87.9% within +/-2.04 A
+#   minus a scaled sky arm  median +0.17 A ( +8 km/s), p1 -2.07, p99 +5.83,
+#                         94.4% within +/-2.04 A
+#
+# So the true nebular velocities sit much closer to rest than the raw numbers
+# suggest, and most of the apparent -32 km/s was OH.
+#
+# WHAT CENTRING ACTUALLY BUYS, validated on those 2697 rows: the pipeline
+# measures a velocity on 92.5% of them (median +8.7 km/s over the whole
+# every10 sample, matching the +8 km/s above; the other 73% of all rows have
+# no detectable nebular Halpha and correctly fall back to rest).  Core
+# coverage goes 89.0% -> 92.5%: of the 297 rows the rest-frame mask missed,
+# centring covers 102, while 8 rows (0.30%) that WERE covered are now missed
+# through a mis-measured velocity.  It is a tail fix worth roughly +3.5pp, not
+# a bulk one -- do not expect it to change aggregate metrics.
+#
+# Masked pixel count stays 83-87 against the rest-frame 85, so dof moves by at
+# most a couple of pixels and reduced_chi2 stays comparable across rows.
+SCIENCE_LINE_MASK_ENABLED = True
+SCIENCE_LINE_MASK_FWHM_MULTIPLE = 1.5
+SCIENCE_LINE_MASK_VELOCITY_KM_S = 0.0
+SCIENCE_LINE_MASK_MIN_HALF_WIDTH_A = 2.0
+# Per-row centring: measure the nebular velocity from Halpha in the SCIENCE
+# fibre and slide every window to the observed wavelength instead of widening
+# it.  One velocity per row, applied to all ten lines and all three arms --
+# the shift is a property of the emitting gas, not of the line, and keeping it
+# common across arms means the three fits still exclude exactly the same
+# pixels, which is what makes their coefficients comparable.
+SCIENCE_LINE_MASK_CENTRE_ON_HALPHA = True
+SCIENCE_LINE_MASK_MAX_SHIFT_KM_S = 300.0
+SCIENCE_LINE_MASK_CENTRE_MIN_SNR = 5.0
+_C_KM_S = 299792.458
+
+
+def measure_halpha_velocity(
+    wave,
+    flux_sci,
+    flux_sky=None,
+    max_shift_km_s=SCIENCE_LINE_MASK_MAX_SHIFT_KM_S,
+    min_snr=SCIENCE_LINE_MASK_CENTRE_MIN_SNR,
+    search_half_width_a=12.0,
+):
+    """Nebular Halpha velocity of one row, in km/s, or 0.0 if not measurable.
+
+    ``flux_sky`` is a sky-fibre spectrum used to cancel the OH lines that sit
+    directly under Halpha; pass ``None`` only if none is available, and expect
+    a blueward bias of a few km/s to tens of km/s if you do (the sky fibres
+    centroid at -3.1 and -4.2 A in this window because of OH alone).  The sky
+    is scaled by the ratio of positive flux in the window, capped at 1, so it
+    can only remove the shared airglow, never add a negative pedestal deeper
+    than the science spectrum itself.
+
+    Returns 0.0 -- i.e. leave the windows at rest -- whenever the line is not
+    convincingly detected, the centroid lands outside the search window, or
+    the implied shift exceeds ``max_shift_km_s``.  Failing closed matters:
+    a spurious shift moves the mask off a line that WAS being masked.
+    """
+    wave = np.asarray(wave, dtype=np.float64)
+    lam0 = 6562.80
+    lo, hi = lam0 - float(search_half_width_a), lam0 + float(search_half_width_a)
+    i0, i1 = np.searchsorted(wave, [lo, hi])
+    if int(i1) - int(i0) < 5:
+        return 0.0
+    sl = slice(int(i0), int(i1))
+    w = wave[sl]
+    y = np.asarray(flux_sci, dtype=np.float64)[sl]
+    if flux_sky is not None:
+        sky = np.asarray(flux_sky, dtype=np.float64)[sl]
+        num = float(np.nansum(np.clip(y, 0.0, None)))
+        den = float(np.nansum(np.clip(sky, 0.0, None)))
+        if den > 0.0:
+            y = y - min(num / den, 1.0) * sky
+    # Local continuum from sidebands either side of the Halpha/[NII] complex.
+    cw = (np.abs(wave - lam0) > 25.0) & (np.abs(wave - lam0) <= 70.0)
+    base = np.asarray(flux_sci, dtype=np.float64)[cw]
+    cont = float(np.nanmedian(base)) if np.any(np.isfinite(base)) else 0.0
+    net = y - cont
+    good = np.isfinite(net)
+    if not np.any(good):
+        return 0.0
+    pos = np.where(good & (net > 0.0), net, 0.0)
+    total = float(pos.sum())
+    if total <= 0.0:
+        return 0.0
+    # Detection test against the scatter of the negative excursions, which is
+    # what the window looks like when there is no line.
+    neg = net[good & (net < 0.0)]
+    noise = float(np.std(neg)) if neg.size >= 3 else 0.0
+    peak = float(np.nanmax(pos))
+    if noise > 0.0 and peak < float(min_snr) * noise:
+        return 0.0
+    centroid = float((pos * w).sum() / total)
+    if not np.isfinite(centroid) or centroid <= lo or centroid >= hi:
+        return 0.0
+    v = (centroid - lam0) / lam0 * _C_KM_S
+    if not np.isfinite(v) or abs(v) > float(max_shift_km_s):
+        return 0.0
+    return v
+
+
+def science_line_mask(
+    wave,
+    lsf_fwhm=None,
+    lines=SCIENCE_EMISSION_LINES,
+    fwhm_multiple=SCIENCE_LINE_MASK_FWHM_MULTIPLE,
+    velocity_km_s=SCIENCE_LINE_MASK_VELOCITY_KM_S,
+    min_half_width_a=SCIENCE_LINE_MASK_MIN_HALF_WIDTH_A,
+    centre_velocity_km_s=0.0,
+):
+    """Boolean mask over ``wave``, True where a science emission line sits.
+
+    Each window is centred on ``lambda * (1 + centre_velocity_km_s/c)`` --
+    normally the per-row Halpha velocity from ``measure_halpha_velocity``,
+    applied to every line because the shift belongs to the emitting gas -- and
+    has half-width
+    ``max(min_half_width_a, fwhm_multiple * FWHM(lambda)) + lambda * v/c``.
+
+    ``lsf_fwhm`` is the DETECTOR LSF FWHM in Angstrom -- the LSF_* arrays in
+    the input FITS, which is what the pipeline actually carries (median 1.57 A
+    on gaia1over100, 1.36 A at Halpha).  Do NOT pass ``--lsf-sigma`` here: that
+    is a scalar Gaussian SIGMA defaulting to 0.5 A, a different quantity by a
+    factor of 2.35.  A per-pixel array, a scalar, or ``None`` are all accepted;
+    ``None`` (or an array with no usable pixel near a line) falls back to
+    ``min_half_width_a``.
+
+    Returns ``(mask, widths)``, ``widths`` being the per-line half-width in
+    Angstrom so the caller can report what it actually masked.
+    """
+    wave = np.asarray(wave, dtype=np.float64)
+    fwhm = None
+    if lsf_fwhm is not None:
+        arr = np.asarray(lsf_fwhm, dtype=np.float64)
+        if arr.ndim == 0:
+            arr = np.full(wave.shape, float(arr))
+        if arr.shape == wave.shape:
+            fwhm = arr
+    mask = np.zeros(wave.shape, dtype=bool)
+    widths = {}
+    shift = 1.0 + float(centre_velocity_km_s) / _C_KM_S
+    for name, lam in lines:
+        centre = float(lam) * shift
+        half = float(min_half_width_a)
+        if fwhm is not None:
+            near = np.abs(wave - centre) <= 25.0
+            usable = near & np.isfinite(fwhm) & (fwhm > 0)
+            if np.any(usable):
+                half = max(half,
+                           float(fwhm_multiple) * float(np.median(fwhm[usable])))
+        half += float(lam) * float(velocity_km_s) / _C_KM_S
+        widths[name] = half
+        mask |= (wave >= centre - half) & (wave <= centre + half)
+    return mask, widths
+
+
 
 def init_worker(
     wave,
@@ -218,6 +454,8 @@ def init_worker(
     n_spline_knots=MOON_N_KNOTS_DEFAULT,
     n_zodi_spline_knots=SPLIT_ZODI_N_KNOTS_DEFAULT,
     zodi_smooth_lambda=SPLIT_ZODI_SMOOTH_LAMBDA_DEFAULT,
+    mask_science_lines=SCIENCE_LINE_MASK_ENABLED,
+    centre_on_halpha=SCIENCE_LINE_MASK_CENTRE_ON_HALPHA,
 ):
     """Initialise one SkyDecomp instance per worker process."""
     global \
@@ -229,7 +467,10 @@ def init_worker(
         _WORKER_META, \
         _WORKER_PROGRESS_QUEUE, \
         _WORKER_FIT_MODEL, \
-        _WORKER_EXPOSURE_SECONDS
+        _WORKER_EXPOSURE_SECONDS, \
+        _WORKER_SCIENCE_LINE_MASK, \
+        _WORKER_SCIENCE_LINE_FWHM, \
+        _WORKER_SCIENCE_LINE_CENTRE
 
     _clamp_native_threads(1)
 
@@ -360,6 +601,47 @@ def init_worker(
         )
     else:
         raise ValueError(f"Unknown fit model: {fit_model}")
+
+    # Science emission-line mask, built once per worker.  Deliberately built
+    # from the init-time LSF rather than per row: the row-to-row LSF variation
+    # is small next to the +/-150 km/s velocity term, and a row-dependent mask
+    # would make the number of fitted pixels vary from row to row, which
+    # reduced_chi2 and the dof count would then carry.
+    _WORKER_SCIENCE_LINE_MASK = None
+    _WORKER_SCIENCE_LINE_FWHM = None
+    _WORKER_SCIENCE_LINE_CENTRE = bool(centre_on_halpha)
+    if mask_science_lines:
+        # Use the DETECTOR LSF FWHM from the input FITS, median-combined over
+        # rows and arms, not the scalar `lsf_sigma` argument -- that is a
+        # 0.5 A Gaussian sigma by default while the real FWHM is ~1.57 A, so
+        # feeding it here would size every window off the wrong quantity.
+        # _WORKER_LSF is empty for fit models that do not need it; then the
+        # instrumental term is simply dropped.
+        _fwhm_ref = None
+        if _WORKER_LSF:
+            _stack = [np.asarray(v, dtype=np.float64) for v in _WORKER_LSF.values()]
+            _stack = [a if a.ndim == 1 else np.nanmedian(a, axis=0) for a in _stack]
+            _stack = [a for a in _stack if a.shape == np.shape(wave)]
+            if _stack:
+                _fwhm_ref = np.nanmedian(np.vstack(_stack), axis=0)
+        # Use the `wave` ARGUMENT, not _WORKER_DECOMPOSER.wave: every
+        # decomposer is constructed from this same array, and reading it off
+        # the object couples worker init to the concrete decomposer class
+        # (test_palace_suffix's FakeDecomposer has no `.wave`).
+        _mask, _widths = science_line_mask(wave, _fwhm_ref)
+        _WORKER_SCIENCE_LINE_MASK = _mask
+        # Kept so fit_chunk_worker can rebuild the mask per row at the
+        # measured Halpha velocity; the static mask above stays as the
+        # fallback for rows where the line is not measurable.
+        _WORKER_SCIENCE_LINE_FWHM = _fwhm_ref
+        if worker_rank == 0:
+            print(f"[science-line mask] {int(_mask.sum())}/{_mask.size} pixels "
+                  f"({100.0 * _mask.mean():.2f}%) excluded via IVAR=0 in "
+                  f"{len(SCIENCE_EMISSION_LINES)} windows: "
+                  + ", ".join(f"{n} +/-{w:.1f}A" for n, w in _widths.items())
+                  + ("; centred per row on the measured Halpha velocity"
+                     if _WORKER_SCIENCE_LINE_CENTRE else "; fixed at rest"),
+                  flush=True)
 
     # After all heavy imports, clamp once more and (optionally) report per-worker state.
     _clamp_native_threads(1)
@@ -527,9 +809,46 @@ def _install_split_zodi_amplitude_prior(kind, row_index):
     )
 
 
+def _science_line_mask_for_row(row_index):
+    """Science-line mask for one row, centred on its measured Halpha velocity.
+
+    Falls back to the worker's static rest-frame mask whenever centring is
+    disabled, the science flux is unavailable, or the velocity cannot be
+    measured -- ``measure_halpha_velocity`` returns 0.0 in that case, which
+    reproduces the static mask exactly.  The window WIDTH never changes, so
+    the number of masked pixels is constant to within a pixel or two and the
+    dof count stays comparable from row to row.
+    """
+    if _WORKER_SCIENCE_LINE_MASK is None:
+        return None
+    if not _WORKER_SCIENCE_LINE_CENTRE:
+        return _WORKER_SCIENCE_LINE_MASK
+    sci = _WORKER_FLUX.get("sci")
+    if sci is None:
+        return _WORKER_SCIENCE_LINE_MASK
+    sky = _WORKER_FLUX.get("sky1")
+    if sky is None:
+        sky = _WORKER_FLUX.get("sky2")
+    velocity = measure_halpha_velocity(
+        _WORKER_DECOMPOSER.wave,
+        np.asarray(sci[row_index], dtype=np.float64),
+        None if sky is None else np.asarray(sky[row_index], dtype=np.float64),
+    )
+    if velocity == 0.0:
+        return _WORKER_SCIENCE_LINE_MASK
+    mask, _ = science_line_mask(
+        _WORKER_DECOMPOSER.wave,
+        _WORKER_SCIENCE_LINE_FWHM,
+        centre_velocity_km_s=velocity,
+    )
+    return mask
+
+
 def fit_chunk_worker(args):
     """Fit one chunk of spectra using the worker-local SkyDecomp instance."""
-    global _WORKER_DECOMPOSER, _WORKER_FACTOR, _WORKER_PROGRESS_QUEUE, _WORKER_FIT_MODEL
+    global _WORKER_DECOMPOSER, _WORKER_FACTOR, _WORKER_PROGRESS_QUEUE, _WORKER_FIT_MODEL, \
+        _WORKER_SCIENCE_LINE_MASK, _WORKER_SCIENCE_LINE_FWHM, \
+        _WORKER_SCIENCE_LINE_CENTRE
     if _WORKER_DECOMPOSER is None:
         raise RuntimeError("Worker SkyDecomp has not been initialised.")
     kind, idx0, idx1 = args
@@ -539,6 +858,16 @@ def fit_chunk_worker(args):
         idx = idx0 + j
         flux_row = flux_chunk[j] * _WORKER_FACTOR
         ivar_row = np.ones_like(flux_row)
+        # Science emission lines: excluded from every arm, not just the science
+        # one.  The sky fibres also sit on Galactic diffuse ionised gas -- on
+        # row 773 the near arm carries Halpha EW 10.0 A -- and masking only the
+        # science arm would make the three fits differ in which pixels they
+        # used, which is exactly the asymmetry the ML transfer is trying to
+        # measure.  The velocity is likewise measured once from the SCIENCE
+        # fibre and shared by all three arms, so the masked pixel set stays
+        # identical across them.
+        if _WORKER_SCIENCE_LINE_MASK is not None:
+            ivar_row[_science_line_mask_for_row(idx)] = 0.0
         if _WORKER_FIT_MODEL == "baseline":
             result = _WORKER_DECOMPOSER.fit(
                 flux_row,
@@ -563,6 +892,8 @@ def fit_chunk_worker(args):
             # Preserve invalid source pixels; zero IVAR excludes them without
             # interpolating, imputing, cropping, or changing the native grid.
             ivar_row = np.isfinite(flux_row).astype(np.float64)
+            if _WORKER_SCIENCE_LINE_MASK is not None:
+                ivar_row[_science_line_mask_for_row(idx)] = 0.0
             # Same one-pixel arm-join LSF holes as the split-zodi prior path.
             # Here the LSF drives the CONVOLUTION, not just a scalar prior, so
             # a row with no usable LSF at all cannot be fitted in this mode --
@@ -677,6 +1008,8 @@ def run(
     n_spline_knots=MOON_N_KNOTS_DEFAULT,
     n_zodi_spline_knots=SPLIT_ZODI_N_KNOTS_DEFAULT,
     zodi_smooth_lambda=SPLIT_ZODI_SMOOTH_LAMBDA_DEFAULT,
+    mask_science_lines=SCIENCE_LINE_MASK_ENABLED,
+    centre_on_halpha=SCIENCE_LINE_MASK_CENTRE_ON_HALPHA,
 ):
     base_dir, resolved_moon_zodi_data_root = resolve_runtime_data_roots(
         fit_model,
@@ -764,6 +1097,8 @@ def run(
             int(n_spline_knots),
             int(n_zodi_spline_knots),
             float(zodi_smooth_lambda),
+            bool(mask_science_lines),
+            bool(centre_on_halpha),
         ),
     ) as executor:
         pbar = tqdm(
@@ -1137,6 +1472,28 @@ def main():
         help="Print per-library thread pool counts from worker 0 after all imports finish.",
     )
     parser.add_argument(
+        "--no-science-line-mask",
+        action="store_true",
+        help=(
+            "Fit the science emission-line windows instead of excluding them. "
+            "By default [OII]3727, Hbeta, [OIII]4959/5007, Halpha, [NII]6548/6583 "
+            "and [SII]6716/6731 are masked via IVAR=0 in every arm, because none "
+            "of them is in the basis and the fitted OH component absorbs them "
+            "(measured 6.7x the sideband OH level inside Halpha/[NII] on an "
+            "inner-plane H II region field).  Use this to A/B the mask."
+        ),
+    )
+    parser.add_argument(
+        "--no-halpha-centring",
+        action="store_true",
+        help=(
+            "Keep the science-line windows at rest wavelength instead of "
+            "sliding them to the per-row Halpha velocity.  Centring lifts core "
+            "coverage on strong-Halpha rows from 89.0%% to 92.5%%; use this to "
+            "A/B it.  Ignored when --no-science-line-mask is given."
+        ),
+    )
+    parser.add_argument(
         "--only-thin",
         action="store_true",
         help=(
@@ -1200,6 +1557,8 @@ def main():
             n_spline_knots=args.n_spline_knots,
             n_zodi_spline_knots=args.n_zodi_spline_knots,
             zodi_smooth_lambda=args.zodi_smooth_lambda,
+            mask_science_lines=not args.no_science_line_mask,
+            centre_on_halpha=not args.no_halpha_centring,
         )
 
         extract_meta_and_coef_products(

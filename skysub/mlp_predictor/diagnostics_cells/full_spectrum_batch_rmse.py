@@ -122,10 +122,21 @@ else:
         {"near": EVERY10_NEAR, "far": EVERY10_FAR, "sci": EVERY10_SCI},
         row_index_e10, _e10_wave, label="every10")
 
+    # Science-continuum colour gate.  Same reason as the reversal gate above:
+    # a row whose science fibre carries continuum the sky basis cannot
+    # represent has that continuum absorbed by the Moon_bs spline, so its moon
+    # target is contaminated and scoring against it measures nothing.  Without
+    # this the verification sample keeps rows the training corpus now drops,
+    # which is exactly the mismatch that made every10 row 493 (expnum 41932)
+    # look like a moon-prediction failure when the prediction was correct and
+    # the target was not.
+    _e10_keep &= sci_continuum_colour_keep_mask(
+        EVERY10_INPUT, row_index_e10, label="every10")
+
     _e10_valid_pos = np.flatnonzero(_e10_keep)
     n_rows = int(_e10_valid_pos.size)
     print(
-        f"  every10 rows passing chi2 + field exclusion: "
+        f"  every10 rows passing chi2 + field + reversal + colour gates: "
         f"{n_rows}/{_e10_n0} ({100.0 * n_rows / max(_e10_n0, 1):.1f}%)"
     )
     if n_rows == 0:
@@ -177,6 +188,20 @@ else:
 
     sel_pos = np.sort(_selected)
     sel_rows = row_index_e10[sel_pos]
+
+    # Canonical row identity for every label and tooltip below.  `sel_rows` are
+    # EVERY10 file rows, and every10 row N is a different spectrum from row N of
+    # the full-corpus tables (measured: every10 493 is corpus 4930), so a bare
+    # every10 number cannot be looked up in a decomposition FITS.  `expnum` is
+    # unique in every META and identical for the same spectrum across
+    # selections, so it is what makes these labels universally resolvable.
+    _row_ident = canonical_row_labels(
+        EVERY10_INPUT, sel_rows,
+        corpus_meta_fits=f'{DECOMP_DATA_ROOT}/{DECOMP_STEM}_meta_only.fits')
+    _row_label = list(_row_ident['label'])
+    print(f'  row identity: labels carry expnum + full-corpus row; '
+          f'{int((_row_ident["corpus_row"] >= 0).sum())}/{len(_row_label)} '
+          f'resolved against {DECOMP_STEM}_meta_only.fits')
 
     _sel_phases = _e10_moon_phase[sel_pos]
     print(f"  phase-stratified sample: n_use={n_use} across {_n_phase_bins} "
@@ -632,7 +657,7 @@ else:
             for i in range(n_use):
                 _rid = int(sel_rows[i])
                 _hover = (
-                    f"row {_rid}{_expnum_str(i)}<br>"
+                    f"{_row_label[i]}<br>"
                     f"λ=%{{x:.1f}} Å<br>"
                     f"Δ_{_pname}=%{{y:.4g}}"
                     "<extra></extra>"
@@ -675,7 +700,7 @@ else:
             for i in range(n_use):
                 _rid = int(sel_rows[i])
                 _hover = (
-                    f"row {_rid}{_expnum_str(i)}<br>"
+                    f"{_row_label[i]}<br>"
                     f"λ=%{{x:.1f}} Å<br>"
                     f"Δ_{_pname}=%{{y:.4g}}"
                     "<extra></extra>"
@@ -779,6 +804,10 @@ else:
     rmse_subset_results = {
         "row_positions": sel_pos,
         "row_indices": sel_rows,
+        # every10 rows above; the canonical identity below is what labels and
+        # tooltips must use so a number is resolvable in the corpus tables.
+        "row_ident": _row_ident,
+        "row_labels": _row_label,
         "near_rmse": near_rmse,
         "far_rmse": far_rmse,
         "sci_rmse": sci_rmse,

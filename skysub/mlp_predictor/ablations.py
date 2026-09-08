@@ -61,6 +61,9 @@ RETIRED: dict[str, str] = {
     "G1_gain_moon": "blend gain removed 2026-09-05 (measured: worse)",
     "G2_gain_moon_zodi": "blend gain removed 2026-09-05 (measured: worse)",
     "G3_gain_all3": "blend gain removed 2026-09-05 (measured: worse)",
+    "W1_rowsig_p06": "flux_row_weight_power removed 2026-09-05 (measured: worse)",
+    "W2_rowsig_p12": "flux_row_weight_power removed 2026-09-05 (measured: worse)",
+    "W3_rowsig_p20": "flux_row_weight_power removed 2026-09-05 (measured: worse)",
 }
 
 ABLATIONS: dict[str, dict] = {
@@ -155,6 +158,9 @@ ABLATIONS: dict[str, dict] = {
     # smooth_l1 and gains only the log-amplitude term, which is the part that
     # addresses a scale bias.  C1-C3 switch it to flux MSE instead and cost it
     # its accuracy.
+    # ================================================================
+    # W -- per-row weighting by the decomposition's own amplitude sigma.
+    # ================================================================
     "S12_moon_geom_amp": {
         "alpha_ctx_features": ("moon_up_smooth", "ecl_beta_deg", "airmass",
                                "moon_sep", "moon_signal_proxy"),
@@ -491,6 +497,51 @@ G1/G2/G3 -- a multiplicative gain on the arm blend.
 
   READ IT ON: moon/zodi rel-amp (its target), then per-group gain and bias.
   Watch mesospheric -- everything routed through the trunk has leaked before.
+""",
+    "W1_rowsig_p06": """
+W1/W2/W3 -- per-row weighting of the flux groups by the decomposition's own
+amplitude sigma.  MEASURED WORSE, monotonically.  Do not revisit without a
+different statistic.
+
+  THE IDEA: the integrated amplitude is a linear functional of the
+  coefficients, A = c . v with v = basis.sum(axis=1), so the persisted per-row
+  QP covariance propagates exactly, Var(A) = v^T Sigma v.  That sigma is the
+  ONLY quantity found that correlates with the moon amplitude error --
+  rho(log sigma_A, log|err|) = +0.78 on gaia-stars, against R^2 = -0.007 for
+  all 37 observing-geometry features.  Weight w_r ~ (sigma_r/median)^-p,
+  normalised to mean 1 over train rows, clipped to [0.1, 10].
+
+  RESULT (10 seeds each, gaia-stars), gain over B0_copy_near:
+
+  | p   | moon   | zodi   | moon core | moon tail |
+  |-----|--------|--------|-----------|-----------|
+  | 0   | +21.3% | +30.4% |  --       |  --       |
+  | 0.6 | +18.7% | +26.9% | +7.4% worse | +5.0% worse |
+  | 1.2 | +18.0% | +24.1% | +6.9% worse | +6.0% worse |
+  | 2.0 | +17.7% | +22.9% | +9.0% worse | +4.3% worse |
+
+  Monotone in p, and worse on the CORE rows too -- so this is not the
+  "down-weighting hard rows flatters the aggregate" artifact, it is a real loss.
+
+  WHY, and it is the lesson: a sigma that correlates with |error| can mean
+  either NOISE (down-weight and you stop fitting garbage) or DIFFICULTY
+  (down-weight and you discard your most informative examples).  rho = 0.78 is
+  consistent with both; this result says it is DIFFICULTY.  The notebook's own
+  calibration cells said as much in advance and were not read that way: a sigma
+  uncalibrated by 50-180x (`sigma_scale hint 0.02x`, truth-conditioned
+  median|z| 0.0037 against a target of 0.6745, still ~5x off at SNR>3) with a
+  reliability slope of 0.53-0.65 instead of 1 is not measuring a noise level.
+  The slope was used to set the exponent (2s ~ 1.2 rather than the naive 2) but
+  should also have been read as evidence about what sigma IS.
+
+  Consequence: sigma_A and the ensemble spread (rho = +0.88) are usable for
+  FLAGGING rows downstream, not for correcting or reweighting them.  That is
+  the same magnitude-only asymmetry every other attack on this error has hit --
+  see the S1/G notes and [[moon-zodi-tail-is-amplitude]].
+
+  The helper that computed it was ~25 lines in data.py and was removed with the
+  config knob; it is one einsum, `np.einsum('i,rij,j->r', v, C, v)` over
+  COEF_COV_MOON / COEF_COV_ZODI indexed [row, k, k].
 """,
     "C1_flux_continuum": """
 C1/C2/C3 -- a flux-space term for the diffuse continuum (HO2 + FeO + O2Ac).

@@ -14,7 +14,7 @@ Notebook usage::
     from mlp_predictor.diagnostics import Diagnostics, DiagnosticsContext
     ctx = DiagnosticsContext(filtered_triplet=..., mlp_artifacts=..., ...)
     diag = Diagnostics(ctx)
-    diag.coef_residual_vs_value()
+    diag.amplitude_error_vs_ctx()
     diag.worst_recon()
     diag.per_lunation_drift()
 """
@@ -57,6 +57,10 @@ from .data import (
     airglow_van_rhijn_matrix,
     build_triplet_coef_dataset,
     split_zodi_reversal_keep_mask,
+    sci_continuum_colour_keep_mask,
+    sci_continuum_colour_excess,
+    SCI_COLOUR_EXCESS_MAX,
+    canonical_row_labels,
     split_zodi_decomp_paths,
     load_lsf_state_if_available,
     load_o2_vector_if_available,
@@ -127,6 +131,10 @@ def _base_globals() -> dict:
         "load_o2_vector_if_available": load_o2_vector_if_available,
         "build_triplet_coef_dataset": build_triplet_coef_dataset,
         "split_zodi_reversal_keep_mask": split_zodi_reversal_keep_mask,
+        "sci_continuum_colour_keep_mask": sci_continuum_colour_keep_mask,
+        "sci_continuum_colour_excess": sci_continuum_colour_excess,
+        "SCI_COLOUR_EXCESS_MAX": SCI_COLOUR_EXCESS_MAX,
+        "canonical_row_labels": canonical_row_labels,
         "split_zodi_decomp_paths": split_zodi_decomp_paths,
         "_angular_separation_deg_vec": _angular_separation_deg_vec,
         "_augment_triplet_with_ecliptic": _augment_triplet_with_ecliptic,
@@ -269,13 +277,6 @@ class Diagnostics:
         """
         return self._run('coef_hist_prepost')
 
-    def coef_residual_vs_value(self) -> dict:
-        """Notebook cell id=coef-residual-vs-value.  Body lives in ``diagnostics_cells/coef_residual_vs_value.py``.
-
-        Returns the persistent exec-globals dict for inspection.
-        """
-        return self._run('coef_residual_vs_value')
-
     def relationship_scatter_matrix(self) -> dict:
         """Notebook cell id=353da137.  Body lives in ``diagnostics_cells/relationship_scatter_matrix.py``.
 
@@ -373,6 +374,16 @@ class Diagnostics:
         Returns the persistent exec-globals dict for inspection.
         """
         return self._run('resid_over_sigma_per_group')
+
+    def amplitude_error_vs_ctx(self) -> dict:
+        """Body lives in ``diagnostics_cells/amplitude_error_vs_ctx.py``.
+
+        Moon and zodi integrated-amplitude error against every context feature,
+        shown SIGNED (can ctx predict the direction of the miss?) and as a
+        MAGNITUDE (can ctx predict which rows are missed?).  Returns the
+        persistent exec-globals dict for inspection.
+        """
+        return self._run('amplitude_error_vs_ctx')
 
     def resid_vs_sigma_per_decile(self) -> dict:
         """Notebook cell id=083a6c59.  Body lives in ``diagnostics_cells/resid_vs_sigma_per_decile.py``.

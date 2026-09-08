@@ -33,6 +33,8 @@ required = [
     "_infer_base_dir_for_reconstruction",
     "_moon_bs_indices_from_names",
     "_row_spline_roughness",
+    "sci_continuum_colour_excess",
+    "SCI_COLOUR_EXCESS_MAX",
 ]
 missing = [k for k in required if k not in globals()]
 if missing:
@@ -86,6 +88,16 @@ if np.any(row_index_e10 < 0) or np.any(row_index_e10 >= n_spec):
     )
 
 idx_row = int(REQUESTED_ROW)
+# REQUESTED_ROW is an EVERY10 row (it indexes the every10 arrays below), but
+# every10 row N is a different spectrum from row N of the corpus tables, so the
+# displayed identity must be the canonical one.  `expnum` is unique in every
+# META and stable across selections, which is what makes a plotted number
+# resolvable in any FITS table.
+_row_ident = canonical_row_labels(
+    EVERY10_INPUT, [idx_row],
+    corpus_meta_fits=f'{DECOMP_DATA_ROOT}/{DECOMP_STEM}_meta_only.fits')
+ROW_LABEL = str(_row_ident['label'][0])
+print(f'  row identity: REQUESTED_ROW={idx_row} (every10)  ->  {ROW_LABEL}')
 triplet_pos = np.flatnonzero(row_index_e10 == idx_row)
 if triplet_pos.size == 0:
     raise IndexError(
@@ -128,7 +140,7 @@ _ctx_row_df = pd.DataFrame({
     "sky_far": _ctx_disp_stack[1],
     "science": _ctx_disp_stack[2],
 })
-print(f"Context values at row {idx_row} (sin/cos pairs decoded to degrees):")
+print(f"Context values at {ROW_LABEL} (sin/cos pairs decoded to degrees):")
 print(_ctx_row_df.to_string(index=False, float_format=lambda v: f'{v:.4g}'))
 print()
 
@@ -169,7 +181,7 @@ _lsf_state_near = load_lsf_state_if_available(EVERY10_NEAR, idx_row)
 _lsf_state_far  = load_lsf_state_if_available(EVERY10_FAR,  idx_row)
 _lsf_state_sci  = load_lsf_state_if_available(EVERY10_SCI,  idx_row)
 _lsf_sigma_fallback = lsf_row / 2.35
-print(f"  LSF source per arm (row {idx_row}): "
+print(f"  LSF source per arm ({ROW_LABEL}): "
       f"near={'surface' if _lsf_state_near is not None else 'gaussian (LSF_SCI)'}, "
       f"far={'surface' if _lsf_state_far is not None else 'gaussian (LSF_SCI)'}, "
       f"sci={'surface' if _lsf_state_sci is not None else 'gaussian (LSF_SCI)'}")
@@ -183,7 +195,7 @@ print(f"  LSF source per arm (row {idx_row}): "
 _o2_vec_near = load_o2_vector_if_available(EVERY10_NEAR, idx_row)
 _o2_vec_far  = load_o2_vector_if_available(EVERY10_FAR,  idx_row)
 _o2_vec_sci  = load_o2_vector_if_available(EVERY10_SCI,  idx_row)
-print(f"  O2 template per arm (row {idx_row}): "
+print(f"  O2 template per arm ({ROW_LABEL}): "
       f"near={'VECTOR_O2' if _o2_vec_near is not None else 'zero'}, "
       f"far={'VECTOR_O2' if _o2_vec_far is not None else 'zero'}, "
       f"sci={'VECTOR_O2' if _o2_vec_sci is not None else 'zero'}")
@@ -447,7 +459,25 @@ else:
 
 # Compact flag prefix + regime density subline reused in every plot title
 # below, so the row's coverage status is always visible on the figure itself.
-_flag_prefix = f"[{'SPARSE_REGIME' if sci_row_sparse_regime_flag else 'ok'}]"
+# Science-continuum colour check for THIS row.  A contaminated row is not a
+# prediction failure -- its moon target is partly field continuum absorbed by
+# the Moon_bs spline -- so the title has to say so, or the moon panel reads as
+# a model error.  This is the row-level view of the gate the training corpus
+# and the batch/atlas samples now apply.
+_colour_stats = sci_continuum_colour_excess(EVERY10_INPUT, [idx_row])
+_colour_excess = float(_colour_stats['excess'][0])
+_colour_contaminated = (np.isfinite(_colour_excess)
+                        and _colour_excess > SCI_COLOUR_EXCESS_MAX)
+print(f'  science-continuum colour excess dC = {_colour_excess:+.4f} dex '
+      f'(threshold {SCI_COLOUR_EXCESS_MAX:+.3f}) -> '
+      f'{"CONTAMINATED: moon target absorbs field continuum" if _colour_contaminated else "clean"}')
+
+_flag_bits = []
+if sci_row_sparse_regime_flag:
+    _flag_bits.append('SPARSE_REGIME')
+if _colour_contaminated:
+    _flag_bits.append(f'CONTAMINATED_SCI_CONTINUUM(dC={_colour_excess:+.3f})')
+_flag_prefix = f"[{' '.join(_flag_bits) if _flag_bits else 'ok'}]"
 if sci_row_regime_audit:
     _axis_parts = []
     for _a in sci_row_regime_audit['axis_names']:
@@ -795,7 +825,7 @@ fig.update_layout(
     template="plotly_white",
     title=dict(
         text=(
-            f"{_flag_prefix} Every10 row {idx_row}<br>"
+            f"{_flag_prefix} Every10 {ROW_LABEL}<br>"
             f"<sub>pRMSE near / far / sci = {rmse_near_recon:.3g} / "
             f"{rmse_far_recon:.3g} / {rmse_row:.3g}  ·  pWRMSE = "
             f"{wrmse_near_recon:.3g} / {wrmse_far_recon:.3g} / "
@@ -860,7 +890,7 @@ fig_moon.add_trace(
 fig_moon.update_layout(
     template="plotly_white",
     title=dict(
-        text=(f"{_flag_prefix} Moon spline coefficients — row {idx_row}<br>"
+        text=(f"{_flag_prefix} Moon spline coefficients — {ROW_LABEL}<br>"
               f"<sub>{_pct_subline}</sub>"),
         font=dict(size=12),
         x=0.02, xanchor='left',
@@ -890,7 +920,7 @@ if zodi_idx.size:
     fig_zodi.update_layout(
         template='plotly_white',
         title=dict(
-            text=(f"{_flag_prefix} Zodi spline coefficients — row {idx_row}<br>"
+            text=(f"{_flag_prefix} Zodi spline coefficients — {ROW_LABEL}<br>"
                   f"<sub>{_pct_subline}</sub>"),
             font=dict(size=12),
             x=0.02, xanchor='left',
@@ -966,7 +996,7 @@ fig_continuum.update_layout(
     template="plotly_white",
     title=dict(
         text=(f"{_flag_prefix} Reconstructed non-moon continuum "
-              f"(diffuse = HO2 + FeO + O2ac) — row {idx_row}"),
+              f"(diffuse = HO2 + FeO + O2ac) — {ROW_LABEL}"),
         font=dict(size=12),
         x=0.02, xanchor='left',
     ),
@@ -1015,7 +1045,7 @@ fig_moon_spectrum.update_layout(
     template="plotly_white",
     title=dict(
         text=(f"{_flag_prefix} Reconstructed moon spline spectrum "
-              f"(comps['moon']) — row {idx_row}"),
+              f"(comps['moon']) — {ROW_LABEL}"),
         font=dict(size=12),
         x=0.02, xanchor='left',
     ),
@@ -1047,7 +1077,7 @@ if 'zodi' in comps_sci:
         template='plotly_white',
         title=dict(
             text=(f"{_flag_prefix} Reconstructed zodi spline spectrum "
-                  f"(comps['zodi']) — row {idx_row}"),
+                  f"(comps['zodi']) — {ROW_LABEL}"),
             font=dict(size=12),
             x=0.02, xanchor='left',
         ),
@@ -1074,7 +1104,7 @@ fig_lines.update_layout(
     template="plotly_white",
     title=dict(
         text=(f"{_flag_prefix} Reconstructed line emission "
-              f"(OH + atom + ORC + O2) — row {idx_row}"),
+              f"(OH + atom + ORC + O2) — {ROW_LABEL}"),
         font=dict(size=12),
         x=0.02, xanchor='left',
     ),
@@ -1121,7 +1151,7 @@ fig_deltas.update_layout(
     template="plotly_white",
     title=dict(
         text=(f"{_flag_prefix} Per-component prediction minus sci-arm "
-              f"reconstruction (linear) — row {idx_row}"),
+              f"reconstruction (linear) — {ROW_LABEL}"),
         font=dict(size=12),
         x=0.02, xanchor='left',
     ),

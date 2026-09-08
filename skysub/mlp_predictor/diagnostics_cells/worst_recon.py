@@ -24,6 +24,12 @@ if missing:
 n_worst = 15
 row_pos = np.asarray(rmse_subset_results["row_positions"], dtype=int)
 row_idx = np.asarray(rmse_subset_results["row_indices"], dtype=int)
+# `row_idx` are EVERY10 rows and are used to index the every10 arrays below.
+# They must NOT be what the labels show: every10 row N is a different
+# spectrum from row N of the corpus tables.  `row_labels` carries expnum
+# plus the full-corpus row, which is resolvable in any table.
+row_label = list(rmse_subset_results.get("row_labels")
+                 or [f"src row {int(r)}" for r in row_idx])
 sci_rmse = np.asarray(rmse_subset_results["sci_rmse"], dtype=np.float64)
 near_rmse = np.asarray(rmse_subset_results.get("near_rmse", np.full_like(sci_rmse, np.nan)), dtype=np.float64)
 far_rmse = np.asarray(rmse_subset_results.get("far_rmse", np.full_like(sci_rmse, np.nan)), dtype=np.float64)
@@ -136,7 +142,7 @@ fig = make_subplots(
     shared_xaxes=True,
     vertical_spacing=0.01,
     subplot_titles=[
-        f"row {int(row_idx[j])} | sky1_pRMSE={float(near_rmse[j]):.3g}, sky2_pRMSE={float(far_rmse[j]):.3g}, sci_pRMSE={float(sci_rmse[j]):.3g}, sci_pWRMSE={float(sci_wrmse_pix[j]):.3g}, sci_sWRMSE={float(wrmse_coef_subset[j]):.3g}"
+        f"{row_label[j]} | sky1_pRMSE={float(near_rmse[j]):.3g}, sky2_pRMSE={float(far_rmse[j]):.3g}, sci_pRMSE={float(sci_rmse[j]):.3g}, sci_pWRMSE={float(sci_wrmse_pix[j]):.3g}, sci_sWRMSE={float(wrmse_coef_subset[j]):.3g}"
         for j in worst_local
     ],
 )
@@ -258,7 +264,7 @@ print("           pWRMSE = per-row pixel-space WRMSE;")
 print("           sWRMSE_coef = per-row spectral WRMSE in coefficient space.")
 for rank, j in enumerate(worst_local, start=1):
     print(
-        f"  {rank:2d}. row={int(row_idx[j])} "
+        f"  {rank:2d}. {row_label[j]} "
         f"sky1_pRMSE={float(near_rmse[j]):.6g} "
         f"sky1_pWRMSE={float(near_wrmse_pix[j]):.4g} "
         f"sky2_pRMSE={float(far_rmse[j]):.6g} "
