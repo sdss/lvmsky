@@ -57,6 +57,7 @@ from .compressor import (
     expand_scores_to_coefs,
 )
 from .data import _infer_base_dir_for_reconstruction, airglow_geometry_scale
+from . import noise
 from .metrics import metric_row
 from .ml_utils import (
     RobustScaler,
@@ -118,6 +119,7 @@ def train_compressed_group_mlp(
     flux_mse_groups=(),
     flux_amp_lambda=0.0,
     flux_amp_floor_frac=0.05,
+    flux_pixel_weight=None,
     flux_basis_matrices=None,
     flux_geom_sc_sci=None,
     # 2026-08-21 tight-mask bright-moon row boost (Phase A'').
@@ -318,7 +320,18 @@ def train_compressed_group_mlp(
             _sc_sci_g_np = np.asarray(flux_geom_sc_sci[:, _gidx_fm], dtype=np.float32)
             _c_true_train = coef_sci[train_idx][:, _gidx_fm].astype(np.float64)
             _flux_true_train = _c_true_train @ _A_g.astype(np.float64)
-            _row_flux_norm_train = np.mean(_flux_true_train ** 2, axis=1)
+            # Weighted, so the scale-match below stays exact when the photon
+            # weights are on.  They are row-normalised to mean 1, so this is a
+            # small correction, not a change of units.
+            if flux_pixel_weight is None:
+                _row_flux_norm_train = np.mean(_flux_true_train ** 2, axis=1)
+            else:
+                # Index THEN widen: the other order builds a float64 copy of
+                # every row (194 MB here) before throwing most of it away, once
+                # per group per seed.
+                _row_flux_norm_train = np.mean(
+                    np.asarray(flux_pixel_weight)[train_idx].astype(np.float64)
+                    * _flux_true_train ** 2, axis=1)
             _fin_row = np.isfinite(_row_flux_norm_train) & (_row_flux_norm_train > 0.0)
             _median_flux_norm = (float(np.median(_row_flux_norm_train[_fin_row]))
                                  if _fin_row.any() else 1.0)
@@ -389,6 +402,13 @@ def train_compressed_group_mlp(
             'scale_match':  float(_st_fm['scale_match']),
             'amp_eps':      float(_st_fm['amp_eps']),
         }
+    # Per-pixel photon weights are a property of the ROW and WAVELENGTH, not of
+    # the coefficient group, so they are staged once and shared by every group
+    # rather than duplicated into each group's state dict.
+    _flux_w_pix_t = (None if flux_pixel_weight is None
+                     else torch.from_numpy(
+                         np.ascontiguousarray(flux_pixel_weight,
+                                              dtype=np.float32)).to(device))
     _row_idx_all_np = np.arange(int(coef_sci.shape[0]), dtype=np.int64)
 
     def _stage_on_device(_idx):
@@ -492,8 +512,18 @@ def train_compressed_group_mlp(
                 _g_row = _st_fm['g_scale_sci'][row_idx_b, :]
                 _flux_true = (_em_true * _g_row) @ _st_fm['A']
                 _flux_pred = (_em_pred * _g_row) @ _st_fm['A']
-                _per_row = (((_flux_pred - _flux_true) ** 2).mean(dim=1)
-                            * float(_st_fm['scale_match']))
+                _d_flux_sq = (_flux_pred - _flux_true) ** 2
+                if _flux_w_pix_t is None:
+                    _per_row = _d_flux_sq.mean(dim=1)
+                else:
+                    # Inverse-variance weighting from the photon-noise model
+                    # (mlp_predictor.noise): sigma_flux = sqrt(flux * sens), so
+                    # w = 1/(flux*sens).  Without this the term weighted 3600 A
+                    # -- where the throughput is 4.3x worse than at 5000 A --
+                    # exactly like the middle of the b channel.
+                    _per_row = (_d_flux_sq
+                                * _flux_w_pix_t[row_idx_b, :]).mean(dim=1)
+                _per_row = _per_row * float(_st_fm['scale_match'])
                 _amp_lambda = _amp_lambda_by_group.get(g, 0.0)
                 if _amp_lambda > 0.0:
                     # Log-amplitude term.  The flux MSE above is ABSOLUTE, so
@@ -810,6 +840,7 @@ def train_compressed_group_mlp(
                                 if isinstance(flux_amp_lambda, dict)
                                 else float(flux_amp_lambda)),
             'flux_amp_floor_frac': float(flux_amp_floor_frac),
+            'flux_pixel_weighted': bool(flux_pixel_weight is not None),
             'coef_err_sigma_floor_rel': _resolved_floor_by_group,
         },
     }
@@ -917,6 +948,11 @@ default_dual_group_config: dict[str, Any] = {
     "flux_mse_groups": ("moon", "zodi"),
     "flux_amp_lambda": 0.0,
     "flux_amp_floor_frac": 0.05,
+    # Per-pixel inverse-variance weighting of the flux-space term, from the
+    # photon-noise model in mlp_predictor.noise (sigma = sqrt(flux * sens)).
+    # Requires input_fits_flux; without it the term stays unweighted.
+    "flux_pixel_weighting": True,
+    "flux_pixel_weight_floor_frac": 0.05,
     "coef_err_sigma_floor_rel": dict(DEFAULT_COEF_ERR_SIGMA_FLOOR_BY_GROUP),
     "ensemble_seeds": (42, 43, 44, 45, 46, 47, 48, 49, 50, 51),
     "zodi_ctx_restriction": (
@@ -962,9 +998,11 @@ def _precompute_flux_basis_and_geometry(
     n_zodi_knots,
     palace_oh_suffix=None,
     palace_diffuse_suffix=None,
+    input_fits_flux=None,
+    pixel_weight_floor_frac=0.05,
     verbose=True,
 ):
-    """Materialise moon + zodi flux basis matrices (stride 5) and per-row geometry."""
+    """Flux basis matrices (stride 5), per-row geometry, and photon pixel weights."""
 
     with fits.open(str(input_fits_for_basis)) as hdul:
         wave_ref = np.asarray(hdul["WAVE"].data, dtype=np.float64)
@@ -1011,6 +1049,46 @@ def _precompute_flux_basis_and_geometry(
     flux_geom_sc_sci = airglow_geometry_scale(
         filtered_triplet["ctx_sci"], **compress_geom_kwargs
     ).astype(np.float32)
+
+    # Per-pixel photon weights, on the same stride as the basis above.  The
+    # noise is set by the TOTAL observed science flux, so this reads FLUX_SCI
+    # from the full corpus stack -- not `input_fits_for_basis`, which is only
+    # the every10 subsample and does not contain the training rows at all.
+    flux_pixel_weight = None
+    if input_fits_flux:
+        row_index = np.asarray(filtered_triplet["row_index"], dtype=np.int64)
+        with fits.open(str(input_fits_flux), memmap=True) as hdul:
+            wave_flux = np.asarray(hdul["WAVE"].data, dtype=np.float64)
+            wave_flux = wave_flux if wave_flux.ndim == 1 else wave_flux[0]
+            if (wave_flux.shape != wave_ref.shape
+                    or not np.allclose(wave_flux, wave_ref, rtol=0.0, atol=1e-6)):
+                raise RuntimeError(
+                    f"{input_fits_flux} is on a different wavelength grid from "
+                    f"{input_fits_for_basis}; the pixel weights would not line "
+                    f"up with the flux basis")
+            # Read in row BLOCKS off the memmap, not via `.section[:, stride]`.
+            # A strided slice on the SECOND axis makes `.section` fall back to
+            # per-element reads: measured 220.5 s against 0.1 s for the blocked
+            # form on this 14469 x 12401 float32 array, a 3000x difference, and
+            # it was the whole of the delay before training started.  (The two
+            # give bitwise-identical values; an `array_equal` check that says
+            # otherwise is only seeing NaN != NaN.)
+            _hd = hdul["FLUX_SCI"]
+            _n_row_all = int(_hd.shape[0])
+            _n_ds = len(range(0, int(_hd.shape[1]), int(_WAVE_STRIDE_FLUX_LOSS)))
+            _obs_all = np.empty((_n_row_all, _n_ds), dtype=np.float32)
+            for _i0 in range(0, _n_row_all, 512):
+                _obs_all[_i0:_i0 + 512] = _hd.data[_i0:_i0 + 512, stride]
+            obs = _obs_all[row_index].astype(np.float64)
+        sens = noise.load_relative_sensitivity(wave_ref, verbose=verbose)[stride]
+        flux_pixel_weight = noise.photon_pixel_weight(
+            obs, sens, floor_frac=float(pixel_weight_floor_frac))
+        if verbose:
+            _fin = flux_pixel_weight[np.isfinite(flux_pixel_weight)]
+            print(f"  [flux-mse] photon pixel weights {flux_pixel_weight.shape}: "
+                  f"1-99% = [{np.percentile(_fin, 1):.3g}, "
+                  f"{np.percentile(_fin, 99):.3g}], variance floored at "
+                  f"{pixel_weight_floor_frac:g} x the row median")
     if verbose:
         print(
             f"[flux-mse prep] wave grid: n_full={wave_ref.size}, "
@@ -1027,7 +1105,7 @@ def _precompute_flux_basis_and_geometry(
             f"[flux-mse prep] geom sc_sci: shape={flux_geom_sc_sci.shape}, "
             f"median={float(np.median(flux_geom_sc_sci)):.3g}"
         )
-    return flux_basis_matrices, flux_geom_sc_sci
+    return flux_basis_matrices, flux_geom_sc_sci, flux_pixel_weight
 
 
 @dataclass
@@ -1072,6 +1150,7 @@ class Trainer:
         "mesospheric_group_weight", "ionospheric_group_weight",
         "coef_err_sigma_floor_rel", "flux_mse_groups",
         "flux_amp_lambda", "flux_amp_floor_frac",
+        "flux_pixel_weighting", "flux_pixel_weight_floor_frac",
     })
 
     def __init__(self, cfg=None):
@@ -1097,7 +1176,8 @@ class Trainer:
                 f"Trainer cfg is missing required key(s): {', '.join(_missing)}. "
                 f"Start from mlp_predictor.trainer.default_dual_group_config.")
 
-    def _shared_train_kwargs(self, *, flux_basis_matrices, flux_geom_sc_sci):
+    def _shared_train_kwargs(self, *, flux_basis_matrices, flux_geom_sc_sci,
+                             flux_pixel_weight=None):
         c = self.cfg
         return dict(
             n_epochs=int(c["n_epochs"]),
@@ -1132,6 +1212,7 @@ class Trainer:
             flux_amp_floor_frac=float(c["flux_amp_floor_frac"]),
             flux_basis_matrices=flux_basis_matrices,
             flux_geom_sc_sci=flux_geom_sc_sci,
+            flux_pixel_weight=flux_pixel_weight,
         )
 
     def run_ensemble(
@@ -1142,6 +1223,7 @@ class Trainer:
         geom_kwargs,
         *,
         input_fits_for_basis,
+        input_fits_flux=None,
         n_moon_knots,
         split_zodi,
         n_zodi_knots,
@@ -1161,8 +1243,18 @@ class Trainer:
 
         flux_basis_matrices = None
         flux_geom_sc_sci = None
+        flux_pixel_weight = None
         if self.cfg.get("flux_mse_groups"):
-            flux_basis_matrices, flux_geom_sc_sci = _precompute_flux_basis_and_geometry(
+            # Pixel weighting needs the full-corpus stack.  When the caller does
+            # not supply it the loss falls back to the unweighted mean, so an
+            # older caller keeps working instead of silently mis-weighting.
+            _want_w = bool(self.cfg.get("flux_pixel_weighting", True))
+            if _want_w and not input_fits_flux:
+                print("  [flux-mse] flux_pixel_weighting is on but "
+                      "input_fits_flux was not given; pixels stay UNWEIGHTED "
+                      "(pass cfg.data.input_fits_flux to enable it).")
+            (flux_basis_matrices, flux_geom_sc_sci,
+             flux_pixel_weight) = _precompute_flux_basis_and_geometry(
                 filtered_triplet=filtered_triplet,
                 compress_geom_kwargs=geom_kwargs,
                 input_fits_for_basis=input_fits_for_basis,
@@ -1171,12 +1263,16 @@ class Trainer:
                 n_zodi_knots=n_zodi_knots,
                 palace_oh_suffix=palace_oh_suffix,
                 palace_diffuse_suffix=palace_diffuse_suffix,
+                input_fits_flux=(input_fits_flux if _want_w else None),
+                pixel_weight_floor_frac=float(
+                    self.cfg.get("flux_pixel_weight_floor_frac", 0.05)),
                 verbose=verbose,
             )
 
         shared = self._shared_train_kwargs(
             flux_basis_matrices=flux_basis_matrices,
             flux_geom_sc_sci=flux_geom_sc_sci,
+            flux_pixel_weight=flux_pixel_weight,
         )
         split_for_members = (
             filtered_triplet["compress_train_idx"],

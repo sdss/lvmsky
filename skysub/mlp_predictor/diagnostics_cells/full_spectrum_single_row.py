@@ -55,6 +55,11 @@ if '_augment_triplet_with_ecliptic' in globals():
 # PHYSICS-PRIORS-CTX-V1: same augment on the e10 triplet.
 if '_augment_triplet_with_physics_priors' in globals():
     _augment_triplet_with_physics_priors(e10_triplet)
+    # MOON-MODEL-CTX-V1: must match the training-time ctx layout, or
+    # ctx_names will not line up with the trained ensemble.
+    if (globals().get('USE_MOON_MODEL_FEATURE', False)
+            and '_augment_triplet_with_moon_model' in globals()):
+        _augment_triplet_with_moon_model(e10_triplet, _e10_stem)
 n_e10 = int(e10_triplet["n_rows"])
 row_index_e10 = np.asarray(e10_triplet["row_index"], dtype=np.int64)
 coef_names_e10 = [str(n) for n in e10_triplet["coef_names"]]

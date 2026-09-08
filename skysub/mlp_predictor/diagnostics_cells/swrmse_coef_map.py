@@ -81,6 +81,11 @@ if '_augment_triplet_with_ecliptic' in globals():
     _augment_triplet_with_ecliptic(triplet_full, meta_fits_path=INPUT_FITS)
 if '_augment_triplet_with_physics_priors' in globals():
     _augment_triplet_with_physics_priors(triplet_full)
+    # MOON-MODEL-CTX-V1: must match the training-time ctx layout, or
+    # ctx_names will not line up with the trained ensemble.
+    if (globals().get('USE_MOON_MODEL_FEATURE', False)
+            and '_augment_triplet_with_moon_model' in globals()):
+        _augment_triplet_with_moon_model(triplet_full, MOON_MODEL_CORPUS_PREFIX)
 
 full_rows = np.asarray(triplet_full['row_index'], dtype=int)
 coef_true_full = np.asarray(triplet_full['coef_sci'], dtype=np.float64)

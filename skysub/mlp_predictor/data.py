@@ -2533,6 +2533,120 @@ def sci_continuum_colour_keep_mask(
     return keep
 
 
+MOON_MODEL_FEATURE_NAMES = ['moon_model_log_ratio']
+_MOON_MODEL_FLOOR = 1.0e-6
+
+
+def _augment_triplet_with_moon_model(triplet, corpus_prefix, force=False,
+                                     verbose=True, build_if_missing=True,
+                                     n_workers=None):
+    """Append the frozen model's moon TRANSFER RATIO, gated to moon-up rows.
+
+    One feature, identical in all three ctx vectors:
+
+        moon_model_log_ratio = log10(moon_model_sci / moon_model_near),
+                               and exactly 0.0 wherever the moon is down.
+
+    Reads the cache from ``mlp_predictor.moon_model_cache``, BUILDING it on
+    first use if this corpus does not have one yet (``build_if_missing``, on by
+    default) -- the same contract as the wavelength cache.  2.4 MB per corpus;
+    ~26 min on 8 cores for a full corpus, ~3 min for an every10 subsample, then
+    free.  It can also be built ahead of time with
+    ``python -m mlp_predictor.moon_model_cache <prefix> --n-workers 8``.
+
+    WHY THE RATIO AND NOT THE PER-ARM AMPLITUDE.  The per-arm form was tried
+    first and made the moon WORSE: 2 x 10 seeds, identical rows/split/seeds,
+    moon amplitude MAD 0.02396 -> 0.02450 (+2.3%), continuum +3.4%,
+    mean_eRMSE 7.858 -> 7.872.  The likely reason is the dynamic range:
+    ``log10(moon_total)`` spans 7.4 decades corpus-wide with a 5.3-decade step
+    at the horizon, and on the moon-down half (49.7% of rows) it is the model's
+    below-horizon CONTINUATION -- not a prediction of anything, since the
+    decomposition zeroes the moon there.  So half the column was meaningless
+    over several decades and the RobustScaler compressed the useful moon-up
+    range against it.  The ratio is the quantity actually measured to carry
+    signal and spans only 0.20 dex (p1 -0.066, p99 +0.136 on moon-up rows).
+
+    WHAT THE RATIO IS WORTH.  On the gaia-stars test split (held out by night,
+    moon-up, n = 583) it predicts the science moon amplitude to MAD 0.0119 dex
+    against 0.0139 for the trained network and 0.0228 for copying the near arm,
+    with rho(log r_model, log true ratio) = +0.794.  The crude
+    ``moon_signal_proxy`` already in the ctx gets +0.067 against the same
+    target, so this is new INFORMATION, not a rearrangement -- the distinction
+    from the six refuted attempts in ``ablations.RETIRED``.
+
+    The value is the SAME in ctx_near / ctx_far / ctx_sci because a transfer
+    ratio is a property of the exposure, not of an arm.  That is deliberate: it
+    means the feature carries no arm-identifying information, so it cannot act
+    as a back door for the arm context that was measured harmful.
+
+    Rows the model could not evaluate (23 of 14 469 on gaia-stars, all a SKY
+    pointing below the horizon) get 0.0, the same as moon-down -- never NaN,
+    which would propagate through the encoder and poison the batch.
+    """
+    from . import moon_model_cache as _mmc
+
+    names = [str(n) for n in triplet['ctx_names']]
+    feat = MOON_MODEL_FEATURE_NAMES[0]
+    if feat in names and not force:
+        return triplet
+    if feat in names:
+        keep = [i for i, n in enumerate(names) if n != feat]
+        for key in ('ctx_near', 'ctx_far', 'ctx_sci'):
+            triplet[key] = np.asarray(triplet[key])[:, keep]
+        names = [names[i] for i in keep]
+    # Absent cache -> build it, the same way the wavelength cache grows on
+    # first use.  A cache that EXISTS but fails validation is deliberately not
+    # rebuilt silently; see moon_model_cache.load_or_build.
+    cache = (_mmc.load_or_build(corpus_prefix, n_workers=n_workers,
+                                verbose=verbose)
+             if build_if_missing else _mmc.load(corpus_prefix))
+    row_index = np.asarray(triplet['row_index'], dtype=np.int64)
+    n_cache = int(cache['n_rows'])
+    if row_index.size and (row_index.min() < 0 or row_index.max() >= n_cache):
+        raise RuntimeError(
+            f"triplet row_index spans [{row_index.min()}, {row_index.max()}] "
+            f"but the moon-model cache at {_mmc.cache_path(corpus_prefix)} has "
+            f"{n_cache} rows; the cache belongs to a different file")
+    # Verify the cache describes THIS file, not merely one with enough rows.
+    # `row_index` bounds alone let an every10 triplet (rows 0..1446) accept the
+    # corpus cache, silently pairing each row with a different exposure.
+    if 'sci_ra' in cache and 'sci_ra' in triplet:
+        want_ra = np.asarray(triplet['sci_ra'], dtype=np.float64)
+        want_dec = np.asarray(triplet['sci_dec'], dtype=np.float64)
+        have_ra = np.asarray(cache['sci_ra'], dtype=np.float64)[row_index]
+        have_dec = np.asarray(cache['sci_dec'], dtype=np.float64)[row_index]
+        bad = ~(np.isclose(want_ra, have_ra, rtol=0.0, atol=1e-6)
+                & np.isclose(want_dec, have_dec, rtol=0.0, atol=1e-6))
+        if np.any(bad):
+            raise RuntimeError(
+                f"the moon-model cache at {_mmc.cache_path(corpus_prefix)} does "
+                f"not describe this triplet: {int(bad.sum())}/{bad.size} rows "
+                f"have a different science pointing (first at row_index "
+                f"{int(row_index[np.flatnonzero(bad)[0]])}: cache "
+                f"({have_ra[np.flatnonzero(bad)[0]]:.5f}, "
+                f"{have_dec[np.flatnonzero(bad)[0]]:.5f}) vs triplet "
+                f"({want_ra[np.flatnonzero(bad)[0]]:.5f}, "
+                f"{want_dec[np.flatnonzero(bad)[0]]:.5f})). Point it at the "
+                f"prefix this triplet was built from.")
+    ratio = _mmc.transfer_ratio(cache)[row_index]
+    moon_up = np.asarray(cache['sci_moon_alt_deg'],
+                         dtype=np.float64)[row_index] > 0.0
+    col = np.where(moon_up & np.isfinite(ratio), ratio, 0.0).astype(np.float32)
+    n_gated = int((~(moon_up & np.isfinite(ratio))).sum())
+    for key in ('ctx_near', 'ctx_far', 'ctx_sci'):
+        triplet[key] = np.hstack([np.asarray(triplet[key], dtype=np.float32),
+                                  col[:, None]])
+    triplet['ctx_names'] = names + [feat]
+    if verbose:
+        _live = col[col != 0.0]
+        print(f"  moon-model augment: added {feat} (n_ctx now "
+              f"{len(triplet['ctx_names'])}); {n_gated}/{col.size} rows gated "
+              f"to 0 (moon down or unmodellable); active rows p1/p50/p99 = "
+              + (" / ".join(f"{np.percentile(_live, q):+.4f}" for q in (1, 50, 99))
+                 if _live.size else "n/a"))
+    return triplet
+
+
 def apply_triplet_filters(
     triplet_data,
     thin_every_n=1,
