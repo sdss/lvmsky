@@ -138,10 +138,22 @@ else:
     _e10_keep &= sci_continuum_colour_keep_mask(
         EVERY10_INPUT, row_index_e10, label="every10")
 
+    # Diffuse-zeroed gate.  Same reason again: where the QP collapsed the whole
+    # diffuse block to ~0 in an arm, that row's continuum target is an artefact
+    # and scoring against it measures nothing -- those rows alone put the
+    # continuum p95 log-error at 8 dex.  On gaia-stars-mask all 64 surviving
+    # such rows come from two nights, and one of them landed entirely in the
+    # test split, enriching it 6.3x (4.12% against 0.65% corpus-wide), so
+    # leaving them in makes the continuum diagnostic unrepresentative.
+    _e10_keep &= diffuse_zeroed_keep_mask(
+        {"near": e10_triplet["coef_near"], "far": e10_triplet["coef_far"],
+         "sci": e10_triplet["coef_sci"]},
+        e10_triplet["coef_names"], label="every10")
+
     _e10_valid_pos = np.flatnonzero(_e10_keep)
     n_rows = int(_e10_valid_pos.size)
     print(
-        f"  every10 rows passing chi2 + field + reversal + colour gates: "
+        f"  every10 rows passing chi2 + field + reversal + colour + diffuse gates: "
         f"{n_rows}/{_e10_n0} ({100.0 * n_rows / max(_e10_n0, 1):.1f}%)"
     )
     if n_rows == 0:

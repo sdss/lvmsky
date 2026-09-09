@@ -152,6 +152,19 @@ if not bool(np.all(_col_keep_sel)):
     _n_pick = int(sel_pos.size)
     print(f'  atlas sample after science-continuum colour gate: n = {_n_pick}')
 
+# Diffuse-zeroed gate: a collapsed diffuse block makes the per-component
+# attribution below meaningless for that row -- the continuum's share of the
+# residual is computed against a truth of ~0.
+_dz_keep_sel = diffuse_zeroed_keep_mask(
+    {'near': np.asarray(e10_triplet['coef_near'])[sel_pos],
+     'far': np.asarray(e10_triplet['coef_far'])[sel_pos],
+     'sci': np.asarray(e10_triplet['coef_sci'])[sel_pos]},
+    e10_triplet['coef_names'], label='atlas')
+if not bool(np.all(_dz_keep_sel)):
+    sel_pos = sel_pos[_dz_keep_sel]
+    _n_pick = int(sel_pos.size)
+    print(f'  atlas sample after diffuse-zeroed gate: n = {_n_pick}')
+
 sel_rows = np.asarray(e10_triplet['row_index'], dtype=np.int64)[sel_pos]
 # sel_rows index the every10 arrays; labels must use the canonical identity
 # because every10 row N != corpus row N (measured: every10 493 is corpus 4930).

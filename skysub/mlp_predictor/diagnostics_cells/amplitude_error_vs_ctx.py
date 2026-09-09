@@ -250,10 +250,20 @@ for _fam, _feats_all, _comps in _FIGS:
         _mad = lambda _v: float(np.nanmedian(np.abs(_v - np.nanmedian(_v))))
         _split = ''
         if _MOON_UP_TEST is not None:
-            _u = np.asarray(_MOON_UP_TEST)[_ok]
-            if _u.any() and (~_u).any():
-                _split = (f'   [moon-up n={int(_u.sum())} MAD {_mad(_d[_u]):.5f}'
-                          f' | moon-down n={int((~_u).sum())} '
+            # Index the FULL-length arrays.  `_d` is _te.size long with NaN
+            # where the row is unusable and `_mad` is nan-aware, so the mask
+            # must stay _te.size too -- subsetting it by `_ok` first silently
+            # works whenever every row is usable (moon, zodi, HO2 here) and
+            # then fails on the first component that drops one (FeO drops a
+            # single row whose fitted amplitude is non-positive).
+            _u = np.asarray(_MOON_UP_TEST, dtype=bool)
+            if _u.size != _d.size:
+                print(f'    (moon-up split skipped for {_nm}: mask is '
+                      f'{_u.size} rows against {_d.size} test rows)')
+            elif (_u & _ok).any() and ((~_u) & _ok).any():
+                _split = (f'   [moon-up n={int((_u & _ok).sum())} '
+                          f'MAD {_mad(_d[_u]):.5f}'
+                          f' | moon-down n={int(((~_u) & _ok).sum())} '
                           f'MAD {_mad(_d[~_u]):.5f}]')
         print(f'  {_nm:<20s} rows {int(_ok.sum()):>5d}  median Delta '
               f'{np.nanmedian(_d):+.4f} dex  MAD {_mad(_d):.5f}  '

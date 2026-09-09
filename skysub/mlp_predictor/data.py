@@ -2647,6 +2647,85 @@ def _augment_triplet_with_moon_model(triplet, corpus_prefix, force=False,
     return triplet
 
 
+DIFFUSE_COMPONENT_NAMES = ('HO2', 'FeO', 'O2Ac')
+DIFFUSE_ZEROED_FRAC = 1.0e-3
+
+
+def diffuse_zeroed_mask(coef_by_arm, coef_names, frac=DIFFUSE_ZEROED_FRAC,
+                        reference='sci'):
+    """Per-arm mask of rows where the whole diffuse block collapsed to zero.
+
+    A row is ``zeroed`` in an arm when ALL THREE of HO2, FeO and O2Ac fall
+    below ``frac`` times their own corpus median (taken from ``reference``, so
+    every arm is judged on the same scale).
+
+    This is a decomposition artefact, not sky.  Measured on gaia-stars-mask
+    (14 447 rows): the science arm has 188 such rows and they are genuinely
+    ZERO, not merely faint -- 1.279% of rows sit below 1e-6 x the median
+    against 1.299% below 1e-2 x, so the distribution is bimodal with nothing in
+    between.  All three components go together: among sci-zeroed rows HO2 is
+    non-zero on 0.5%, FeO on 0.0%, O2Ac on 0.5%.  The QP is choosing to fit no
+    diffuse continuum at all and letting the Zodi_bs spline carry it, which is
+    the zodi/diffuse degeneracy taken to its limit -- 10.1% of these rows are
+    moon-up against 50.1% of the corpus, i.e. they are dark time, where the two
+    smooth continua are least separable.
+
+    Deliberately NOT the integrated amplitude ``c . B.sum(axis=1)``: that needs
+    the basis matrix, and the two definitions agree on 99.99% of rows.  The
+    threshold is not delicate either -- frac from 1e-4 to 0.05 selects 186 to
+    190 rows.
+
+    Returns ``{arm: bool array}``, True where that arm's diffuse block is
+    zeroed.
+    """
+    names = [str(n) for n in coef_names]
+    try:
+        idx = [names.index(n) for n in DIFFUSE_COMPONENT_NAMES]
+    except ValueError as exc:
+        raise RuntimeError(
+            f"diffuse components {DIFFUSE_COMPONENT_NAMES} not all present in "
+            f"coef_names; cannot apply the diffuse-zeroed gate") from exc
+    ref = np.asarray(coef_by_arm[reference], dtype=np.float64)[:, idx]
+    med = np.median(ref, axis=0)
+    med = np.where(np.isfinite(med) & (med > 0), med, np.inf)
+    out = {}
+    for arm, coef in coef_by_arm.items():
+        c = np.asarray(coef, dtype=np.float64)[:, idx]
+        out[arm] = np.all(c < float(frac) * med[None, :], axis=1)
+    return out
+
+
+def diffuse_zeroed_keep_mask(coef_by_arm, coef_names, frac=DIFFUSE_ZEROED_FRAC,
+                             arms=('near', 'far', 'sci'), label='sample',
+                             verbose=True):
+    """Keep-mask (True = usable) dropping rows whose diffuse block collapsed.
+
+    Grouped with the moon/zodi reversal and science-continuum colour gates
+    rather than with the target-outlier filters, for the same reason: this is a
+    MISLABELLED row, not a hard one.  Scoring a prediction against a diffuse
+    amplitude of ~2e-6 -- where the near arm has ~322 -- measures nothing, and
+    it produces spectacular relative errors: those rows alone put the continuum
+    p95 log-error at 8 dex.
+
+    Defaults to dropping when ANY arm is zeroed: a zeroed SCI arm is an
+    unusable target, and a zeroed SKY arm is a corrupted input the encoder
+    reads.  Pass ``arms=('sci',)`` for targets only.
+    """
+    z = diffuse_zeroed_mask(coef_by_arm, coef_names, frac=frac)
+    drop = np.zeros(len(next(iter(z.values()))), dtype=bool)
+    for arm in arms:
+        if arm in z:
+            drop |= z[arm]
+    keep = ~drop
+    if verbose:
+        per = '  '.join(f'{a}={int(z[a].sum())}' for a in z)
+        print(f'  {label} diffuse-zeroed gate (all of '
+              f'{"/".join(DIFFUSE_COMPONENT_NAMES)} below {frac:g} x their '
+              f'corpus median): dropped {int(drop.sum())}/{keep.size} '
+              f'row(s) [{per}]')
+    return keep
+
+
 def apply_triplet_filters(
     triplet_data,
     thin_every_n=1,
@@ -2666,6 +2745,8 @@ def apply_triplet_filters(
     reversal_min_separation=0.0,
     colour_excess_input_fits=None,
     colour_excess_max=SCI_COLOUR_EXCESS_MAX,
+    diffuse_zeroed_frac=DIFFUSE_ZEROED_FRAC,
+    diffuse_zeroed_arms=('near', 'far', 'sci'),
 ):
     if hard_coef_bounds is None:
         hard_coef_bounds = {'feo': (0.0, 1.0), 'atom_k': (0.0, 1.0)}
@@ -3004,6 +3085,23 @@ def apply_triplet_filters(
     # from 10 to 1 buys 179 more flagged rows at the price of 989 clean ones.
     # Row 493 / corpus row 4930, the row this gate was built from, has
     # chi2_sci = 0.731: no chi2 threshold reaches it.
+    # Diffuse-zeroed gate.  Sits with the reversal and colour gates above --
+    # all three drop MISLABELLED rows rather than hard ones.  See
+    # diffuse_zeroed_keep_mask for the measurements.
+    if diffuse_zeroed_frac:
+        _dz_keep = diffuse_zeroed_keep_mask(
+            {'near': coef_near, 'far': coef_far, 'sci': coef_sci},
+            coef_names_local, frac=float(diffuse_zeroed_frac),
+            arms=tuple(diffuse_zeroed_arms), label='corpus', verbose=True)
+        _dz_marginal = int((keep & ~_dz_keep).sum())
+        keep &= _dz_keep
+        print(f"Diffuse-zeroed filter: flagged {int((~_dz_keep).sum())}/"
+              f"{len(_dz_keep)} rows ({100.0 * (~_dz_keep).mean():.2f}%), of "
+              f"which {_dz_marginal} were not already removed by the filters "
+              f"above (marginal cost); {int(keep.sum())} rows remain")
+    else:
+        print("Diffuse-zeroed filter: diffuse_zeroed_frac is 0/None; skipping.")
+
     if colour_excess_input_fits:
         colour_mask = sci_continuum_colour_keep_mask(
             colour_excess_input_fits,
