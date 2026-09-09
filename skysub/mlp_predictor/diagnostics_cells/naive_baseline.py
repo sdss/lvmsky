@@ -120,6 +120,8 @@ for regime, mask in _masks.items():
 
     print('  ML vs best naive baseline per group '
           '(pct gain positive = ML wins over the best non-ML variant):')
+    if regime == 'all':
+        naive_baseline_per_group = {}
     for g in _group_names:
         _col = _df[g]
         _ml = float(_col.loc['ML_default'])
@@ -130,6 +132,10 @@ for regime, mask in _masks.items():
         _gain_pct = 100.0 * (_best_bl_val - _ml) / max(_best_bl_val, 1e-30)
         print(f'    {g:<12s} winner={_winner:<12s}  ML={_ml:.4g}  '
               f'best_naive={_best_bl_name}:{_best_bl_val:.4g}  gain={_gain_pct:+.1f}%')
+        if regime == 'all':
+            naive_baseline_per_group[g] = dict(
+                ml=_ml, best_naive=_best_bl_val,
+                best_naive_name=str(_best_bl_name), gain_pct=_gain_pct)
 
 # Group-equal aggregate on the full test set: mean over groups of the per-variant
 # per-group mean sRMSE.  Each group counts once, so moon+zodi are not drowned out
@@ -167,3 +173,14 @@ else:
     print('Verdict (group-equal sRMSE): the best naive baseline beats the ML model. '
           'Check moon/zodi rows in the per-regime tables to see whether the loss '
           'is defeated in the physically relevant regimes.')
+
+
+# Persisted so `headline_summary` can synthesise without recomputing.  Named
+# without a leading underscore on purpose: the diagnostics cells share one
+# exec-globals dict and underscore names are routinely clobbered by later cells.
+naive_baseline_result = dict(
+    per_group=naive_baseline_per_group,
+    group_equal=dict(ml=_ml_v, best_naive=_best_v, best_naive_name=str(_best),
+                     gain_pct=_gain_pct),
+    n_test=int(_y_te.shape[0]),
+)

@@ -275,6 +275,12 @@ for _fam, _feats_all, _comps in _FIGS:
                              std=float(np.nanstd(_d)),
                              top_feature=_rho[0][1], top_rho=float(_rho[0][0])))
 
+    def _rgba(_hex, _a):
+        """'#rrggbb' -> 'rgba(r,g,b,a)' so the band can be translucent."""
+        _h = str(_hex).lstrip('#')
+        return (f'rgba({int(_h[0:2], 16)},{int(_h[2:4], 16)},'
+                f'{int(_h[4:6], 16)},{_a})')
+
     _nrow = int(np.ceil(len(_feats) / 3))
     _fig = make_subplots(rows=_nrow, cols=3, subplot_titles=_feats,
                          vertical_spacing=0.09, horizontal_spacing=0.07)
@@ -286,14 +292,31 @@ for _fam, _feats_all, _comps in _FIGS:
             if _m.sum() < 40:
                 continue
             _qs = np.unique(np.nanpercentile(_x[_m], np.linspace(0, 100, N_BINS + 1)))
-            _cx, _md = [], []
+            _cx, _md, _p025, _p975 = [], [], [], []
             for _b in range(len(_qs) - 1):
                 _sel = _m & (_x >= _qs[_b]) & (_x <= _qs[_b + 1])
                 if _sel.sum() < 8:
                     continue
                 _cx.append(float(np.median(_x[_sel])))
                 _md.append(float(np.median(_d[_sel])))
+                # 95% RANGE of the rows in the bin, not a standard error on the
+                # median.  The median line alone hides the thing these panels
+                # exist to show: a family can be unbiased in every bin and
+                # still be wildly uncertain in all of them, which is exactly
+                # the moon's situation in dark time.  Percentiles rather than
+                # +/-2 sigma because these distributions have heavy tails --
+                # FeO's std is 0.9 dex against a MAD of 0.038.
+                _p025.append(float(np.nanpercentile(_d[_sel], 2.5)))
+                _p975.append(float(np.nanpercentile(_d[_sel], 97.5)))
             _r, _c = _k // 3 + 1, _k % 3 + 1
+            if len(_cx) > 1:
+                _fig.add_trace(go.Scatter(
+                    x=_cx + _cx[::-1], y=_p975 + _p025[::-1],
+                    fill='toself', fillcolor=_rgba(_col, 0.13),
+                    line=dict(width=0), mode='lines',
+                    name=f'{_nm} 95%', legendgroup=_nm, showlegend=False,
+                    hoverinfo='skip'),
+                    row=_r, col=_c)
             _fig.add_trace(go.Scatter(
                 x=_cx, y=_md, mode='lines+markers', name=_nm,
                 legendgroup=_nm, showlegend=(_k == 0),
@@ -313,7 +336,10 @@ for _fam, _feats_all, _comps in _FIGS:
                          f'(median per quantile bin, {N_BINS} bins)<br>'
                          f'<sub>A = sum_lambda f(lambda) = c . B.sum(axis=1); '
                          f'Delta = log10(A_pred/A_true), + = over-predicted. '
-                         f'Flat at zero = brightness transferred correctly.</sub>'),
+                         f'Flat at zero = brightness transferred correctly; '
+                         f'the band is the 95% range of rows in the bin, so a '
+                         f'flat line inside a wide band means unbiased but '
+                         f'uncertain.</sub>'),
                    font=dict(size=13), x=0.02, xanchor='left'),
         margin=dict(t=150))
     _fig.update_yaxes(title_text='Delta [dex]', row=1, col=1)

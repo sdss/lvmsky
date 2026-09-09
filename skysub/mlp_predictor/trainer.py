@@ -728,6 +728,12 @@ def train_compressed_group_mlp(
     zodi_ceiling_amp_free=False,
     zodi_ceiling_gate_frac=ZODI_CEILING_GATE_FRAC,
     zodi_ceiling_snap_frac=ZODI_CEILING_SNAP_FRAC,
+    # Ablation hook: boolean over ALL rows; False removes a row from TRAIN and
+    # VAL while leaving TEST untouched, so a data-ablation A/B keeps an
+    # identical evaluation set.  Compressors are deliberately NOT refit -- they
+    # come in already fitted, so the only thing that changes is which rows the
+    # network's gradient sees.
+    train_row_mask=None,
 ):
     """Train one seed of the compressed dual-encoder group-head MLP."""
     set_reproducibility(seed)
@@ -745,6 +751,17 @@ def train_compressed_group_mlp(
     train_idx = np.asarray(train_idx, dtype=int)
     val_idx = np.asarray(val_idx, dtype=int)
     test_idx = np.asarray(test_idx, dtype=int)
+    if train_row_mask is not None:
+        _m = np.asarray(train_row_mask, dtype=bool)
+        _n_tr0, _n_va0 = train_idx.size, val_idx.size
+        train_idx = train_idx[_m[train_idx]]
+        val_idx = val_idx[_m[val_idx]]
+        if train_idx.size < 100:
+            raise ValueError(
+                f"train_row_mask leaves only {train_idx.size} training rows")
+        print(f'  [train-row-mask] train {_n_tr0} -> {train_idx.size} '
+              f'(-{_n_tr0 - train_idx.size}), val {_n_va0} -> {val_idx.size}; '
+              f'test untouched at {test_idx.size}')
 
     coef_near = np.asarray(filtered['coef_near'], dtype=np.float64)
     coef_far = np.asarray(filtered['coef_far'], dtype=np.float64)
@@ -1539,6 +1556,8 @@ def train_compressed_group_mlp(
             'moon_down_amp_rule': bool(moon_down_amp_rule),
             'moon_down_alt_deg': float(moon_down_alt_deg),
             'moon_down_ratio_transfer': bool(moon_down_ratio_transfer),
+            'train_row_mask_n_dropped': (None if train_row_mask is None
+                                        else int((~np.asarray(train_row_mask, bool)).sum())),
             'moon_down_frac_max': (None if moon_down_frac_max is None
                                    else float(moon_down_frac_max)),
             'zodi_ceiling_rule': bool(zodi_ceiling_rule),
@@ -1725,6 +1744,7 @@ def _precompute_flux_basis_and_geometry(
     palace_diffuse_suffix=None,
     input_fits_flux=None,
     pixel_weight_floor_frac=0.05,
+    flux_exptime_s=900.0,
     verbose=True,
 ):
     """Flux basis matrices (stride 5), per-row geometry, and photon pixel weights."""
@@ -1805,9 +1825,47 @@ def _precompute_flux_basis_and_geometry(
             for _i0 in range(0, _n_row_all, 512):
                 _obs_all[_i0:_i0 + 512] = _hd.data[_i0:_i0 + 512, stride]
             obs = _obs_all[row_index].astype(np.float64)
-        sens = noise.load_relative_sensitivity(wave_ref, verbose=verbose)[stride]
-        flux_pixel_weight = noise.photon_pixel_weight(
-            obs, sens, floor_frac=float(pixel_weight_floor_frac))
+            # Fibre count per row: the science arm is a MEDIAN STACK of a
+            # median 536 fibres against ~50 in the sky arms, ranging 4 to 1615,
+            # so it sets the effective exposure and cannot be folded into a
+            # constant.  Absent, the variance is per-fibre and only the
+            # WAVELENGTH weighting survives -- which is all the row-normalised
+            # weights use anyway, so it degrades gracefully.
+            _nfib = None
+            if "META" in [h.name for h in hdul]:
+                _mt = hdul["META"].data
+                for _c in ("fibers_sci_used", "fibers_sci"):
+                    if _c in (_mt.columns.names or []):
+                        _nfib = np.asarray(_mt[_c], dtype=np.float64)[row_index]
+                        break
+        # ABSOLUTE Poisson variance (2026-09-09).  The old relative curve had
+        # its per-arm scale divided out upstream and the replacement was
+        # eyeballed off a throughput plot; measured against the absolute
+        # percentile table it was wrong by 1.60x in r and 2.25x in z, which is
+        # a systematic mis-weighting ACROSS the band, exactly what this term
+        # exists to set.
+        sens = noise.load_absolute_sensitivity(wave_ref, verbose=verbose)[stride]
+        # NATIVE dispersion, deliberately NOT multiplied by the stride: the
+        # flux loss SUBSAMPLES every 5th pixel, it does not rebin, so a
+        # retained pixel still carries the photon count of one 0.5 A pixel.
+        # Using stride*dwave would inflate the counts 5x and understate
+        # sigma by sqrt(5).
+        _dwave = float(np.median(np.diff(wave_ref)))
+        _var = noise.photon_variance_absolute(
+            obs, sens, exptime=float(flux_exptime_s), dwave=_dwave,
+            n_fibres=_nfib)
+        flux_pixel_weight = noise.weights_from_variance(
+            _var, floor_frac=float(pixel_weight_floor_frac))
+        if verbose:
+            _sg = np.sqrt(np.maximum(_var, 0.0))
+            _fr = np.where(np.isfinite(obs) & (obs > 0) & (_sg > 0),
+                           _sg / np.abs(obs), np.nan)
+            print(f"  [flux-mse] absolute photon sigma/flux: p10/p50/p90 = "
+                  f"{100*np.nanpercentile(_fr,10):.3f}% / "
+                  f"{100*np.nanpercentile(_fr,50):.3f}% / "
+                  f"{100*np.nanpercentile(_fr,90):.3f}%"
+                  + ("" if _nfib is None else
+                     f"; fibres/row median {np.nanmedian(_nfib):.0f}"))
         if verbose:
             _fin = flux_pixel_weight[np.isfinite(flux_pixel_weight)]
             print(f"  [flux-mse] photon pixel weights {flux_pixel_weight.shape}: "
@@ -1981,6 +2039,7 @@ class Trainer:
         n_zodi_knots,
         palace_oh_suffix=None,
         palace_diffuse_suffix=None,
+        train_row_mask=None,
         verbose=True,
     ):
         """Fit the full seed ensemble, assemble artifacts, report per-seed metrics."""
@@ -2039,6 +2098,7 @@ class Trainer:
                 filtered_triplet, compressors, group_indices, geom_kwargs,
                 split_indices=split_for_members,
                 seed=int(seed),
+                train_row_mask=train_row_mask,
                 **shared,
             )
             members.append(member)

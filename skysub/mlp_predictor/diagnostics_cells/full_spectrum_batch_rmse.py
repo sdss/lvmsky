@@ -306,6 +306,7 @@ else:
                           if _pix_sigma_sci_all is None else None)
     sci_resid_rows = []
     sci_wave_rows = []
+    sci_obs_rows = []          # observed sci flux, for the photon chi2 below
     # Per-component residuals: comps_sci[<comp>] - comps_sci_true[<comp>] per row,
     # stored in native units (like sci_resid_rows) and multiplied by FACTOR at plot time.
     sci_moon_resid_rows = []
@@ -495,6 +496,7 @@ else:
         sci_rmse[i] = float(np.sqrt(np.nanmean(sci_resid ** 2)))
         sci_resid_rows.append(np.asarray(sci_resid, dtype=np.float64))
         sci_wave_rows.append(np.asarray(wave_row, dtype=np.float64))
+        sci_obs_rows.append(np.asarray(flux_sci_true, dtype=np.float64))
 
         # Reconstruct the sci-arm spectrum from the FITTED sci coefficients so
         # per-component residuals (pred - recon(sci_true)) can be separated in
@@ -818,6 +820,155 @@ else:
     )
     fig_resid.show()
 
+    # ---- Photon chi2 of the reconstruction (2026-09-09) ---------------------
+    # How badly is each row reconstructed, measured against the PHOTON noise
+    # model that weights the flux-space training loss?  Uses
+    # `photon_pixel_variance`, the same call `photon_pixel_weight` makes, so
+    # this cannot drift from the loss.  Deriving sqrt(flux*sens) here instead
+    # drops the 5%-of-row-median floor, and 10.9% of observed sci pixels are
+    # non-positive, so those pixels would take a near-zero sigma and an
+    # unbounded chi2.
+    #
+    # THE SCALE IS NOW ABSOLUTE (2026-09-09).  `sens_percentiles-{arm}.csv`
+    # carries the sensitivity in [erg/s/cm^2/A] per [e-/s/A] -- the normalised
+    # `mean-sens` curves cannot, since avgsens divides each arm by its own
+    # weighted mean -- so with the exposure time, the dispersion and the
+    # per-row fibre count the Poisson variance is fully determined:
+    #     var(flux) = flux * sens / (exptime * dwave * N_eff)
+    # and a reduced chi2 of 1 means the reconstruction is at the photon limit.
+    # Nothing is normalised away here, so the ABSOLUTE level is now readable:
+    # values >> 1 are real reconstruction error above the noise.
+    #
+    # The fibre count matters HERE and not in the training loss: it is a
+    # per-row scalar, so it cancels exactly in the row-normalised loss weights
+    # but sets the absolute sigma this panel needs.
+    #
+    # META carries no exposure time, so 900 s -- the LVM standard science
+    # exposure and the trainer's `flux_exptime_s` default -- is assumed here
+    # too.  A wrong exposure time scales the reduced chi2 linearly, so keep
+    # this equal to the trainer's value or the panel stops being comparable
+    # to the loss.
+    CHI2_EXPTIME_S = 900.0
+    try:
+        from mlp_predictor.noise import (load_absolute_sensitivity as _load_sens_abs,
+                                         photon_variance_absolute as _phot_var_abs,
+                                         floor_variance as _floor_var)
+        _chi2_ok = True
+    except Exception as _exc_chi2:
+        print(f"  [chi2] mlp_predictor.noise unavailable ({type(_exc_chi2).__name__}); "
+              f"skipping the photon chi2 panel.")
+        _chi2_ok = False
+    if _chi2_ok and sci_obs_rows and not same_grid:
+        print('  [chi2] rows are not on a common wavelength grid; '
+              'skipping the photon chi2 panel.')
+        _chi2_ok = False
+    _chi2_ph = None
+    if _chi2_ok and sci_obs_rows:
+        _obs_a = np.vstack(sci_obs_rows)
+        _res_a = np.vstack(sci_resid_rows)
+        _sens = np.asarray(_load_sens_abs(wave_ref), dtype=np.float64)
+        # NATIVE dispersion: these rows are reconstructed on the full grid, not
+        # the strided one the flux loss subsamples, so no stride factor here.
+        _dwave_c2 = float(np.median(np.diff(wave_ref)))
+        # Per-row fibre count, same column preference as the trainer.  It is a
+        # ~10x effect between the sci arm (median 536 fibres) and the sky arms,
+        # so leaving it out would put the absolute level 3.3x off in sigma.
+        _nfib = None
+        _meta_c2 = globals().get('_meta_e10')
+        if _meta_c2 is not None:
+            _cu = {c.lower(): c for c in _meta_c2.colnames}
+            for _c in ('fibers_sci_used', 'fibers_sci'):
+                if _c in _cu:
+                    _nfib = np.asarray(_meta_c2[_cu[_c]],
+                                       dtype=np.float64)[np.asarray(sel_rows, dtype=int)]
+                    break
+        if _nfib is None:
+            print('  [chi2] META carries no fibre count; the absolute level '
+                  'below is per-fibre and so is an OVER-estimate.')
+        _var_c2 = _floor_var(_phot_var_abs(_obs_a, _sens,
+                                           exptime=CHI2_EXPTIME_S,
+                                           dwave=_dwave_c2, n_fibres=_nfib))
+        # The mask does NOT require obs > 0: the loss keeps non-positive pixels
+        # by mapping them to the row's median variance, and excluding them here
+        # would measure a different noise model from the one being tested.
+        _good = (np.isfinite(_obs_a) & np.isfinite(_res_a)
+                 & np.isfinite(_sens)[None, :] & (_sens > 0)[None, :])
+        _pull2 = np.where(_good, _res_a ** 2 / _var_c2, np.nan)
+        # NOT renormalised to a median of 1.  The scale is absolute now, and
+        # dividing by the median would throw away the only thing this panel
+        # gained -- it would force the median to 1 and make the axis a
+        # relative spread again, which is what it was before 2026-09-09.
+        _chi2_ph = np.nanmean(_pull2, axis=1)
+        _lg = np.log10(np.where(np.isfinite(_chi2_ph) & (_chi2_ph > 0),
+                                _chi2_ph, np.nan))
+        _lgf = _lg[np.isfinite(_lg)]
+
+        _figc = _make_subplots_resid(
+            rows=1, cols=2, column_widths=[0.5, 0.5], horizontal_spacing=0.10,
+            subplot_titles=("reduced chi2 per row  (log scale)",
+                            "median pull^2 vs wavelength"))
+        _figc.add_trace(go.Histogram(
+            x=_lgf, nbinsx=36, marker=dict(color="#1f78b4"), showlegend=False,
+            hovertemplate="chi2_red=10^%{x:.2f}<br>n=%{y}<extra></extra>"),
+            row=1, col=1)
+        if _lgf.size:
+            # Data-driven range.  Do NOT pad out to include 0: the absolute
+            # chi2 sits near 1e4, so forcing the photon limit on-scale would
+            # squeeze the whole distribution into the last 5% of the axis.
+            _lo_x = float(np.percentile(_lgf, 1))
+            _hi_x = float(np.percentile(_lgf, 99))
+            if _hi_x - _lo_x < 0.4:
+                _lo_x, _hi_x = _lo_x - 0.2, _hi_x + 0.2
+            _figc.update_xaxes(range=[_lo_x - 0.15, _hi_x + 0.15], row=1, col=1)
+            if _lo_x - 0.15 <= 0.0 <= _hi_x + 0.15:
+                _figc.add_vline(x=0.0, line=dict(color="black", width=1,
+                                                 dash="dash"), row=1, col=1)
+            else:
+                _figc.add_annotation(
+                    x=0.02, y=0.95, xref="x domain", yref="y domain",
+                    text="photon limit (1) is off-scale left", showarrow=False,
+                    xanchor="left", font=dict(size=10, color="#666666"),
+                    row=1, col=1)
+            _n_out = int(np.sum((_lgf < _lo_x) | (_lgf > _hi_x)))
+            if _n_out:
+                _figc.add_annotation(
+                    x=0.98, y=0.88, xref="x domain", yref="y domain",
+                    text=f"{_n_out} outside", showarrow=False,
+                    font=dict(size=10, color="#666666"), row=1, col=1)
+        # Where in wavelength does the reconstruction fail relative to photon
+        # noise?  In absolute units now, so 1 is the photon limit.
+        _pw = np.nanmedian(_pull2, axis=0)
+        _figc.add_trace(go.Scattergl(
+            x=wave_ref, y=_pw, mode="lines", showlegend=False,
+            line=dict(color="#33a02c", width=1.0),
+            hovertemplate="%{x:.0f} A<br>median pull^2 %{y:.3g}<extra></extra>"),
+            row=1, col=2)
+        _pwf = _pw[np.isfinite(_pw)]
+        if _pwf.size:
+            _figc.update_yaxes(type="log", row=1, col=2,
+                               range=[np.log10(max(np.percentile(_pwf, 1), 1e-6)) - 0.2,
+                                      np.log10(max(np.percentile(_pwf, 99.5), 1e-5)) + 0.2])
+        _q = np.nanpercentile(_chi2_ph, [10, 90])
+        _figc.update_layout(
+            template="plotly_white", height=380,
+            title=dict(text=(f"SCI reconstruction vs the PHOTON noise model "
+                             f"(n={_obs_a.shape[0]} rows)<br><sub>ABSOLUTE reduced "
+                             f"chi2 -- 1 = at the photon limit.  p10/p50/p90 = "
+                             f"{_q[0]:.3g} / {float(np.nanmedian(_chi2_ph)):.3g} / "
+                             f"{_q[1]:.3g}</sub>"),
+                       font=dict(size=13), x=0.02, xanchor="left"),
+            margin=dict(t=110))
+        _figc.update_xaxes(title_text="log10(reduced chi2)", row=1, col=1)
+        _figc.update_yaxes(title_text="rows", row=1, col=1)
+        _figc.update_xaxes(title_text="wavelength [A]", row=1, col=2)
+        _figc.update_yaxes(title_text="median pull^2", row=1, col=2)
+        _figc.show()
+        print(f"  [chi2] ABSOLUTE reduced chi2 vs the photon model: median "
+              f"{float(np.nanmedian(_chi2_ph)):.4g}, p10 {_q[0]:.4g}, "
+              f"p90 {_q[1]:.4g}, max {float(np.nanmax(_chi2_ph)):.4g}"
+              + ("" if _nfib is None else
+                 f"; fibres/row median {np.nanmedian(_nfib):.0f}"))
+
     rmse_subset_results = {
         "row_positions": sel_pos,
         "row_indices": sel_rows,
@@ -835,4 +986,5 @@ else:
         "summary": summary_df,
         "summary_display": summary_disp_df,
         "sci_residuals": sci_resid_arr,
+        "chi2_photon": _chi2_ph,   # ABSOLUTE reduced chi2; see the panel
     }

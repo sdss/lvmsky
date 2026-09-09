@@ -1,7 +1,7 @@
 """Diagnostic plots + metrics for the split-zodi coefficient predictor.
 
-Each of the 22 diagnostic cells from the notebook lives as a readable
-Python file under :mod:`.diagnostics_cells` and is exposed via one method
+Each diagnostic cell lives as a readable Python file under
+:mod:`.diagnostics_cells` and is exposed via one method
 on :class:`Diagnostics`.  The method reads the file, applies any per-call
 regex source patches (used for exposing tunable literals as kwargs), and
 :func:`exec` s the body against a persistent globals dict so cross-cell
@@ -14,9 +14,13 @@ Notebook usage::
     from mlp_predictor.diagnostics import Diagnostics, DiagnosticsContext
     ctx = DiagnosticsContext(filtered_triplet=..., mlp_artifacts=..., ...)
     diag = Diagnostics(ctx)
+    diag.naive_baseline()
     diag.amplitude_error_vs_ctx()
-    diag.worst_recon()
-    diag.per_lunation_drift()
+    diag.full_spectrum_batch_rmse()
+    diag.headline_summary()   # synthesises the three above; recomputes nothing
+
+Ten of the 28 cells are wired into the notebook as of 2026-09-09; the rest
+remain callable from a scratch cell when a specific question needs them.
 """
 
 from __future__ import annotations
@@ -322,6 +326,16 @@ class Diagnostics:
         Returns the persistent exec-globals dict for inspection.
         """
         return self._run('per_seed_vs_ensemble')
+
+    def headline_summary(self) -> dict:
+        """Consolidated read of the other cells' persisted results.
+
+        Recomputes nothing: reads ``naive_baseline_result``,
+        ``amplitude_error_vs_ctx_result`` and ``rmse_subset_results`` out of
+        the shared exec globals, so it cannot drift from the cells it
+        summarises.  Run those first.
+        """
+        return self._run('headline_summary')
 
     def naive_baseline(self) -> dict:
         """Notebook cell id=naive-baseline.  Body lives in ``diagnostics_cells/naive_baseline.py``.

@@ -24,7 +24,9 @@ import torch
 
 from .model import DualEncoderGroupHeadMLPCompressed
 
-FORMAT_VERSION = 1
+# v2 (2026-09-09) added the constraint-derived amplitude rules; a v1 file
+# loads without them and silently mis-predicts, so v1 is refused.
+FORMAT_VERSION = 2
 
 
 def _cpu_state_dict(model: torch.nn.Module) -> dict:
@@ -75,6 +77,15 @@ def save_ensemble(ensemble_artifacts: Mapping[str, Any], out_path: str | Path) -
         "n_input_score":    int(ensemble_artifacts["n_input_score"]),
         "coef_names": list(ensemble_artifacts["coef_names"]),
         "ctx_names":  list(ensemble_artifacts["ctx_names"]),
+        # Constraint-derived amplitude rules (trainer 3.9).  These are FITTED
+        # objects -- R, S, the basis integrals and the column indices -- not
+        # config knobs, and `predict_sci_coefficients_default` silently skips a
+        # rule whose object is absent.  Omitting them made a loaded ensemble
+        # predict a moon amplitude 5x off with a +0.30 dex bias while the
+        # in-session model was correct, and nothing raised.  `config` records
+        # only whether each rule was ENABLED, which is not enough to apply it.
+        "moon_down_amp_rule": first.get("moon_down_amp_rule"),
+        "zodi_ceiling_rule":  first.get("zodi_ceiling_rule"),
     }
     out_path = Path(out_path).expanduser().resolve()
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -147,7 +158,17 @@ def load_ensemble(path: str | Path, *, device: str | None = None,
                           weights_only=bool(weights_only))
     fv = int(payload.get("format_version", -1))
     if fv != FORMAT_VERSION:
-        raise ValueError(f"Unsupported format_version {fv!r}; expected {FORMAT_VERSION}.")
+        _extra = ""
+        if fv == FORMAT_VERSION - 1:
+            _extra = (
+                "  v%d did not persist the constraint-derived amplitude rules "
+                "(`moon_down_amp_rule`, `zodi_ceiling_rule`), so loading it "
+                "would silently drop them and mis-predict the moon amplitude "
+                "by ~5x on dark rows.  Re-save from a live training session "
+                "(no retrain needed if the kernel still holds the artifacts) "
+                "or retrain." % (FORMAT_VERSION - 1))
+        raise ValueError(
+            f"Unsupported format_version {fv!r}; expected {FORMAT_VERSION}.{_extra}")
 
     cfg = dict(payload["config"])
     ctx_names = list(payload["ctx_names"])
@@ -172,6 +193,8 @@ def load_ensemble(path: str | Path, *, device: str | None = None,
             "ctx_scaler":   payload["ctx_scaler"],
             "compressors":  payload["compressors"],
             "jensen_corrections": payload["jensen_corrections"],
+            "moon_down_amp_rule": payload.get("moon_down_amp_rule"),
+            "zodi_ceiling_rule":  payload.get("zodi_ceiling_rule"),
             "coef_upper_bound":   payload["coef_upper_bound"],
             "geom_kwargs":  payload["geom_kwargs"],
             "group_indices":    payload["group_indices"],

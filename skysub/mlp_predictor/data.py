@@ -50,11 +50,6 @@ from sky_decomp.lsf_surface_iterative import (
     load_lsf_surface_state,
 )
 
-# Reused across `airglow_van_rhijn_matrix` and per-arm geometry augmentation.
-LMC_EXCLUSION = {"ra_center_deg": 80.9, "dec_center_deg": -69.75, "radius_deg": 8.0}
-SMC_EXCLUSION = {"ra_center_deg": 13.2, "dec_center_deg": -72.83, "radius_deg": 5.0}
-
-
 # ==========================================================================
 # Extracted from notebook cell id=f4b17802
 # ==========================================================================
@@ -2119,8 +2114,10 @@ def _angular_separation_deg_vec(ra_deg, dec_deg, ra_c_deg, dec_c_deg):
                + np.cos(dec) * np.cos(dec_c) * np.cos(ra - ra_c))
     return np.rad2deg(np.arccos(np.clip(cos_sep, -1.0, 1.0)))
 
-LMC_EXCLUSION = {'name': 'LMC', 'ra_deg': 81, 'dec_deg': -69.7, 'radius_deg': 10.0}
-SMC_EXCLUSION = {'name': 'SMC', 'ra_deg': 14, 'dec_deg': -73, 'radius_deg': 10}
+# Science-field exclusions, consumed by `apply_triplet_filters` via
+# `region['ra_deg'] / ['dec_deg'] / ['radius_deg']`.  THE ONLY DEFINITION --
+LMC_EXCLUSION = {'name': 'LMC', 'ra_deg': 81, 'dec_deg': -69.7, 'radius_deg': 8.0}
+SMC_EXCLUSION = {'name': 'SMC', 'ra_deg': 14, 'dec_deg': -73, 'radius_deg': 4.0}
 
 def _kappa_sigma_row_mask(x, kappa=5.0, n_iter=3):
     x = np.asarray(x, dtype=np.float64)
