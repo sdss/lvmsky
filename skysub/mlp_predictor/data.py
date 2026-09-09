@@ -2536,10 +2536,32 @@ def sci_continuum_colour_keep_mask(
 MOON_MODEL_FEATURE_NAMES = ['moon_model_log_ratio']
 _MOON_MODEL_FLOOR = 1.0e-6
 
+# v2 cache features, added 2026-09-09 alongside the transfer ratio because they
+# come out of the same cache load and validation.  Both are PER ARM.
+#
+#   zodi_po_log10  log10 of the PHYSICS-ONLY zodi integral -- the quantity the
+#                  decomposition's absolute Leinert bracket is stated against.
+#                  On the 43% of rows where the anchor binds, the fitted zodi
+#                  IS a fixed multiple of this, so the feature carries the
+#                  target itself rather than a correlate of it.
+#   moon_frac_po   the physics-only moon fraction int(moon)/int(moon+zodi),
+#                  i.e. exactly the quantity the moon-share bracket is stated
+#                  in.  Used as the gate for the zodi ceiling rule: measured on
+#                  every10, `moon_frac_po > 0.5` selects 43.0% of rows of which
+#                  95.3% are pinned at the ceiling (p95 error 0.0010 dex),
+#                  against 84.9% / p90 0.16 for a plain `moon_alt > 0` gate.
+#
+# A row the physics-only model could not evaluate gets 0.0 in BOTH, never NaN.
+# `moon_frac_po == 0.0` is therefore an unambiguous invalid flag: a real
+# fraction is never exactly zero (it bottoms out around 3e-5 with the moon
+# well below the horizon), and consumers must test it rather than the log,
+# which has no impossible value to spare.
+ZODI_CEILING_FEATURE_NAMES = ['zodi_po_log10', 'moon_frac_po']
+
 
 def _augment_triplet_with_moon_model(triplet, corpus_prefix, force=False,
                                      verbose=True, build_if_missing=True,
-                                     n_workers=None):
+                                     n_workers=None, add_zodi_ceiling=True):
     """Append the frozen model's moon TRANSFER RATIO, gated to moon-up rows.
 
     One feature, identical in all three ctx vectors:
@@ -2587,10 +2609,12 @@ def _augment_triplet_with_moon_model(triplet, corpus_prefix, force=False,
 
     names = [str(n) for n in triplet['ctx_names']]
     feat = MOON_MODEL_FEATURE_NAMES[0]
+    _added = [feat] + (list(ZODI_CEILING_FEATURE_NAMES)
+                       if add_zodi_ceiling else [])
     if feat in names and not force:
         return triplet
-    if feat in names:
-        keep = [i for i, n in enumerate(names) if n != feat]
+    if any(f in names for f in _added):
+        keep = [i for i, n in enumerate(names) if n not in _added]
         for key in ('ctx_near', 'ctx_far', 'ctx_sci'):
             triplet[key] = np.asarray(triplet[key])[:, keep]
         names = [names[i] for i in keep]
@@ -2633,10 +2657,25 @@ def _augment_triplet_with_moon_model(triplet, corpus_prefix, force=False,
                          dtype=np.float64)[row_index] > 0.0
     col = np.where(moon_up & np.isfinite(ratio), ratio, 0.0).astype(np.float32)
     n_gated = int((~(moon_up & np.isfinite(ratio))).sum())
+    _extra = {}
+    if add_zodi_ceiling:
+        _arm_of = {'ctx_near': 'near', 'ctx_far': 'far', 'ctx_sci': 'sci'}
+        for _key, _arm in _arm_of.items():
+            _zp = np.asarray(cache[f'{_arm}_zodi_total_po'],
+                             dtype=np.float64)[row_index]
+            _fp = np.asarray(cache[f'{_arm}_moon_frac_po'],
+                             dtype=np.float64)[row_index]
+            _good = np.isfinite(_zp) & (_zp > 0.0) & np.isfinite(_fp) & (_fp > 0.0)
+            _extra[_key] = np.column_stack([
+                np.where(_good, np.log10(np.where(_zp > 0.0, _zp, 1.0)), 0.0),
+                np.where(_good, _fp, 0.0)]).astype(np.float32)
     for key in ('ctx_near', 'ctx_far', 'ctx_sci'):
-        triplet[key] = np.hstack([np.asarray(triplet[key], dtype=np.float32),
-                                  col[:, None]])
-    triplet['ctx_names'] = names + [feat]
+        _cols = [np.asarray(triplet[key], dtype=np.float32), col[:, None]]
+        if key in _extra:
+            _cols.append(_extra[key])
+        triplet[key] = np.hstack(_cols)
+    triplet['ctx_names'] = names + [feat] + (
+        list(ZODI_CEILING_FEATURE_NAMES) if add_zodi_ceiling else [])
     if verbose:
         _live = col[col != 0.0]
         print(f"  moon-model augment: added {feat} (n_ctx now "
@@ -2644,6 +2683,13 @@ def _augment_triplet_with_moon_model(triplet, corpus_prefix, force=False,
               f"to 0 (moon down or unmodellable); active rows p1/p50/p99 = "
               + (" / ".join(f"{np.percentile(_live, q):+.4f}" for q in (1, 50, 99))
                  if _live.size else "n/a"))
+        if add_zodi_ceiling:
+            _fsci = _extra['ctx_sci'][:, 1]
+            print(f"    + {', '.join(ZODI_CEILING_FEATURE_NAMES)} per arm; "
+                  f"{int((_fsci <= 0.0).sum())}/{_fsci.size} rows have no "
+                  f"physics-only prediction (flagged by moon_frac_po == 0); "
+                  f"moon_frac_po(sci) > 0.5 on "
+                  f"{100.0 * float(np.mean(_fsci > 0.5)):.1f}% of rows")
     return triplet
 
 

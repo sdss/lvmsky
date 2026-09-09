@@ -245,3 +245,96 @@ Sample construction: 100 rows valid on **both** sky telescopes, stratified
 SKY_FAR = 200 spectra. Metrics: colour = log-log slope of each fitted
 component; reversal = `moon_slope > zodi_slope`; separation margin =
 `zodi_slope − moon_slope`.
+
+---
+
+## 11. Follow-up, 2026-09-09 (`gaia-stars-mask`)
+
+Measured with the **exact per-row design** rebuilt from the stored LSF surface
+(`load_lsf_surface_state` → `_set_lsf_state` → `_assemble_refined_matrices`)
+and `Z_pred` from `_physics_only_model`. Both matter: a static-LSF basis and
+the learned-parameter model each give the wrong answer here.
+
+### 11.1 What the constraints do on the deployed corpus
+
+Each half of the corpus has exactly one continuum family set by a constraint:
+
+| rows | zodi anchor: ceiling / floor / interior | moon share: ceiling / floor / interior |
+|---|---|---|
+| moon up | **87.5%** / 1.2% / 11.2% | 1.2% / 5.0% / 93.8% |
+| moon down | 5.0% / 12.5% / **82.5%** | **87.5%** / 1.2% / 11.2% |
+
+The `c = 1.6` recentring calibrated dark time well — median
+`log10(v / c Z_pred) = −0.057` — but did **not** unpin bright moon: the
+ceiling moved up by log10(1.6) and the QP followed it back up.
+
+### 11.2 κ_z release test — the ceiling is correct, do not widen it
+
+Same 100-exposure lunation-stratified recipe as §10 (17/17/17/17/18 across FLI
+bins with moon > 15°, plus 14 dark rows at moon < −5°, one row per exposure,
+91 nights) × 3 arms = 294 spectra, fitted twice through
+`decompose_parallel.init_worker` itself so every knob but `zodi_amp_bound` is
+identical: A = 2.0 (deployed), B = 100 (free).
+
+Freeing it moves flux **between** families rather than adding any. Median
+log10(B/A) on moon-up rows: zodi **+0.193**, moon **−0.107**, diffuse
+**−0.435**, moon+zodi+diffuse **−0.005**. Median rms improves 0.6% (moon-up)
+and 0.0% (moon-down). Bright moon wants up to 1.4 dex more zodi; dark time
+does not move at all.
+
+And the excess is **moonlight**:
+
+| excess above the old ceiling, moon-up rows | ρ | partial ρ |
+|---|---|---|
+| FLI | +0.732 | **+0.733** (given log B500) |
+| log Leinert B500 | −0.318 | **−0.322** (given FLI) |
+| predicted moon fraction | +0.677 | |
+| moon altitude | +0.402 | |
+
+The B500 correlation has the **wrong sign** for zodiacal light and controlling
+for B500 does not weaken the FLI dependence at all. The bracket is stopping
+moon-into-zodi leakage, which is its job. Note this is the measurement §9 said
+was untrustworthy while the anchor binds — releasing it is what makes those
+correlations interpretable.
+
+### 11.3 Not the moon spline's shape prior
+
+The natural hypothesis — that a shape-limited moon carrier forces the leakage
+— is refuted, consistent with the §6 verdict that `moon_scatter_envelope` is
+neutral. Moon-up β-bound occupancy is localised at the band **ends** (pair 0
+68.9%, pairs 11–13 62–73%) with the middle (pairs 2–6) interior, and only 0.1%
+of rows have the entire blue half pinned. Do not re-run that test.
+
+Moon-**down** is different and is bang-bang: 93.9% of the 14 adjacent pairs
+sit on a bound, the shape is a corner of the feasible polytope, and the SCI
+and NEAR fits of the same exposure agree only 2× better than a shuffled
+pairing (L1 0.311 against a 0.612 null; moon-up is 0.050 against 0.441).
+
+### 11.4 The open problem: zodi/diffuse degeneracy
+
+§11.2 says the three continuum families are substantially interchangeable at
+fixed χ². Its extreme form is a real failure mode on **1.7% of rows**: the QP
+puts 100% of the continuum into `Zodi_bs` and zeroes the moon *and* the
+diffuse block.
+
+| | degenerate rows (n=250) | healthy dark rows |
+|---|---|---|
+| continuum split moon / zodi / diffuse | 0.0001% / **100.0%** / 0.0% | 1.04% / 43.1% / 55.8% |
+| reduced χ² (median) | **2.09** | 0.139 |
+| above the χ² q90 cut | 42.4% | 9.4% |
+| also diffuse-zeroed | 67.2% | — |
+| all three arms degenerate together | 94.8% | — |
+
+Detectable from the sky arms alone (both with `∫moon/∫zodi < 0.5 R`) at 87.8%
+precision / 94.8% recall, which is what `trainer.degenerate_continuum_flag`
+does — but detection is not a fix, and the ML cannot repair a degenerate
+input. This is the decomposition-side problem to attack next. Row 773
+(expnum 39622) is the mild form: diffuse 48% of its continuum, 95th percentile
+among moon-up rows, with the true sci diffuse *below both sky arms*.
+
+### 11.5 Reproduction
+
+Scratchpad scripts (not preserved): `kz_run.py` / `kz_worker.py` (the A/B
+driver, which patches `zodi_amp_bound` on the worker's constructed decomposer
+so the rest of the config cannot drift), `kz_analyse.py`, `exact2.py` (exact
+per-row design integrals), `bound_side.py` (per-pair β occupancy).

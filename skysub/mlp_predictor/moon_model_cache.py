@@ -38,6 +38,22 @@ moon and zodi predictions in fit units, plus the geometry the model derived --
 cannot handle store NaN and ``ok = False`` rather than being dropped, so the
 cache is always aligned one-to-one with the corpus rows.
 
+**v2 additionally stores the PHYSICS-ONLY prediction** as ``zodi_total_po``
+and ``moon_frac_po``.  The fields above come from the model with its FITTED
+parameters; the decomposition's amplitude prior uses ``_physics_only_model``,
+which zeroes the ten learned scale factors and keeps only the below-horizon
+taper.  They agree on the moon FRACTION to a fraction of a percent, so the
+transfer ratio below is unaffected, but they differ by 1.5-1.7x on the
+ABSOLUTE zodi -- enough that comparing a fitted zodi against the v1 field
+makes the Leinert anchor look unbound when 87.5% of moon-up rows are pinned
+to it.  Anything that compares against a bracket the QP enforced, and the two
+context features ``zodi_po_log10`` / ``moon_frac_po``, must use the v2 fields.
+
+``upgrade_v1_to_v2`` adds them to an existing v1 cache in place, computing
+only the new pass and verifying the learned fields are unchanged before it
+writes, so the deployed ``moon_model_log_ratio`` comes through bit-identical
+at half the cost of a rebuild.
+
 The integrals are stored, not the spectra: a per-arm spectrum cache would be
 14 500 x 3 x 12 401 floats (~2 GB) and every use so far is an amplitude ratio.
 """
@@ -50,7 +66,7 @@ from pathlib import Path
 import numpy as np
 from astropy.io import fits
 
-CACHE_VERSION = 1
+CACHE_VERSION = 2
 CACHE_BASENAME = "{stem}_moonzodi_model_cache_v{version}.npz"
 ARMS = ("near", "far", "sci")
 _ARM_META = {
@@ -69,6 +85,30 @@ FIT_FLUX_SCALE = 1e14
 
 _FIELDS = ("moon_total", "zodi_total", "moon_sep_deg", "target_airmass",
            "moon_airmass", "moon_alt_deg", "sun_alt_deg", "zodi_b500")
+
+# v2 (2026-09-09): the PHYSICS-ONLY variant of the same two integrals.
+#
+# The fields above come from `MoonZodiPhysicalModel()` with its FITTED
+# parameters.  The decomposition's amplitude prior does NOT use that variant:
+# `geometry_amplitude_prior` goes through `_physics_only_model`, which zeroes
+# all ten learned scale factors and keeps only the below-horizon taper.  The
+# two agree on the moon FRACTION to a fraction of a percent -- that ratio is
+# calibration-free, which is why `transfer_ratio` and the
+# `moon_model_log_ratio` feature are unaffected -- but they disagree badly on
+# the ABSOLUTE zodi, because the learned set contains
+# `zodi_target_airmass_log = 1.28`.
+#
+# That mattered once already: comparing the fitted zodi against the v1
+# `zodi_total` made the Leinert anchor look almost never binding (1.7% of
+# moon-up rows at the ceiling, the ratio spanning 3.7 dex and 16.5% of rows
+# "below the floor", which is impossible for an enforced bound).  With the
+# physics-only prediction the same measurement gives 87.5%.  Anything that
+# compares against a bracket the QP actually enforced must use these fields.
+#
+# `moon_frac_po` is `int(moon)/int(moon+zodi)`, i.e. exactly the quantity the
+# moon-share bracket is stated in, so it is also the natural gate for asking
+# whether a row is pinned.
+_FIELDS_PO = ("zodi_total_po", "moon_frac_po")
 
 # Worker-global state, set once per process by _init_worker.  Passing the flux
 # stack through the pool would pickle gigabytes per task.
@@ -122,10 +162,59 @@ def _init_worker(stack_path, exposure_seconds):
     _W["exposure_seconds"] = float(exposure_seconds)
 
 
+def _run_chunk_po(rows):
+    """Physics-only integrals for one chunk (v2 fields only).
+
+    Kept separate from `_run_chunk` so `upgrade_v1_to_v2` can add the new
+    fields without recomputing the learned ones -- that keeps the existing
+    `moon_model_log_ratio` feature bit-identical across the upgrade, and
+    halves the cost of getting there.
+    """
+    from sky_decomp.moon_zodi_model import (MoonZodiObservation,
+                                            geometry_amplitude_prior)
+    meta, wave = _W["meta"], _W["wave"]
+    out = {f"{a}_{f}": np.full(len(rows), np.nan) for a in ARMS
+           for f in _FIELDS_PO}
+    ok = np.zeros((len(rows), len(ARMS)), dtype=bool)
+    fails = []
+    for i, r in enumerate(rows):
+        m = meta[int(r)]
+        raw = m["date_obs"]
+        date_obs = (raw.decode().strip() if isinstance(raw, bytes)
+                    else str(raw).strip())
+        for j, arm in enumerate(ARMS):
+            role, ra_col, dec_col, _ = _ARM_META[arm]
+            lsf = _sanitised_lsf(np.asarray(_W["lsf"][arm][int(r)]))
+            if lsf is None:
+                continue
+            try:
+                frac, zodi_total, _airmass = geometry_amplitude_prior(
+                    wave, lsf,
+                    MoonZodiObservation(
+                        expnum=int(m["expnum"]), date_obs=date_obs, role=role,
+                        target_ra_deg=float(m[ra_col]),
+                        target_dec_deg=float(m[dec_col]),
+                        exposure_seconds=_W["exposure_seconds"],
+                        exposure_seconds_source=EXPOSURE_SOURCE),
+                    physical_to_fit_flux_scale=FIT_FLUX_SCALE)
+            except Exception as exc:
+                # Same policy as _run_chunk: keep the first few reasons so
+                # build() can raise with them instead of writing all-NaN.
+                if len(fails) < 5:
+                    fails.append((int(r), arm, f"{type(exc).__name__}: {exc}"))
+                continue
+            out[f"{arm}_zodi_total_po"][i] = float(zodi_total)
+            out[f"{arm}_moon_frac_po"][i] = float(frac)
+            ok[i, j] = True
+    return rows, out, ok, fails
+
+
 def _run_chunk(rows):
     from sky_decomp.moon_zodi_model import MoonZodiObservation
+    from sky_decomp.moon_zodi_model import geometry_amplitude_prior
     meta, wave, model = _W["meta"], _W["wave"], _W["model"]
-    out = {f"{a}_{f}": np.full(len(rows), np.nan) for a in ARMS for f in _FIELDS}
+    out = {f"{a}_{f}": np.full(len(rows), np.nan) for a in ARMS
+           for f in _FIELDS + _FIELDS_PO}
     ok = np.zeros((len(rows), len(ARMS)), dtype=bool)
     fails = []
     for i, r in enumerate(rows):
@@ -165,6 +254,25 @@ def _run_chunk(rows):
             out[f"{arm}_moon_alt_deg"][i] = float(g.moon_altitude_deg)
             out[f"{arm}_sun_alt_deg"][i] = float(g.sun_altitude_deg)
             out[f"{arm}_zodi_b500"][i] = float(g.zodi_b500)
+            # Second call, through the physics-only variant: this is the
+            # prediction the decomposition's amplitude prior actually used.
+            try:
+                _frac_po, _zodi_po, _ = geometry_amplitude_prior(
+                    wave, lsf,
+                    MoonZodiObservation(
+                        expnum=int(m["expnum"]), date_obs=date_obs, role=role,
+                        target_ra_deg=float(m[ra_col]),
+                        target_dec_deg=float(m[dec_col]),
+                        exposure_seconds=_W["exposure_seconds"],
+                        exposure_seconds_source=EXPOSURE_SOURCE),
+                    physical_to_fit_flux_scale=FIT_FLUX_SCALE)
+            except Exception as exc:
+                if len(fails) < 5:
+                    fails.append((int(r), arm,
+                                  f"physics-only {type(exc).__name__}: {exc}"))
+                continue
+            out[f"{arm}_zodi_total_po"][i] = float(_zodi_po)
+            out[f"{arm}_moon_frac_po"][i] = float(_frac_po)
             ok[i, j] = True
     return rows, out, ok, fails
 
@@ -203,7 +311,8 @@ def build(corpus_prefix, n_workers=8, chunk_size=32,
     complete = rows is None
     chunks = [all_rows[i:i + int(chunk_size)]
               for i in range(0, all_rows.size, int(chunk_size))]
-    res = {f"{a}_{f}": np.full(n_rows, np.nan) for a in ARMS for f in _FIELDS}
+    res = {f"{a}_{f}": np.full(n_rows, np.nan) for a in ARMS
+           for f in _FIELDS + _FIELDS_PO}
     ok = np.zeros((n_rows, len(ARMS)), dtype=bool)
     t0 = time.perf_counter()
     if verbose:
@@ -231,7 +340,7 @@ def build(corpus_prefix, n_workers=8, chunk_size=32,
     payload = dict(res)
     payload["ok"] = ok
     payload["arms"] = np.array(ARMS)
-    payload["fields"] = np.array(_FIELDS)
+    payload["fields"] = np.array(_FIELDS + _FIELDS_PO)
     payload["expnum"] = expnum
     payload["sci_ra"] = sci_ra
     payload["sci_dec"] = sci_dec
@@ -262,6 +371,105 @@ def build(corpus_prefix, n_workers=8, chunk_size=32,
     return out_path
 
 
+def upgrade_v1_to_v2(corpus_prefix, n_workers=8, chunk_size=32, verbose=True):
+    """Add the v2 physics-only fields to an existing v1 cache, in place.
+
+    Only the new fields are computed, so the learned-parameter fields -- and
+    therefore `transfer_ratio` and the deployed `moon_model_log_ratio` feature
+    -- come through bit-identical.  That is verified before the write, not
+    assumed.  Halves the cost against a full rebuild, which would have to
+    evaluate both model variants for every row.
+
+    The v1 file is left on disk under its own name (the version is part of the
+    filename), so this is additive and reversible.
+    """
+    import multiprocessing as mp
+    import time
+
+    src = cache_path(corpus_prefix, version=1)
+    dst = cache_path(corpus_prefix, version=2)
+    if not src.exists():
+        raise FileNotFoundError(f"no v1 cache to upgrade at {src}")
+    if dst.exists():
+        raise FileExistsError(f"{dst} already exists; delete it to redo the upgrade")
+    stack = Path(f"{corpus_prefix}.fits")
+    if not stack.exists():
+        raise FileNotFoundError(f"corpus stack not found: {stack}")
+    old = {k: v for k, v in np.load(src, allow_pickle=False).items()}
+    if int(old["version"]) != 1:
+        raise RuntimeError(f"{src} is version {int(old['version'])}, not 1")
+    if not bool(old["complete"]):
+        raise RuntimeError(f"{src} is a PARTIAL cache; rebuild rather than upgrade")
+    n_rows = int(old["n_rows"])
+    with fits.open(stack, memmap=True) as hdul:
+        if int(hdul["FLUX_SCI"].shape[0]) != n_rows:
+            raise RuntimeError(
+                f"{src} describes {n_rows} rows but {stack} has "
+                f"{int(hdul['FLUX_SCI'].shape[0])}; wrong prefix")
+        if not np.array_equal(np.asarray(hdul["META"].data["expnum"], np.int64),
+                              np.asarray(old["expnum"], np.int64)):
+            raise RuntimeError(f"{src} does not describe {stack} (expnum differs)")
+    exposure_seconds = float(old["exposure_seconds"])
+    rows_all = np.arange(n_rows)
+    chunks = [rows_all[i:i + int(chunk_size)]
+              for i in range(0, n_rows, int(chunk_size))]
+    res = {f"{a}_{f}": np.full(n_rows, np.nan) for a in ARMS for f in _FIELDS_PO}
+    ok_po = np.zeros((n_rows, len(ARMS)), dtype=bool)
+    t0 = time.perf_counter()
+    if verbose:
+        print(f"[moon-model-cache] upgrading {src.name} -> v2: {n_rows} rows x "
+              f"{len(ARMS)} arms of physics-only prediction on {n_workers} "
+              f"workers ({len(chunks)} chunks of {chunk_size})", flush=True)
+    ctx = mp.get_context("fork")
+    fails = []
+    with ctx.Pool(processes=int(n_workers), initializer=_init_worker,
+                  initargs=(str(stack), exposure_seconds)) as pool:
+        done = 0
+        for chunk_rows, vals, chunk_ok, chunk_fails in pool.imap_unordered(
+                _run_chunk_po, chunks):
+            for key, arr in vals.items():
+                res[key][chunk_rows] = arr
+            ok_po[chunk_rows] = chunk_ok
+            if len(fails) < 5:
+                fails.extend(chunk_fails[:5 - len(fails)])
+            done += len(chunk_rows)
+            if verbose and (done % (20 * int(chunk_size)) < int(chunk_size)):
+                el = time.perf_counter() - t0
+                print(f"  {done}/{n_rows}  {el:.0f}s elapsed, "
+                      f"~{el / max(done, 1) * (n_rows - done):.0f}s left",
+                      flush=True)
+    usable = ok_po.all(axis=1)
+    if not usable.any():
+        raise RuntimeError(
+            "the physics-only pass produced nothing. First failures: "
+            + "; ".join(f"row {r} {a}: {m}" for r, a, m in fails[:5]))
+    payload = dict(old)
+    payload.update(res)
+    # `ok` becomes the AND of both passes: a row is usable only if both model
+    # variants produced all three arms, so downstream gates stay one flag.
+    payload["ok"] = np.asarray(old["ok"], dtype=bool) & ok_po
+    payload["fields"] = np.array(_FIELDS + _FIELDS_PO)
+    payload["version"] = np.array(2)
+    # The learned fields must be untouched -- checked, not assumed.
+    for a in ARMS:
+        for f in _FIELDS:
+            k = f"{a}_{f}"
+            if not np.array_equal(payload[k], old[k], equal_nan=True):
+                raise RuntimeError(f"upgrade would have changed {k}; refusing")
+    np.savez_compressed(dst, **payload)
+    if verbose:
+        _drop = int((np.asarray(old['ok'], bool).all(axis=1) & ~usable).sum())
+        print(f"[moon-model-cache] wrote {dst} in "
+              f"{time.perf_counter() - t0:.0f}s; physics-only usable on "
+              f"{usable.mean() * 100.0:.2f}% of {n_rows} rows"
+              + (f"; {_drop} row(s) usable in v1 are not usable in the "
+                 f"physics-only pass" if _drop else ""))
+        if fails:
+            print("  first failures: "
+                  + "; ".join(f"row {r} {a}: {m}" for r, a, m in fails[:3]))
+    return dst
+
+
 def load(corpus_prefix, expnum=None, require_complete=True):
     """Load the cache, validating it against the corpus it claims to describe.
 
@@ -277,9 +485,13 @@ def load(corpus_prefix, expnum=None, require_complete=True):
             f"`python -m mlp_predictor.moon_model_cache {corpus_prefix}`")
     z = np.load(path, allow_pickle=False)
     if int(z["version"]) != CACHE_VERSION:
+        _hint = ("upgrade it in place with "
+                 f"`python -m mlp_predictor.moon_model_cache {corpus_prefix} "
+                 f"--upgrade` (~26 min, keeps the learned fields untouched)"
+                 if int(z["version"]) == 1 else "rebuild it")
         raise RuntimeError(
             f"{path} is cache version {int(z['version'])}, expected "
-            f"{CACHE_VERSION}; rebuild it")
+            f"{CACHE_VERSION}; {_hint}")
     if require_complete and not bool(z["complete"]):
         raise RuntimeError(
             f"{path} is a PARTIAL cache (built with rows=...); rebuild it "
@@ -353,7 +565,15 @@ def _main(argv=None):
                    help="only the first N rows, for a smoke test; the result is "
                         "marked PARTIAL and load() refuses it")
     p.add_argument("--overwrite", action="store_true")
+    p.add_argument("--upgrade", action="store_true",
+                   help="add the v2 physics-only fields to an existing v1 "
+                        "cache instead of rebuilding from scratch; the "
+                        "learned-parameter fields are copied verbatim")
     a = p.parse_args(argv)
+    if a.upgrade:
+        upgrade_v1_to_v2(a.corpus_prefix, n_workers=a.n_workers,
+                         chunk_size=a.chunk_size)
+        return
     build(a.corpus_prefix, n_workers=a.n_workers, chunk_size=a.chunk_size,
           rows=(None if a.rows is None else np.arange(a.rows)),
           overwrite=a.overwrite)

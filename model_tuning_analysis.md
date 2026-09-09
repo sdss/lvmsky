@@ -2,6 +2,13 @@
 
 **Date:** 2026-09-01
 
+> **HISTORICAL — superseded.** This is a point-in-time analysis of the state on
+> 2026-09-01 and its tuning recommendations have since been acted on, measured,
+> or refuted. The living record is the notebook itself: chapter 3 for the
+> method and the "Changelog and measured record" cell for the evidence. In
+> particular the corpus, the context vector (39 → 42 features) and the moon and
+> zodi amplitude handling (§3.9) have all changed since this was written.
+
 ## Overview
 
 Analysis of the LVM sky interpolation notebook: `notebook_sky_interpolation_triplet_dual_encoder_group_mlp_split_zodi_module.ipynb`
