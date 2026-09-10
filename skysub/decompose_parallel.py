@@ -131,6 +131,37 @@ SPLIT_ZODI_MOON_RATIO_BOUND = 0.7
 SPLIT_ZODI_ZODI_RATIO_BOUND = 0.7
 SPLIT_ZODI_AMP_PRIOR_TOL = 3.0
 SPLIT_ZODI_ZODI_AMP_BOUND = 2.0
+
+# Diffuse species-ratio bracket, ON by default since 2026-09-10.  The three
+# diffuse species are individually unidentifiable in the LVM band: on the
+# canonical-PALACE basis the free fit spreads log10(FeO/HO2) over 10.2 dex and
+# zeroes HO2 on 23% of rows, and the THREE ARMS OF ONE EXPOSURE -- same sky, a
+# few degrees apart -- disagree by 0.633 dex at the median.  Airglow does not
+# vary by x4 in a species ratio over 5 deg, so that spread is fitting noise,
+# and in dark time the amplitude it moves leaks straight into the zodi.
+#
+# Validated on 500 rows stratified over moon state x |ecl_beta|, two full
+# runs: FeO/HO2 5-95 span 10.25 -> 0.40 dex, HO2 near-zero rows 23.2% -> 0.2%,
+# for +2.46% of sci blue chi2 (+1.60% near, +0.13% far) and no measurable
+# full-band cost.  It moves the SPLIT, not the sum: per-row log10(prior/free)
+# on sci is zodi p90 0.029, diffuse p90 0.117, zodi+diffuse SUM p90 0.012.
+# Bright-moon rows do not move at all -- their zodi is pinned at the Leinert
+# ceiling -- so the bracket acts only where the diffuse dominates.
+#
+# NOMINAL: FLUX shares (HO2, FeO, O2Ac), the geometric median of the fitted
+# corpus, NOT PALACE's own reference shares -- centring on PALACE costs 25.7%
+# of the blue chi2 against 0.67% for the corpus median, because PALACE is
+# calibrated for Cerro Paranal and LVM observes from LCO.  RE-MEASURE THIS on
+# the corpus being fitted if the basis or the corpus changes; the value below
+# was measured on 60 every10 rows of gaia-stars-mask on the _canonhyb_v1
+# basis.
+#
+# KNOWN FAILURE MODE: with c >= 0 a ratio bound makes the block all-positive
+# or all-zero, so a row whose fit wants HO2 = 0 loses its entire diffuse
+# block (measured 0.2-0.4% of rows).  `diffuse_zeroed_keep_mask` catches
+# those downstream; count them after a run.
+SPLIT_ZODI_DIFFUSE_RATIO_BOUND_DEX = 0.2
+SPLIT_ZODI_DIFFUSE_RATIO_NOMINAL = (0.0396, 0.7026, 0.2578)
 # Absolute recentring of the Leinert anchor.  The anchor brackets the fitted
 # zodi total to [Z_pred/kappa_z, kappa_z * Z_pred], and Z_pred comes from
 # _physics_only_model, whose learned scale factors are deliberately zeroed --
@@ -456,6 +487,8 @@ def init_worker(
     zodi_smooth_lambda=SPLIT_ZODI_SMOOTH_LAMBDA_DEFAULT,
     mask_science_lines=SCIENCE_LINE_MASK_ENABLED,
     centre_on_halpha=SCIENCE_LINE_MASK_CENTRE_ON_HALPHA,
+    diffuse_ratio_bound_dex=SPLIT_ZODI_DIFFUSE_RATIO_BOUND_DEX,
+    diffuse_ratio_nominal=SPLIT_ZODI_DIFFUSE_RATIO_NOMINAL,
 ):
     """Initialise one SkyDecomp instance per worker process."""
     global \
@@ -572,6 +605,8 @@ def init_worker(
             zodi_ratio_bound=SPLIT_ZODI_ZODI_RATIO_BOUND,
             amp_prior_tol=SPLIT_ZODI_AMP_PRIOR_TOL,
             zodi_amp_bound=SPLIT_ZODI_ZODI_AMP_BOUND,
+            diffuse_ratio_bound_dex=float(diffuse_ratio_bound_dex),
+            diffuse_ratio_nominal=diffuse_ratio_nominal,
             config=LSFSurfaceIterativeConfig(
                 n_refinement_cycles=n_refinement_cycles,
             ),
@@ -1008,6 +1043,8 @@ def run(
     n_spline_knots=MOON_N_KNOTS_DEFAULT,
     n_zodi_spline_knots=SPLIT_ZODI_N_KNOTS_DEFAULT,
     zodi_smooth_lambda=SPLIT_ZODI_SMOOTH_LAMBDA_DEFAULT,
+    diffuse_ratio_bound_dex=SPLIT_ZODI_DIFFUSE_RATIO_BOUND_DEX,
+    diffuse_ratio_nominal=SPLIT_ZODI_DIFFUSE_RATIO_NOMINAL,
     mask_science_lines=SCIENCE_LINE_MASK_ENABLED,
     centre_on_halpha=SCIENCE_LINE_MASK_CENTRE_ON_HALPHA,
 ):
@@ -1099,6 +1136,8 @@ def run(
             float(zodi_smooth_lambda),
             bool(mask_science_lines),
             bool(centre_on_halpha),
+            float(diffuse_ratio_bound_dex),
+            diffuse_ratio_nominal,
         ),
     ) as executor:
         pbar = tqdm(
@@ -1452,6 +1491,31 @@ def main():
         ),
     )
     parser.add_argument(
+        "--diffuse-ratio-bound-dex",
+        type=float,
+        default=SPLIT_ZODI_DIFFUSE_RATIO_BOUND_DEX,
+        help=(
+            "Half-width in dex of the bracket on the diffuse species ratios "
+            "FeO/HO2 and O2Ac/HO2, about --diffuse-ratio-nominal. 0 disables. "
+            "The three species are individually unidentifiable in the LVM band "
+            "-- the three arms of one exposure disagree by 0.54 dex at the "
+            "median -- so this removes freedom the data cannot measure. "
+            "Requires --diffuse-ratio-nominal."
+        ),
+    )
+    parser.add_argument(
+        "--diffuse-ratio-nominal",
+        type=str,
+        default=",".join(str(v) for v in SPLIT_ZODI_DIFFUSE_RATIO_NOMINAL),
+        help=(
+            "Comma-separated HO2,FeO,O2Ac FLUX shares giving the centre of the "
+            "ratio bracket, e.g. '0.0396,0.7026,0.2578'. MEASURE THIS ON THE "
+            "CORPUS BEING FITTED: centring on PALACE's own shares costs 25.7%% "
+            "of the blue chi2 against 0.67%% for the corpus median, because "
+            "PALACE is calibrated for Paranal and LVM observes from LCO."
+        ),
+    )
+    parser.add_argument(
         "--limit",
         type=int,
         default=None,
@@ -1557,6 +1621,11 @@ def main():
             n_spline_knots=args.n_spline_knots,
             n_zodi_spline_knots=args.n_zodi_spline_knots,
             zodi_smooth_lambda=args.zodi_smooth_lambda,
+            diffuse_ratio_bound_dex=args.diffuse_ratio_bound_dex,
+            diffuse_ratio_nominal=(
+                None if not args.diffuse_ratio_nominal
+                else tuple(float(v) for v in args.diffuse_ratio_nominal.split(","))
+            ),
             mask_science_lines=not args.no_science_line_mask,
             centre_on_halpha=not args.no_halpha_centring,
         )

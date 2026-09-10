@@ -5,7 +5,7 @@
   "moon_zodi_manifest": "moon_zodi/model_manifest.json",
   "palace_contract": {
     "oh_suffix": "_h_family_default_ef_v1",
-    "diffuse_suffix": "_joint_native_adam_invsky_p2_10000iter",
+    "diffuse_suffix": "_canonhyb_v1",
     "assets": [
       {
         "path": "palace/PMD/pmd_popmodel_OH_h_family_default_ef_v1.dat",
@@ -28,6 +28,13 @@
         "path": "palace/PMD/pmd_popmodel_OH_joint_v2_updated.dat",
         "sha256": "b0e2b763dc08c81b513fe51eed1505ff9982dcd89d975f8153e668e740ff5c65",
         "source": "Previous repository frozen joint-v2 OH weights retained for explicit backward-compatible selection"
+      },
+      {
+        "path": "palace/PMD/pmd_refcont_canonhyb_v1.dat",
+        "sha256": "d886bee23ee66d1b7559b6825b6fd5af5c07dfbe1e758035dc1ae49f3c2d1e4d",
+        "source": "Canonical PALACE v1.0 pmd_refcont.dat fcHO2 and fcFeO interpolated onto the native LVM grid, with fcO2Ac taken verbatim from the native-LVM joint diffuse refit",
+        "why": "Canonical fcHO2/fcFeO restore PALACE's species identification -- FeO peaks at 5966 A (Noll+24 put FeO(VIS) at 595 nm) and HO2 is the blue tail of the 1.51 um feature -- while the refit fcO2Ac keeps the blue. Canonical O2Ac peaks at 3220 A, outside the LVM band, so only its tail is in range and it runs ~2x high through 4200-5900 A. Measured on 10 far-arm dark off-ecliptic rows: fully canonical costs x1.43 in blue chi2 and biases the median pull to -0.26; the hybrid recovers that to -0.02 and has the best full-band chi2 of the three.",
+        "supersedes": "palace/PMD/pmd_refcont_joint_native_adam_invsky_p2_10000iter.dat"
       },
       {
         "path": "palace/PMD/pmd_refcont_joint_native_adam_invsky_p2_10000iter.dat",

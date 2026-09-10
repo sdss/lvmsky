@@ -40,7 +40,7 @@ CORRECTION_SCOPE = "moon_plus_zodi"
 DATA_BUNDLE_SCHEMA_VERSION = 1
 DATA_BUNDLE_ID = "sky_decomp_moon_zodi_lsf_surface_iterative_v1"
 DEFAULT_PALACE_OH_SUFFIX = "_h_family_default_ef_v1"
-DEFAULT_PALACE_DIFFUSE_SUFFIX = "_joint_native_adam_invsky_p2_10000iter"
+DEFAULT_PALACE_DIFFUSE_SUFFIX = "_canonhyb_v1"
 EPHEMERIS_ASSET = "jpl_de432s_short_planetary_ephemeris.bsp"
 SOLAR_ASSET = (
     "meftah_solar_hrs_disk_integrated_v1_1_vacuum_velocity_step_2kms.npz"

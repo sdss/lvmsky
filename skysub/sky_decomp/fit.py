@@ -415,6 +415,8 @@ class SkyDecomp:
         amp_prior_tol: float = 0.0,
         amp_prior_floor: float = 0.02,
         zodi_amp_bound: float = 0.0,
+        diffuse_ratio_bound_dex: float = 0.0,
+        diffuse_ratio_nominal: tuple[float, ...] | None = None,
         moon_scatter_envelope: bool = False,
         moon_ms_coeff: float = 3.5,
         moon_relax_gate: tuple[float, float] | None = None,
@@ -522,6 +524,21 @@ class SkyDecomp:
         # median and a factor ~1.4 spread.  Do not tighten kappa below that
         # spread.
         self.zodi_amp_bound = float(zodi_amp_bound)
+        # Diffuse species-ratio bracket.  `_dex` is the HALF-WIDTH in dex
+        # allowed either side of `_nominal` (0 disables); `_nominal` is the
+        # (HO2, FeO, O2Ac) FLUX-share centre, which must be measured on the
+        # corpus being fitted -- see the construction site for why PALACE's
+        # own shares are the wrong centre for LCO.
+        self.diffuse_ratio_bound_dex = float(max(diffuse_ratio_bound_dex, 0.0))
+        if diffuse_ratio_nominal is None:
+            self.diffuse_ratio_nominal = None
+        else:
+            _dn = np.asarray(diffuse_ratio_nominal, dtype=np.float64).ravel()
+            if _dn.size < 2 or not np.all(np.isfinite(_dn)) or not np.all(_dn > 0.0):
+                raise ValueError(
+                    "diffuse_ratio_nominal must be >=2 finite positive flux shares, "
+                    f"got {diffuse_ratio_nominal!r}")
+            self.diffuse_ratio_nominal = tuple(_dn / _dn.sum())
         self._amp_prior_zodi_total = None
         # Two-channel (Rayleigh + aerosol) scattered-moonlight envelope with a
         # multiple-scattering enhancement, installed per row by
@@ -1203,6 +1220,7 @@ class SkyDecomp:
             w_vec: np.ndarray,
             moon_slice_local: slice | None,
             zodi_slice_local: slice | None = None,
+            diffuse_slice_local: slice | None = None,
         ) -> tuple[np.ndarray, str, float, np.ndarray, np.ndarray, float]:
             aw = a_mat * w_vec[:, None]
             yw = y_vec * w_vec
@@ -1349,6 +1367,59 @@ class SkyDecomp:
             # bracket below is the only one with a right-hand side.
             ratio_rhs: list[float] = [0.0] * len(ratio_rows)
 
+            # --- Ratio bracket on the diffuse species (2026-09-10) ----------
+            # The three diffuse species are individually unidentifiable in the
+            # LVM band: with the canonical PALACE HO2 vector -- a featureless
+            # red riser carrying only 4.8% of its emission below 9800 A -- the
+            # free fit spreads log10(FeO/HO2) over 8.7 dex, and the THREE ARMS
+            # OF ONE EXPOSURE, looking at the same sky a few degrees apart,
+            # disagree by 0.536 dex at the median.  Airglow does not vary by
+            # x3.5 in a species ratio over 5 deg, so that spread is fitting
+            # noise, and the amplitude it moves leaks into the zodi in dark
+            # time, where zodi and diffuse are the only continuum players.
+            #
+            # A_k / A_0 <= R_hi  <=>  A_k - R_hi A_0 <= 0, linear in c, so each
+            # side is one inequality -- the same construction as the moon-share
+            # bracket above.  Ratios are taken against species 0 (HO2) and use
+            # the same UNWEIGHTED column integrals as that bracket, so A_k is
+            # the band-integrated component flux the diagnostics report.
+            #
+            # `diffuse_ratio_nominal` is FLUX shares, and it should come from
+            # the corpus being fitted, NOT from PALACE: measured on the hybrid
+            # basis, centring on PALACE's own shares costs 25.7% of the blue
+            # chi2 while centring on the corpus median costs 0.67%, because
+            # PALACE is calibrated for Paranal and we observe from LCO.  The
+            # half-width is what the data cannot measure anyway: +/-0.2 dex
+            # costs 0.07% of blue chi2 and no row above 5%, and is still wider
+            # than the +/-0.12 dex seasonal variability Noll et al. (2024)
+            # measure for the FeO continuum.
+            _d_w = float(getattr(self, 'diffuse_ratio_bound_dex', 0.0))
+            _d_nom = getattr(self, 'diffuse_ratio_nominal', None)
+            if (_d_w > 0.0 and _d_nom is not None
+                    and diffuse_slice_local is not None):
+                _d0 = diffuse_slice_local.start or 0
+                _d1 = diffuse_slice_local.stop or _d0
+                _nom = np.asarray(_d_nom, dtype=np.float64).ravel()
+                if (_d1 - _d0) == _nom.size and _nom.size >= 2 and np.all(_nom > 0):
+                    _dcol = np.asarray(a_mat.sum(axis=0), dtype=np.float64) / col_scale
+                    _W = 10.0 ** _d_w
+                    _ref = _d0                      # species 0 = HO2
+                    _i_ref = _dcol[_ref]
+                    for _k in range(1, _nom.size):
+                        _i_k = _dcol[_d0 + _k]
+                        if not (_i_ref > 0.0 and _i_k > 0.0):
+                            continue
+                        _r = float(_nom[_k] / _nom[0])
+                        for _rb, _sgn in ((_r * _W, +1.0), (_r / _W, -1.0)):
+                            # +1: A_k - R_hi A_0 <= 0 ; -1: R_lo A_0 - A_k <= 0
+                            _row = np.zeros(n_par_local, dtype=np.float64)
+                            _row[_d0 + _k] = _sgn * _i_k
+                            _row[_ref] = -_sgn * _rb * _i_ref
+                            _norm = float(np.max(np.abs(_row)))
+                            if _norm > 0.0:
+                                ratio_rows.append(_row / _norm)
+                                ratio_rhs.append(0.0)
+
             # --- Absolute bracket on int(zodi) against the Leinert prediction --
             #   Z_pred / kappa <= v <= kappa * Z_pred
             # stated in native flux units, so `a_mat` enters unscaled and only
@@ -1415,6 +1486,7 @@ class SkyDecomp:
         ) = _solve_nonnegative_weighted(
             a, y, base_w, moon_slice,
             zodi_slice_local=zodi_slice,
+            diffuse_slice_local=diffuse_slice,
         )
 
         # Track whichever solve produced the FINAL value of each coefficient,

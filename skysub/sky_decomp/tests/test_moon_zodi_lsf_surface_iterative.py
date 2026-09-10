@@ -87,9 +87,13 @@ def fitted_case():
     assert decomposer.base_dir == DEFAULT_DATA_ROOT.resolve()
     assert decomposer.pmd_dir == DEFAULT_DATA_ROOT.resolve() / "palace" / "PMD"
     assert decomposer.palace_oh_suffix == "_h_family_default_ef_v1"
+    # Default changed 2026-09-10 to the hybrid table -- canonical PALACE
+    # fcHO2/fcFeO with the native-LVM fcO2Ac.  Asserted against the module
+    # constant AND the literal so a silent default change still trips here.
     assert (
         decomposer.palace_diffuse_suffix
-        == "_joint_native_adam_invsky_p2_10000iter"
+        == moon_zodi_model.DEFAULT_PALACE_DIFFUSE_SUFFIX
+        == "_canonhyb_v1"
     )
     # A finite native-grid spectrum with a nonzero independent diffuse block.
     flux = moon + zodi + 0.02 * np.sum(decomposer.matrix_diffuse, axis=0)

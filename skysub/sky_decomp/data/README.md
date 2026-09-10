@@ -29,6 +29,7 @@ data/
 └── palace/PMD/
     ├── pmd_popmodel_OH_h_family_default_ef_v1.dat
     ├── pmd_popmodel_OH_joint_v2_updated.dat
+    ├── pmd_refcont_canonhyb_v1.dat
     ├── pmd_refcont_joint_native_adam_invsky_p2_10000iter.dat
     ├── pmd_intdata_atom.dat
     ├── pmd_intmodel_Orc.dat
@@ -124,9 +125,25 @@ also retains the preceding OH table for explicit backward-compatible runs:
 - `pmd_popmodel_OH_joint_v2_updated.dat`: preceding frozen repository OH
   population table, retained for backward-compatible explicit selection and
   recording the table used by the Moon/Zodi model training;
-- `pmd_refcont_joint_native_adam_invsky_p2_10000iter.dat`: experimental
-  native-LVM HO2, FeO, and O2Ac continuum export; its header records the
-  unchanged grid, optimizer, source hash, and diagnostic status;
+- `pmd_refcont_canonhyb_v1.dat`: **the default diffuse continuum table since
+  2026-09-10.** Canonical PALACE v1.0 `fcHO2` and `fcFeO` interpolated onto the
+  native LVM grid, with `fcO2Ac` taken verbatim from the native-LVM refit
+  below. The canonical HO2/FeO vectors restore PALACE's species
+  identification -- FeO peaks at 5966 A, matching the 595 nm FeO(VIS)
+  component of Noll et al. (2024), and HO2 is correctly the blue tail of the
+  1.51 um feature with only 4.8% of its emission below 9800 A. The refit
+  O2Ac is kept because canonical O2Ac peaks at 3220 A, outside the LVM band,
+  so only its tail is in range and it runs about twice too high through
+  4200-5900 A. Measured on ten far-arm dark off-ecliptic rows, the fully
+  canonical table costs a factor 1.43 in blue chi2 and biases the median
+  residual to -0.26 sigma; this hybrid recovers that to -0.02 and has the
+  best full-band chi2 of the three variants;
+- `pmd_refcont_joint_native_adam_invsky_p2_10000iter.dat`: the previous
+  default -- experimental native-LVM HO2, FeO, and O2Ac continuum export;
+  its header records the unchanged grid, optimizer, source hash, and
+  diagnostic status. Retained for backward-compatible explicit selection.
+  Its HO2 vector was refit to a 595 nm-peaked shape, duplicating FeO rather
+  than PALACE's near-IR species;
 - `pmd_intdata_atom.dat`: canonical atomic-line/multiplet reference data;
 - `pmd_intmodel_Orc.dat`: canonical oxygen-recombination line model;
 - `pmd_popmodel_O2.dat`: canonical O2 population-model table used by the O2
@@ -159,9 +176,20 @@ python skysub/decompose_parallel.py input.fits \
 
 Both bundled command-line modes select
 `pmd_popmodel_OH_h_family_default_ef_v1.dat` and
-`pmd_refcont_joint_native_adam_invsky_p2_10000iter.dat` by default. Explicit
-`--palace-oh-suffix` and `--palace-diffuse-suffix` values still override those
-defaults.
+`pmd_refcont_canonhyb_v1.dat` by default. Explicit `--palace-oh-suffix` and
+`--palace-diffuse-suffix` values still override those defaults; pass
+`--palace-diffuse-suffix _joint_native_adam_invsky_p2_10000iter` to restore
+the pre-2026-09-10 diffuse table.
+
+The split-zodi mode also applies a **diffuse species-ratio bracket** by
+default (`--diffuse-ratio-bound-dex 0.2`, `--diffuse-ratio-nominal
+0.0396,0.7026,0.2578`): the three diffuse species are individually
+unidentifiable in the LVM band, and the three arms of one exposure disagree
+about `log10(FeO/HO2)` by 0.633 dex at the median when the ratios are free.
+Pass `--diffuse-ratio-bound-dex 0` to disable it. The nominal is FLUX shares
+measured on the corpus being fitted, not PALACE's own reference shares --
+see `decompose_parallel.SPLIT_ZODI_DIFFUSE_RATIO_NOMINAL` for why, and
+re-measure it if the basis or corpus changes.
 
 For a remote clone, the packaged root can be selected explicitly from the Git
 root. Omitting the suffix flags intentionally follows the versions declared by
