@@ -466,12 +466,28 @@ class Diagnostics:
         """
         return self._run('sky_arm_disagreement_floor')
 
-    def wavelength_residual_atlas(self) -> dict:
-        """Notebook cell id=wavelength-residual-atlas.  Body lives in ``diagnostics_cells/wavelength_residual_atlas.py``.
+    def wavelength_residual_atlas(self, size: int = 500,
+                                  seed: int = 42) -> dict:
+        """Wavelength-resolved residual atlas, split moon-down / moon-up.
 
+        ``size``  rows reconstructed.  The figure splits by moon state, so each
+                  panel sees roughly half of this -- which is why the default
+                  is 500 rather than the 200 it was before the split.  Cost is
+                  linear in time (two LSF reconstructions per row) and in
+                  memory (~0.7 MB/row across the residual and per-component
+                  stacks); the figure is aggregate lines only, ~7 MB at any n.
+        ``seed``  numpy rng seed for the sample.
+
+        Body lives in ``diagnostics_cells/wavelength_residual_atlas.py``.
         Returns the persistent exec-globals dict for inspection.
         """
-        return self._run('wavelength_residual_atlas')
+        return self._run(
+            'wavelength_residual_atlas',
+            source_patches=[
+                (r"^n_sample_atlas\s*=\s*\d+", f"n_sample_atlas = {int(size)}"),
+                (r"^rng_seed_atlas\s*=\s*\d+", f"rng_seed_atlas = {int(seed)}"),
+            ],
+        )
 
     def ensemble_spread_calibration(self) -> dict:
         """Notebook cell id=ensemble-spread-calibration.  Body lives in ``diagnostics_cells/ensemble_spread_calibration.py``.
@@ -534,15 +550,28 @@ class Diagnostics:
             ],
         )
 
-    def full_spectrum_batch_rmse(self, size: int = 100,
-                                 seed: int = 42) -> dict:
-        """Sample-based full-spectrum RMSE.  ``size`` = number of rows,
-        ``seed`` = numpy rng seed."""
+    def full_spectrum_batch_rmse(self, size: int = 100, seed: int = 42,
+                                 stroked: int = 60) -> dict:
+        """Sample-based full-spectrum RMSE.
+
+        ``size``    number of rows evaluated -- every statistic uses all of them.
+        ``seed``    numpy rng seed for the phase-stratified sample.
+        ``stroked`` how many of those rows are DRAWN as lines in the residual
+                    figure.  Only the drawing is capped; the RMS envelope, the
+                    histograms and every printed number still use all ``size``
+                    rows.  This is the memory knob: the figure has five
+                    spectrum panels and each line carries 12401 points, so an
+                    uncapped 500-row figure serialises to ~758 MB and kills
+                    the kernel, against ~49 MB at the default 60.  Budget
+                    roughly 0.8 MB per stroked row.
+        """
         return self._run(
             "full_spectrum_batch_rmse",
             source_patches=[
                 (r"^\s*n_sample\s*=\s*\d+", f"    n_sample = {int(size)}"),
                 (r"^\s*rng_seed\s*=\s*\d+", f"    rng_seed = {int(seed)}"),
+                (r"^\s*MAX_RESID_LINES\s*=\s*\d+",
+                 f"    MAX_RESID_LINES = {max(int(stroked), 0)}"),
             ],
         )
 

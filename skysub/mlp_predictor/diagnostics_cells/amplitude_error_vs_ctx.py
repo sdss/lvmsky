@@ -292,29 +292,34 @@ for _fam, _feats_all, _comps in _FIGS:
             if _m.sum() < 40:
                 continue
             _qs = np.unique(np.nanpercentile(_x[_m], np.linspace(0, 100, N_BINS + 1)))
-            _cx, _md, _p025, _p975 = [], [], [], []
+            _cx, _md, _plo, _phi = [], [], [], []
             for _b in range(len(_qs) - 1):
                 _sel = _m & (_x >= _qs[_b]) & (_x <= _qs[_b + 1])
                 if _sel.sum() < 8:
                     continue
                 _cx.append(float(np.median(_x[_sel])))
                 _md.append(float(np.median(_d[_sel])))
-                # 95% RANGE of the rows in the bin, not a standard error on the
-                # median.  The median line alone hides the thing these panels
-                # exist to show: a family can be unbiased in every bin and
-                # still be wildly uncertain in all of them, which is exactly
-                # the moon's situation in dark time.  Percentiles rather than
-                # +/-2 sigma because these distributions have heavy tails --
-                # FeO's std is 0.9 dex against a MAD of 0.038.
-                _p025.append(float(np.nanpercentile(_d[_sel], 2.5)))
-                _p975.append(float(np.nanpercentile(_d[_sel], 97.5)))
+                # +/-1 SIGMA RANGE of the rows in the bin (16th-84th
+                # percentile), not a standard error on the median.  The median
+                # line alone hides the thing these panels exist to show: a
+                # family can be unbiased in every bin and still be wildly
+                # uncertain in all of them, which is exactly the moon's
+                # situation in dark time.
+                #
+                # PERCENTILES, not mean +/- std: these distributions have heavy
+                # tails -- FeO's std is 0.9 dex against a MAD of 0.038 -- so a
+                # std-based band is set by a handful of rows.  16/84 is the
+                # Gaussian-equivalent 1 sigma, and on a heavy-tailed sample it
+                # tracks the bulk instead.
+                _plo.append(float(np.nanpercentile(_d[_sel], 15.865)))
+                _phi.append(float(np.nanpercentile(_d[_sel], 84.135)))
             _r, _c = _k // 3 + 1, _k % 3 + 1
             if len(_cx) > 1:
                 _fig.add_trace(go.Scatter(
-                    x=_cx + _cx[::-1], y=_p975 + _p025[::-1],
+                    x=_cx + _cx[::-1], y=_phi + _plo[::-1],
                     fill='toself', fillcolor=_rgba(_col, 0.13),
                     line=dict(width=0), mode='lines',
-                    name=f'{_nm} 95%', legendgroup=_nm, showlegend=False,
+                    name=f'{_nm} +/-1 sigma', legendgroup=_nm, showlegend=False,
                     hoverinfo='skip'),
                     row=_r, col=_c)
             _fig.add_trace(go.Scatter(
@@ -337,7 +342,8 @@ for _fam, _feats_all, _comps in _FIGS:
                          f'<sub>A = sum_lambda f(lambda) = c . B.sum(axis=1); '
                          f'Delta = log10(A_pred/A_true), + = over-predicted. '
                          f'Flat at zero = brightness transferred correctly; '
-                         f'the band is the 95% range of rows in the bin, so a '
+                         f'the band is the +/-1 sigma (16-84 pct) range of '
+                         f'rows in the bin, so a '
                          f'flat line inside a wide band means unbiased but '
                          f'uncertain.</sub>'),
                    font=dict(size=13), x=0.02, xanchor='left'),

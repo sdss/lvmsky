@@ -30,7 +30,14 @@ _missing = [k for k in required if k not in globals()]
 if _missing:
     raise RuntimeError('Missing kernel state: ' + ', '.join(_missing))
 
-n_sample_atlas = 200
+# Raised from 200 to 500 on 2026-09-10, when the figure gained the moon-up /
+# moon-down split: each panel now sees only half the sample, so 200 left ~100
+# rows per regime behind every percentile band.  Cost is linear in both time
+# (two LSF reconstructions per row) and memory (~0.7 MB per row across the
+# residual and per-component stacks; the figure itself is aggregate lines
+# only, ~7 MB regardless of n).  Override with
+# `diag.wavelength_residual_atlas(size=..., seed=...)`; edit there, not here.
+n_sample_atlas = 500
 rng_seed_atlas = 42
 
 _e10_stem = f'{DECOMP_DATA_ROOT}/{DECOMP_STEM}_every10'
@@ -276,8 +283,11 @@ def _reconstruct_sci_total(coef_row, row_idx, lsf_sigma_fallback):
 
 # Reconstruct N rows: shape (n_pick, n_pix).
 _n_pix = _wave_ref_recon.size
-_resid = np.full((_n_pick, _n_pix), np.nan, dtype=np.float64)
-_truth = np.full((_n_pick, _n_pix), np.nan, dtype=np.float64)
+# float32 like the per-component stacks below: these feed medians and
+# percentiles for display, and float64 doubles the largest allocation in the
+# cell for no visible difference.
+_resid = np.full((_n_pick, _n_pix), np.nan, dtype=np.float32)
+_truth = np.full((_n_pick, _n_pix), np.nan, dtype=np.float32)
 
 # Per-component residual + truth stacks (float32: 2 x 6 groups x ~200 rows x
 # n_pix ~ 120 MB).  The truth stack is what lets the table report each group's
@@ -286,6 +296,8 @@ _resid_comp = {_g: np.full((_n_pick, _n_pix), np.nan, dtype=np.float32)
                for _g in _ATLAS_COMPONENTS}
 _truth_comp = {_g: np.full((_n_pick, _n_pix), np.nan, dtype=np.float32)
                for _g in _ATLAS_COMPONENTS}
+print(f'  atlas stacks: {(2 + 2 * len(_ATLAS_COMPONENTS)) * _n_pick * _n_pix * 4 / 1e6:.0f} MB '
+      f'for {_n_pick} rows x {_n_pix} pixels')
 
 _t0 = _time.perf_counter()
 for _i, _rr in enumerate(sel_rows):
@@ -305,7 +317,9 @@ for _i, _rr in enumerate(sel_rows):
 print(f'  atlas reconstruction: {_time.perf_counter() - _t0:.1f}s '
       f'({_n_pick} rows x 2 spectra)')
 
-# Aggregate residuals per pixel.
+# Aggregate residuals per pixel -- over ALL rows first.  The per-wavelength
+# tables further down consume these, so they keep their meaning; the moon
+# split below is additional, not a replacement.
 _med   = np.nanmedian(_resid, axis=0)
 _p16   = np.nanpercentile(_resid, 16, axis=0)
 _p84   = np.nanpercentile(_resid, 84, axis=0)
@@ -319,54 +333,223 @@ _med_frac = _med   / _denom
 _p16_frac = _p16   / _denom
 _p84_frac = _p84   / _denom
 
-# Plot: three panels (absolute residual with band, fractional, and truth flux for context).
-_fig = make_subplots(rows=3, cols=1, shared_xaxes=True,
-    subplot_titles=('Median pred - true (absolute) with 68% band',
-                    'Median pred - true / truth median (fractional)',
-                    'Median truth flux (reference)'),
-    vertical_spacing=0.06)
+# ---- Moon-up / moon-down split (2026-09-10) -----------------------------
+# The two regimes are different problems, and averaging them hides both.
+# Moon-down rows have no moon component to speak of (the block is pinned at
+# the amplitude floor) and a much fainter sky, so their single-fibre noise is
+# larger in fractional terms; moon-up rows are brighter, so the SAME
+# fractional error is far more visible against the photon floor.  One shared
+# band would be wrong for both, hence a band per panel.
+#
+# Gate: `moon_frac_po` when the ctx carries it, `moon_alt > 0` otherwise.
+# The proxy-fraction gate is the better one -- it cut moon-down contamination
+# from 6.1% to 0.6% where it was measured -- but moon_alt is what
+# naive_baseline and ensemble_spread_calibration use, so which one ran is
+# printed rather than left implicit.
+MOON_DOWN_FRAC_MAX_ATLAS = 0.02 / 3.0
+_ctx_names_split = [str(_c).lower() for _c in e10_triplet['ctx_names']]
+_ctx_sci_split = np.asarray(e10_triplet['ctx_sci'], dtype=np.float64)[sel_pos]
+_moon_up_atlas = None
+_moon_gate_name = None
+if 'moon_frac_po' in _ctx_names_split:
+    _mfp = _ctx_sci_split[:, _ctx_names_split.index('moon_frac_po')]
+    _moon_up_atlas = np.isfinite(_mfp) & (_mfp > MOON_DOWN_FRAC_MAX_ATLAS)
+    _moon_gate_name = f'moon_frac_po > {MOON_DOWN_FRAC_MAX_ATLAS:.4g}'
+elif 'moon_alt' in _ctx_names_split:
+    _malt = _ctx_sci_split[:, _ctx_names_split.index('moon_alt')]
+    _moon_up_atlas = np.isfinite(_malt) & (_malt > 0.0)
+    _moon_gate_name = 'moon_alt > 0'
 
-_fig.add_trace(go.Scatter(x=_wave_ref_recon, y=_p84,
-    mode='lines', line=dict(color='rgba(0,120,220,0.0)'),
-    showlegend=False), row=1, col=1)
-_fig.add_trace(go.Scatter(x=_wave_ref_recon, y=_p16,
-    mode='lines', line=dict(color='rgba(0,120,220,0.0)'),
-    fill='tonexty', fillcolor='rgba(0,120,220,0.20)',
-    showlegend=True, name='68% band (p16..p84)'), row=1, col=1)
-_fig.add_trace(go.Scatter(x=_wave_ref_recon, y=_med,
-    mode='lines', line=dict(color='steelblue', width=1.5),
-    name='median residual'), row=1, col=1)
-_fig.add_shape(type='line', x0=float(_wave_ref_recon[0]),
-               x1=float(_wave_ref_recon[-1]), y0=0.0, y1=0.0,
-               line=dict(color='black', dash='dot', width=1), row=1, col=1)
+_atlas_subsets = []
+if _moon_up_atlas is None:
+    print('  [atlas] neither moon_frac_po nor moon_alt in ctx_names -> '
+          'no moon split; showing all rows in one panel.')
+    _atlas_subsets = [('all rows', np.ones(_n_pick, dtype=bool))]
+else:
+    _n_up = int(_moon_up_atlas.sum())
+    _n_dn = int((~_moon_up_atlas).sum())
+    print(f'  [atlas] moon split on {_moon_gate_name}: '
+          f'{_n_dn} down / {_n_up} up of {_n_pick}')
+    _atlas_subsets = [('moon down', ~_moon_up_atlas), ('moon up', _moon_up_atlas)]
 
-_fig.add_trace(go.Scatter(x=_wave_ref_recon, y=_p84_frac,
-    mode='lines', line=dict(color='rgba(180,50,50,0.0)'),
-    showlegend=False), row=2, col=1)
-_fig.add_trace(go.Scatter(x=_wave_ref_recon, y=_p16_frac,
-    mode='lines', line=dict(color='rgba(180,50,50,0.0)'),
-    fill='tonexty', fillcolor='rgba(180,50,50,0.20)',
-    showlegend=True, name='fractional 68% band'), row=2, col=1)
-_fig.add_trace(go.Scatter(x=_wave_ref_recon, y=_med_frac,
-    mode='lines', line=dict(color='firebrick', width=1.5),
-    name='median fractional residual'), row=2, col=1)
-_fig.add_shape(type='line', x0=float(_wave_ref_recon[0]),
-               x1=float(_wave_ref_recon[-1]), y0=0.0, y1=0.0,
-               line=dict(color='black', dash='dot', width=1), row=2, col=1)
+# ---- Single-fibre photon noise reference band (2026-09-10) --------------
+# The bar this atlas is really being judged against.  The sky model gets
+# subtracted from ONE fibre at a time, not from the stack, so the residual
+# only matters where it rises above the shot noise of a single fibre:
+#
+#     sigma(lambda) = sqrt(flux * sens / (exptime * dwave))     [N_eff = 1]
+#
+# `flux` is the SUBSET's median truth flux per pixel, so each panel's band is
+# "the noise of one fibre on a typical row of that regime" -- the same
+# aggregation its median residual line uses, which is what makes the two
+# comparable.  Wherever the median residual sits inside the band, the model is
+# already below the noise it will be subtracted from and nothing is to be
+# gained there; a residual that leaves the band is real error.
+ATLAS_EXPTIME_S = 900.0   # keep equal to CHI2_EXPTIME_S in the batch-rmse cell
+_atlas_sens = None
+try:
+    from mlp_predictor.noise import (
+        load_absolute_sensitivity as _atlas_load_sens,
+        photon_variance_absolute as _atlas_phot_var)
+    _atlas_sens = np.asarray(_atlas_load_sens(_wave_ref_recon), dtype=np.float64)
+    _atlas_dwave = float(np.median(np.diff(np.asarray(_wave_ref_recon,
+                                                      dtype=np.float64))))
+    # The reconstruction is in FIT units (x FACTOR); the sensitivity is
+    # absolute, so the flux has to go back to native before it is used and the
+    # sigma has to come back afterwards.
+    _atlas_factor = float(globals().get('FACTOR', 1e14))
+except Exception as _exc_sig:
+    print(f'  [atlas] single-fibre noise band unavailable '
+          f'({type(_exc_sig).__name__}: {_exc_sig}); plotting without it.')
 
-_fig.add_trace(go.Scatter(x=_wave_ref_recon, y=_truth_med,
-    mode='lines', line=dict(color='gray', width=1),
-    showlegend=False), row=3, col=1)
 
-_fig.update_yaxes(title_text='pred - true (1e-14)', row=1, col=1)
-_fig.update_yaxes(title_text='(pred - true) / truth_median', row=2, col=1,
-                  range=[-0.5, 0.5])
-_fig.update_yaxes(title_text='truth median flux (1e-14)', row=3, col=1, type='log')
-_fig.update_xaxes(title_text='wavelength [Å]', row=3, col=1)
-_fig.update_layout(height=850, width=1200,
+def _sigma_one_fibre(_truth_med_sub):
+    """+/-1 sigma of ONE fibre, in FIT units, from a median truth spectrum.
+
+    No variance floor: this is a reference band, not a chi2 weight, and a
+    floored sigma would draw a band where there is no signal to speak of.
+    Pixels with non-positive median truth flux simply break the band.
+    """
+    if _atlas_sens is None:
+        return None
+    _fn = np.asarray(_truth_med_sub, dtype=np.float64) / _atlas_factor
+    _var = _atlas_phot_var(_fn[None, :], _atlas_sens,
+                           exptime=ATLAS_EXPTIME_S, dwave=_atlas_dwave,
+                           n_fibres=None)[0]
+    return np.where(np.isfinite(_var) & (_var > 0),
+                    np.sqrt(np.abs(_var)) * _atlas_factor, np.nan)
+
+
+# Per-subset aggregates, in the same shape as the all-rows ones above.
+_atlas_agg = []
+for _sname, _smask in _atlas_subsets:
+    _ns = int(np.count_nonzero(_smask))
+    if _ns == 0:
+        print(f'  [atlas] subset "{_sname}" is empty; skipping its panels.')
+        continue
+    _r = _resid[_smask]
+    _t = _truth[_smask]
+    _a = dict(name=_sname, n=_ns)
+    _a['med'] = np.nanmedian(_r, axis=0)
+    _a['p16'] = np.nanpercentile(_r, 16, axis=0)
+    _a['p84'] = np.nanpercentile(_r, 84, axis=0)
+    _a['truth_med'] = np.nanmedian(_t, axis=0)
+    _a['denom'] = np.where(np.abs(_a['truth_med']) > 1e-30, _a['truth_med'], np.nan)
+    _a['sig'] = _sigma_one_fibre(_a['truth_med'])
+    _atlas_agg.append(_a)
+
+# ---- Figure -------------------------------------------------------------
+# One absolute panel and one fractional panel PER SUBSET, then a shared
+# reference panel showing each subset's median truth flux -- which is what
+# sets its noise band, so it belongs on the same figure.
+_n_sub = len(_atlas_agg)
+_atlas_rows = 2 * _n_sub + 1
+_titles = ([f"Median pred - true (absolute) -- {_a['name']} (n={_a['n']}), "
+            f"68% band + 1-fibre photon noise" for _a in _atlas_agg]
+           + [f"Median (pred - true) / truth -- {_a['name']} (n={_a['n']}), "
+              f"68% band + 1-fibre photon noise" for _a in _atlas_agg]
+           + ['Median truth flux per subset (sets each band above)'])
+_fig = make_subplots(rows=_atlas_rows, cols=1, shared_xaxes=True,
+                     subplot_titles=tuple(_titles),
+                     vertical_spacing=0.035)
+
+_SUB_COLOURS = [('rgba(0,120,220,{a})', 'steelblue'),
+                ('rgba(180,50,50,{a})', 'firebrick'),
+                ('rgba(120,60,180,{a})', 'purple')]
+
+
+def _atlas_band_panel(_row, _lo, _hi, _centre, _sig, _cband, _cline,
+                      _name_band, _name_line, _show_legend, _hover_line):
+    """Noise band (behind), then the 68% band, then the median line."""
+    if _sig is not None:
+        # Added first so it renders underneath.  Two traces: an invisible
+        # upper edge, then the lower edge filling to it.
+        _fig.add_trace(go.Scatter(x=_wave_ref_recon, y=_sig,
+            mode='lines', line=dict(color='rgba(40,140,60,0.0)'),
+            hoverinfo='skip', showlegend=False), row=_row, col=1)
+        _fig.add_trace(go.Scatter(x=_wave_ref_recon, y=-_sig,
+            mode='lines', line=dict(color='rgba(40,140,60,0.0)'),
+            fill='tonexty', fillcolor='rgba(40,140,60,0.22)',
+            name=f'+/-1 sigma, ONE {ATLAS_EXPTIME_S:.0f} s fibre',
+            hovertemplate='%{x:.0f} A<br>sigma_1fib %{y:.4g}<extra></extra>',
+            showlegend=_show_legend), row=_row, col=1)
+    _fig.add_trace(go.Scatter(x=_wave_ref_recon, y=_hi,
+        mode='lines', line=dict(color=_cband.format(a=0.0)),
+        hoverinfo='skip', showlegend=False), row=_row, col=1)
+    _fig.add_trace(go.Scatter(x=_wave_ref_recon, y=_lo,
+        mode='lines', line=dict(color=_cband.format(a=0.0)),
+        fill='tonexty', fillcolor=_cband.format(a=0.20),
+        name=_name_band, showlegend=_show_legend), row=_row, col=1)
+    _fig.add_trace(go.Scatter(x=_wave_ref_recon, y=_centre,
+        mode='lines', line=dict(color=_cline, width=1.5),
+        name=_name_line, showlegend=_show_legend,
+        hovertemplate=_hover_line), row=_row, col=1)
+    _fig.add_shape(type='line', x0=float(_wave_ref_recon[0]),
+                   x1=float(_wave_ref_recon[-1]), y0=0.0, y1=0.0,
+                   line=dict(color='black', dash='dot', width=1),
+                   row=_row, col=1)
+
+
+for _k, _a in enumerate(_atlas_agg):
+    _cband, _cline = _SUB_COLOURS[_k % len(_SUB_COLOURS)]
+    # Absolute.
+    _atlas_band_panel(
+        _k + 1, _a['p16'], _a['p84'], _a['med'], _a['sig'], _cband, _cline,
+        f"68% band -- {_a['name']}", f"median residual -- {_a['name']}",
+        _show_legend=(_k == 0),
+        _hover_line='%{x:.0f} A<br>median resid %{y:.4g}<extra></extra>')
+    # Fractional.
+    _sig_frac = None if _a['sig'] is None else _a['sig'] / _a['denom']
+    _atlas_band_panel(
+        _n_sub + _k + 1, _a['p16'] / _a['denom'], _a['p84'] / _a['denom'],
+        _a['med'] / _a['denom'], _sig_frac, _cband, _cline,
+        f"fractional 68% band -- {_a['name']}",
+        f"median fractional residual -- {_a['name']}",
+        _show_legend=False,
+        _hover_line='%{x:.0f} A<br>median frac %{y:.3%}<extra></extra>')
+    _fig.update_yaxes(title_text='pred - true (1e-14)', row=_k + 1, col=1)
+    _fig.update_yaxes(title_text='(pred - true) / truth', range=[-0.5, 0.5],
+                      row=_n_sub + _k + 1, col=1)
+    # Reference panel: this subset's median truth flux.
+    _fig.add_trace(go.Scatter(x=_wave_ref_recon, y=_a['truth_med'],
+        mode='lines', line=dict(color=_cline, width=1),
+        name=f"truth median -- {_a['name']}", showlegend=True),
+        row=_atlas_rows, col=1)
+
+_fig.update_yaxes(title_text='truth median flux (1e-14)', row=_atlas_rows,
+                  col=1, type='log')
+_fig.update_xaxes(title_text='wavelength [Å]', row=_atlas_rows, col=1)
+_fig.update_layout(height=300 * _atlas_rows + 130, width=1200,
+                   legend=dict(orientation='h', yanchor='bottom', y=1.015,
+                               xanchor='left', x=0.0, font=dict(size=10)),
                    title=f'Wavelength residual atlas (n = {_n_pick} rows, '
                          f'test-representative every10 sample)')
 _fig.show()
+
+# How much of the range is already below the noise it will be subtracted
+# from?  Two readings per subset: the MEDIAN residual (systematic error, what
+# the coloured line shows) and the 68% half-width (per-row scatter).  A model
+# can be unbiased and still noisy, so both matter.
+for _a in _atlas_agg:
+    if _a['sig'] is None:
+        continue
+    _sig = _a['sig']
+    _half = 0.5 * (np.asarray(_a['p84'], float) - np.asarray(_a['p16'], float))
+    _okm = np.isfinite(_sig) & np.isfinite(_a['med'])
+    _okb = np.isfinite(_sig) & np.isfinite(_half)
+    _f_med = (100.0 * np.mean(np.abs(_a['med'][_okm]) <= _sig[_okm])
+              if _okm.any() else np.nan)
+    _f_band = (100.0 * np.mean(_half[_okb] <= _sig[_okb])
+               if _okb.any() else np.nan)
+    print(f"  [atlas] {_a['name']} (n={_a['n']}) vs ONE "
+          f"{ATLAS_EXPTIME_S:.0f} s fibre: median residual inside +/-1 sigma "
+          f"on {_f_med:.1f}% of pixels; 68% half-width inside on "
+          f"{_f_band:.1f}%.")
+    _rat = np.abs(_a['med'][_okm]) / _sig[_okm]
+    if _rat.size:
+        print(f"  [atlas] {_a['name']}: |median residual| / sigma_1fib -- "
+              f"p50 {np.median(_rat):.3g}, p90 "
+              f"{np.percentile(_rat, 90):.3g}, max {_rat.max():.3g}")
 
 # Compact summary: RMS of the median residual by band.
 _bands = [('blue    3600-5500', 3600.0, 5500.0),

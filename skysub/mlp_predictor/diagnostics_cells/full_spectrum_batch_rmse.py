@@ -35,6 +35,21 @@ else:
     n_sample = 100
     rng_seed = 42
 
+    # Cap on the number of per-row LINES drawn in the residual figure.
+    # Overridden by the `stroked=` kwarg of Diagnostics.full_spectrum_batch_rmse,
+    # which rewrites this literal; edit there, not here.  The statistics below
+    # always use all n_sample rows -- this only limits what is stroked,
+    # because the cost of a line is enormous and its value collapses fast.  Each line carries 12401 points, and the figure has FIVE spectrum
+    # panels, so the payload is 5 x n_lines x 12401 numbers: measured as JSON,
+    # 152 MB at n=100, 303 MB at n=200 and 758 MB at n=500 -- and the kernel
+    # holds the figure, the JSON and the frontend copy at once.  That is what
+    # kills the kernel above ~200 rows, not the reconstruction loop.
+    #
+    # 60 lines is already past the point where more ink adds information:
+    # they overlap into a band, and the RMS envelope and the right-column
+    # histograms -- both computed from ALL rows -- are what the eye reads.
+    MAX_RESID_LINES = 60
+
     # 1) Build aligned triplet rows, keeping chi2 so we can apply the same
     #    quality gates the training set went through.
     e10_triplet = build_triplet_coef_dataset(
@@ -231,11 +246,15 @@ else:
 
     # 2) Load observed spectra, wavelength grid, and LSF from the same input file.
     with fits.open(EVERY10_INPUT) as hdul:
-        flux_near_all = np.asarray(hdul["FLUX_SKY_NEAR"].data, dtype=np.float64)
-        flux_far_all = np.asarray(hdul["FLUX_SKY_FAR"].data, dtype=np.float64)
-        flux_sci_all = np.asarray(hdul["FLUX_SCI"].data, dtype=np.float64)
+        # float32, as stored on disk.  These are whole 1447 x 12401 planes and
+        # promoting four of them to float64 costs 576 MB against 288 MB for no
+        # gain: every row is cast to float64 individually inside the loop
+        # below, which is where the arithmetic happens.
+        flux_near_all = np.asarray(hdul["FLUX_SKY_NEAR"].data, dtype=np.float32)
+        flux_far_all = np.asarray(hdul["FLUX_SKY_FAR"].data, dtype=np.float32)
+        flux_sci_all = np.asarray(hdul["FLUX_SCI"].data, dtype=np.float32)
         wave_arr = np.asarray(hdul["WAVE"].data, dtype=np.float64)
-        lsf_sci_arr = np.asarray(hdul["LSF_SCI"].data, dtype=np.float64)
+        lsf_sci_arr = np.asarray(hdul["LSF_SCI"].data, dtype=np.float32)
         # expnum per every10 row for the per-line hover tooltip on the residual figure.
         _expnum_all = None
         if "META" in hdul:
@@ -448,7 +467,10 @@ else:
     for i, r in enumerate(sel_rows):
         rr = int(r)
         wave_row = wave_arr if wave_arr.ndim == 1 else np.asarray(wave_arr[rr], dtype=np.float64)
-        lsf_row = lsf_sci_arr if lsf_sci_arr.ndim == 1 else np.asarray(lsf_sci_arr[rr], dtype=np.float64)
+        # Cast in BOTH branches: lsf_sci_arr is float32 on disk, and the
+        # 1-D branch would otherwise leak float32 into _lsf_sigma_fallback.
+        lsf_row = np.asarray(lsf_sci_arr if lsf_sci_arr.ndim == 1
+                             else lsf_sci_arr[rr], dtype=np.float64)
 
         flux_near_true = np.asarray(flux_near_all[rr], dtype=np.float64)
         flux_far_true = np.asarray(flux_far_all[rr], dtype=np.float64)
@@ -612,6 +634,13 @@ else:
     sci_zodi_arr = np.vstack(sci_zodi_resid_rows) * FACTOR
     sci_diffuse_arr = np.vstack(sci_diffuse_resid_rows) * FACTOR
     sci_lines_arr = np.vstack(sci_lines_resid_rows) * FACTOR
+    # The per-component lists are dead once stacked, and each is n_use x 12401
+    # float64 -- 50 MB apiece at n_use=500, 200 MB across the four, held for
+    # the whole rest of the cell for nothing.  (sci_resid_rows, sci_obs_rows
+    # and sci_wave_rows are NOT freed: the chi2 block and the ragged-grid
+    # branch still read them.)
+    del sci_moon_resid_rows, sci_zodi_resid_rows
+    del sci_diffuse_resid_rows, sci_lines_resid_rows
     wave_ref = sci_wave_rows[0]
     same_grid = all(
         (w.shape == wave_ref.shape) and np.allclose(w, wave_ref, rtol=0.0, atol=1e-8)
@@ -652,6 +681,7 @@ else:
             return ""
         return f" | expnum {_e}"
 
+    _wave_ref32 = np.asarray(wave_ref, dtype=np.float32)
     _panels = [
         ("total",   sci_resid_arr),
         ("moon",    sci_moon_arr),
@@ -665,6 +695,23 @@ else:
         "turbo",
         [j / max(n_use - 1, 1) for j in range(n_use)],
     )
+    # Which rows get STROKED.  Everything below that aggregates -- the RMS
+    # envelope, the right-column histograms, every printed statistic -- still
+    # uses all n_use rows; see MAX_RESID_LINES for why the drawing is capped.
+    # np.linspace over the row order is deliberate rather than random: the
+    # sample is phase-stratified and sel_pos is sorted, so an even stride
+    # spans the lunation range instead of clumping in whichever bin a random
+    # draw favoured.
+    if n_use <= MAX_RESID_LINES:
+        _line_idx = np.arange(n_use)
+    else:
+        _line_idx = np.unique(
+            np.linspace(0, n_use - 1, MAX_RESID_LINES).round().astype(int))
+    _n_lines = int(_line_idx.size)
+    if _n_lines < n_use:
+        print(f"  residual figure: stroking {_n_lines} of {n_use} rows "
+              f"(MAX_RESID_LINES); the RMS band, the histograms and every "
+              f"number use all {n_use}.")
     # (percent enclosed, color, dash) for the per-row median-residual histograms.
     _sigma_specs = [
         (68.27, "rgba(200, 60, 60, 0.95)", "solid"),
@@ -673,7 +720,8 @@ else:
     ]
     for _row_i, (_pname, _arr) in enumerate(_panels, start=1):
         if same_grid:
-            for i in range(n_use):
+            for i in _line_idx:
+                i = int(i)
                 _rid = int(sel_rows[i])
                 _hover = (
                     f"{_row_label[i]}<br>"
@@ -681,9 +729,11 @@ else:
                     f"Δ_{_pname}=%{{y:.4g}}"
                     "<extra></extra>"
                 )
+                # float32 on the wire: these are display strokes, and the
+                # payload is the binding constraint here, not precision.
                 fig_resid.add_trace(
                     go.Scattergl(
-                        x=wave_ref, y=_arr[i],
+                        x=_wave_ref32, y=_arr[i].astype(np.float32),
                         mode="lines",
                         line=dict(width=0.8, color=_row_colors[i]),
                         opacity=0.7,
@@ -716,7 +766,8 @@ else:
                 row=_row_i, col=1,
             )
         else:
-            for i in range(n_use):
+            for i in _line_idx:
+                i = int(i)
                 _rid = int(sel_rows[i])
                 _hover = (
                     f"{_row_label[i]}<br>"
@@ -726,7 +777,8 @@ else:
                 )
                 fig_resid.add_trace(
                     go.Scattergl(
-                        x=sci_wave_rows[i], y=_arr[i],
+                        x=sci_wave_rows[i].astype(np.float32),
+                        y=_arr[i].astype(np.float32),
                         mode="lines",
                         line=dict(width=0.8, color=_row_colors[i]),
                         opacity=0.7,
@@ -798,10 +850,13 @@ else:
     fig_resid.update_yaxes(title_text="pred - recon(true) [lines]",   row=5, col=1)
     fig_resid.update_layout(
         template="plotly_white",
-        title=(f"SCI + per-component residuals (n={n_use} spectra, "
-               f"display units x{FACTOR:.3g}). Hover any line for row_idx + expnum. "
-               f"Gray band = ± RMS(λ) across rows; right-column histograms "
-               f"show the per-row median residual with empirical ±1σ/2σ/3σ percentiles."),
+        title=(f"SCI + per-component residuals (n={n_use} spectra"
+               + (f", {_n_lines} stroked" if _n_lines < n_use else "")
+               + f", display units x{FACTOR:.3g}). Hover any line for row_idx "
+               f"+ expnum. Gray band = ± RMS(λ) across ALL {n_use} rows; "
+               f"right-column histograms show the per-row median residual "
+               f"across ALL {n_use} rows, with empirical ±1σ/2σ/3σ "
+               f"percentiles."),
         height=1500,
         margin=dict(l=80, r=20, t=110, b=60),
         showlegend=False,
@@ -839,9 +894,20 @@ else:
     # Nothing is normalised away here, so the ABSOLUTE level is now readable:
     # values >> 1 are real reconstruction error above the noise.
     #
-    # The fibre count matters HERE and not in the training loss: it is a
-    # per-row scalar, so it cancels exactly in the row-normalised loss weights
-    # but sets the absolute sigma this panel needs.
+    # SINGLE FIBRE, deliberately (2026-09-10).  The corpus rows are median
+    # stacks of a median 536 sci fibres, but the sky model is going to be
+    # subtracted from ONE fibre at a time, and it is that subtraction the
+    # error budget has to survive.  So N_eff is left at 1 here: sigma is the
+    # noise of a single 900 s fibre observing this sky, which is sqrt(536 *
+    # 2/pi) ~ 18x larger than the stack's, and the reduced chi2 is
+    # correspondingly ~340x smaller than the stacked-noise version.
+    #
+    # Read it as: chi2 < 1 means the reconstruction error is buried under the
+    # shot noise of the single fibre it will be subtracted from, which is the
+    # only bar that matters downstream.  Set CHI2_SINGLE_FIBRE = False to get
+    # the stacked-noise view instead -- that is the right comparison against
+    # the DECOMPOSITION's own residual, which was fitted to the stack.
+    CHI2_SINGLE_FIBRE = True
     #
     # META carries no exposure time, so 900 s -- the LVM standard science
     # exposure and the trainer's `flux_exptime_s` default -- is assumed here
@@ -849,6 +915,21 @@ else:
     # this equal to the trainer's value or the panel stops being comparable
     # to the loss.
     CHI2_EXPTIME_S = 900.0
+    #
+    # Blue cut for the second panel.  Redward of this the OH forest dominates
+    # the pixel budget, so a full-band chi2 is largely a statement about OH
+    # residuals and hides how the continuum -- moon, zodi, diffuse, which is
+    # what this predictor is actually for -- is doing.  4800 of 12401 pixels
+    # survive the cut.
+    #
+    # Do NOT read a lower blue chi2 as a better blue reconstruction.  The sky
+    # is fainter blueward of 6000 A, so the single-fibre sigma/flux is LARGER
+    # there and the same fractional error buys a smaller chi2.  Measured on
+    # the decomposition's own fit (100 rows, single-fibre noise): full band
+    # median 4.0, blue 1.3.  The panels answer "is this row's error above the
+    # noise", separately in each region; they are not a like-for-like ranking
+    # of the two regions.
+    CHI2_BLUE_MAX_A = 6000.0
     try:
         from mlp_predictor.noise import (load_absolute_sensitivity as _load_sens_abs,
                                          photon_variance_absolute as _phot_var_abs,
@@ -863,6 +944,7 @@ else:
               'skipping the photon chi2 panel.')
         _chi2_ok = False
     _chi2_ph = None
+    _chi2_blue = None
     if _chi2_ok and sci_obs_rows:
         _obs_a = np.vstack(sci_obs_rows)
         _res_a = np.vstack(sci_resid_rows)
@@ -870,9 +952,10 @@ else:
         # NATIVE dispersion: these rows are reconstructed on the full grid, not
         # the strided one the flux loss subsamples, so no stride factor here.
         _dwave_c2 = float(np.median(np.diff(wave_ref)))
-        # Per-row fibre count, same column preference as the trainer.  It is a
-        # ~10x effect between the sci arm (median 536 fibres) and the sky arms,
-        # so leaving it out would put the absolute level 3.3x off in sigma.
+        # Per-row fibre count, same column preference as the trainer.  Read
+        # even in single-fibre mode: it is not used for the variance there,
+        # but it is what says how far below the stack this sigma sits, and a
+        # reader needs that number to relate the panel to the decomposition.
         _nfib = None
         _meta_c2 = globals().get('_meta_e10')
         if _meta_c2 is not None:
@@ -882,12 +965,15 @@ else:
                     _nfib = np.asarray(_meta_c2[_cu[_c]],
                                        dtype=np.float64)[np.asarray(sel_rows, dtype=int)]
                     break
-        if _nfib is None:
-            print('  [chi2] META carries no fibre count; the absolute level '
+        if _nfib is None and not CHI2_SINGLE_FIBRE:
+            print('  [chi2] META carries no fibre count; the stacked level '
                   'below is per-fibre and so is an OVER-estimate.')
+        _nfib_var = None if CHI2_SINGLE_FIBRE else _nfib
         _var_c2 = _floor_var(_phot_var_abs(_obs_a, _sens,
                                            exptime=CHI2_EXPTIME_S,
-                                           dwave=_dwave_c2, n_fibres=_nfib))
+                                           dwave=_dwave_c2, n_fibres=_nfib_var))
+        _c2_mode = ('single fibre' if CHI2_SINGLE_FIBRE
+                    else 'median stack of the row\'s fibres')
         # The mask does NOT require obs > 0: the loss keeps non-positive pixels
         # by mapping them to the row's median variance, and excluding them here
         # would measure a different noise model from the one being tested.
@@ -899,75 +985,118 @@ else:
         # gained -- it would force the median to 1 and make the axis a
         # relative spread again, which is what it was before 2026-09-09.
         _chi2_ph = np.nanmean(_pull2, axis=1)
-        _lg = np.log10(np.where(np.isfinite(_chi2_ph) & (_chi2_ph > 0),
-                                _chi2_ph, np.nan))
-        _lgf = _lg[np.isfinite(_lg)]
+        # LINEAR chi2 (2026-09-10).  On the single-fibre scale the whole
+        # distribution lives inside one decade, so a log axis buys nothing and
+        # costs the reader the ability to see how far past 1 the bulk sits.
+        _c2f = _chi2_ph[np.isfinite(_chi2_ph)]
+
+        # SECOND PANEL: the same chi2 over the blue side only (2026-09-10),
+        # which is the continuum-sensitive one.  See CHI2_BLUE_MAX_A above.
+        _wr = np.asarray(wave_ref, dtype=np.float64)
+        _blue_m = np.isfinite(_wr) & (_wr < CHI2_BLUE_MAX_A)
+        _n_blue_pix = int(_blue_m.sum())
+        _chi2_blue = (np.nanmean(_pull2[:, _blue_m], axis=1) if _n_blue_pix
+                      else np.full(_chi2_ph.shape, np.nan))
+        _c2b = _chi2_blue[np.isfinite(_chi2_blue)]
+        # Both chi2 vectors are now n_use-long scalars; the n_use x 12401
+        # intermediates behind them are dead.  Four of them at 50 MB each on
+        # a 500-row sample, and the figure below still has to be built.
+        # Take the row count first -- the figure title below needs it.
+        _n_c2_rows = int(_obs_a.shape[0])
+        del _pull2, _var_c2, _res_a, _obs_a, _good
 
         _figc = _make_subplots_resid(
             rows=1, cols=2, column_widths=[0.5, 0.5], horizontal_spacing=0.10,
-            subplot_titles=("reduced chi2 per row  (log scale)",
-                            "median pull^2 vs wavelength"))
-        _figc.add_trace(go.Histogram(
-            x=_lgf, nbinsx=36, marker=dict(color="#1f78b4"), showlegend=False,
-            hovertemplate="chi2_red=10^%{x:.2f}<br>n=%{y}<extra></extra>"),
-            row=1, col=1)
-        if _lgf.size:
-            # Data-driven range.  Do NOT pad out to include 0: the absolute
-            # chi2 sits near 1e4, so forcing the photon limit on-scale would
-            # squeeze the whole distribution into the last 5% of the axis.
-            _lo_x = float(np.percentile(_lgf, 1))
-            _hi_x = float(np.percentile(_lgf, 99))
-            if _hi_x - _lo_x < 0.4:
-                _lo_x, _hi_x = _lo_x - 0.2, _hi_x + 0.2
-            _figc.update_xaxes(range=[_lo_x - 0.15, _hi_x + 0.15], row=1, col=1)
-            if _lo_x - 0.15 <= 0.0 <= _hi_x + 0.15:
-                _figc.add_vline(x=0.0, line=dict(color="black", width=1,
-                                                 dash="dash"), row=1, col=1)
+            subplot_titles=(f"full band  ({_wr.size} px)",
+                            f"blue of {CHI2_BLUE_MAX_A:.0f} A only, OH-poor  "
+                            f"({_n_blue_pix} px)"))
+
+        def _c2_panel(_v, _col, _colour):
+            """One linear chi2 histogram, with a robust display range.
+
+            Upper edge from TUKEY'S FENCE, q75 + 3*IQR, not a percentile.  The
+            distribution has a hard tail -- a handful of rows run 100x the
+            median -- and on a 100-row sample the 99th percentile IS
+            essentially the second-largest value, so a percentile cut puts the
+            whole bulk in the first bin.  Measured on the decomposition
+            residual the fence lands at 17-22 across seeds and keeps 87-91% of
+            rows on-scale; p99 landed at 336-5150.  Clipped rows are counted
+            in the annotation, never dropped from the statistics.
+            """
+            _vf = np.asarray(_v, dtype=np.float64)
+            _vf = _vf[np.isfinite(_vf)]
+            _lo = 0.0
+            if _vf.size:
+                _q25, _q75 = np.percentile(_vf, [25, 75])
+                _hi = float(_q75 + 3.0 * (_q75 - _q25))
+                _p99 = float(np.percentile(_vf, 99))
+                if np.isfinite(_p99):
+                    _hi = min(_hi, _p99)   # a tight distribution needs no fence
+                if not np.isfinite(_hi) or _hi <= 0:
+                    _hi = float(np.nanmax(_vf))
             else:
+                _hi = 1.2
+            _hi = max(_hi, 1.2)   # always keep the photon limit on-scale
+            _figc.add_trace(go.Histogram(
+                x=_vf, xbins=dict(start=_lo, end=_hi, size=(_hi - _lo) / 36.0),
+                marker=dict(color=_colour), showlegend=False,
+                hovertemplate="chi2_red=%{x:.3g}<br>n=%{y}<extra></extra>"),
+                row=1, col=_col)
+            _figc.update_xaxes(range=[_lo, _hi * 1.02], row=1, col=_col)
+            # 1 = the reconstruction error equals the noise it is measured
+            # against; kept on-scale by the max() above so the reference mark
+            # is always there.
+            _figc.add_vline(x=1.0, line=dict(color="black", width=1,
+                                             dash="dash"), row=1, col=_col)
+            if _vf.size:
+                _n_out = int(np.sum(_vf > _hi))
+                _txt = f"median {np.median(_vf):.3g}"
+                if _n_out:
+                    _txt += (f"<br>{_n_out} rows above {_hi:.3g}"
+                             f"<br>(max {float(_vf.max()):.3g})")
                 _figc.add_annotation(
-                    x=0.02, y=0.95, xref="x domain", yref="y domain",
-                    text="photon limit (1) is off-scale left", showarrow=False,
-                    xanchor="left", font=dict(size=10, color="#666666"),
-                    row=1, col=1)
-            _n_out = int(np.sum((_lgf < _lo_x) | (_lgf > _hi_x)))
-            if _n_out:
-                _figc.add_annotation(
-                    x=0.98, y=0.88, xref="x domain", yref="y domain",
-                    text=f"{_n_out} outside", showarrow=False,
-                    font=dict(size=10, color="#666666"), row=1, col=1)
-        # Where in wavelength does the reconstruction fail relative to photon
-        # noise?  In absolute units now, so 1 is the photon limit.
-        _pw = np.nanmedian(_pull2, axis=0)
-        _figc.add_trace(go.Scattergl(
-            x=wave_ref, y=_pw, mode="lines", showlegend=False,
-            line=dict(color="#33a02c", width=1.0),
-            hovertemplate="%{x:.0f} A<br>median pull^2 %{y:.3g}<extra></extra>"),
-            row=1, col=2)
-        _pwf = _pw[np.isfinite(_pw)]
-        if _pwf.size:
-            _figc.update_yaxes(type="log", row=1, col=2,
-                               range=[np.log10(max(np.percentile(_pwf, 1), 1e-6)) - 0.2,
-                                      np.log10(max(np.percentile(_pwf, 99.5), 1e-5)) + 0.2])
+                    x=0.98, y=0.94, xref="x domain", yref="y domain",
+                    text=_txt, showarrow=False, xanchor="right", align="right",
+                    font=dict(size=10, color="#666666"), row=1, col=_col)
+
+        _c2_panel(_c2f, 1, "#1f78b4")
+        _c2_panel(_c2b, 2, "#6a3d9a")
         _q = np.nanpercentile(_chi2_ph, [10, 90])
         _figc.update_layout(
             template="plotly_white", height=380,
-            title=dict(text=(f"SCI reconstruction vs the PHOTON noise model "
-                             f"(n={_obs_a.shape[0]} rows)<br><sub>ABSOLUTE reduced "
-                             f"chi2 -- 1 = at the photon limit.  p10/p50/p90 = "
+            title=dict(text=(f"SCI reconstruction vs the PHOTON noise of a "
+                             f"{_c2_mode.upper()} "
+                             f"(n={_n_c2_rows} rows)<br><sub>ABSOLUTE reduced "
+                             f"chi2 -- 1 = the reconstruction error equals the "
+                             f"shot noise of one {CHI2_EXPTIME_S:.0f} s "
+                             f"{_c2_mode}, which is what the sky model will be "
+                             f"subtracted from.  p10/p50/p90 = "
                              f"{_q[0]:.3g} / {float(np.nanmedian(_chi2_ph)):.3g} / "
                              f"{_q[1]:.3g}</sub>"),
                        font=dict(size=13), x=0.02, xanchor="left"),
             margin=dict(t=110))
-        _figc.update_xaxes(title_text="log10(reduced chi2)", row=1, col=1)
+        _figc.update_xaxes(title_text="reduced chi2", row=1, col=1)
         _figc.update_yaxes(title_text="rows", row=1, col=1)
-        _figc.update_xaxes(title_text="wavelength [A]", row=1, col=2)
-        _figc.update_yaxes(title_text="median pull^2", row=1, col=2)
+        _figc.update_xaxes(title_text="reduced chi2", row=1, col=2)
+        _figc.update_yaxes(title_text="rows", row=1, col=2)
         _figc.show()
-        print(f"  [chi2] ABSOLUTE reduced chi2 vs the photon model: median "
-              f"{float(np.nanmedian(_chi2_ph)):.4g}, p10 {_q[0]:.4g}, "
-              f"p90 {_q[1]:.4g}, max {float(np.nanmax(_chi2_ph)):.4g}"
-              + ("" if _nfib is None else
-                 f"; fibres/row median {np.nanmedian(_nfib):.0f}"))
+        print(f"  [chi2] ABSOLUTE reduced chi2 vs the {_c2_mode} photon "
+              f"model: median {float(np.nanmedian(_chi2_ph)):.4g}, "
+              f"p10 {_q[0]:.4g}, p90 {_q[1]:.4g}, "
+              f"max {float(np.nanmax(_chi2_ph)):.4g}")
+        if _c2b.size:
+            _qb = np.nanpercentile(_chi2_blue, [10, 90])
+            print(f"  [chi2] blue of {CHI2_BLUE_MAX_A:.0f} A only "
+                  f"({_n_blue_pix} of {_wr.size} px, OH-poor): median "
+                  f"{float(np.nanmedian(_chi2_blue)):.4g}, p10 {_qb[0]:.4g}, "
+                  f"p90 {_qb[1]:.4g}   <- continuum-sensitive; not "
+                  f"comparable to the full-band number above (fainter sky "
+                  f"there means a larger sigma/flux)")
+        if CHI2_SINGLE_FIBRE and _nfib is not None:
+            _fac = float(np.nanmedian(_nfib)) * (2.0 / np.pi)
+            print(f"  [chi2] single-fibre sigma; the rows are stacks of a "
+                  f"median {np.nanmedian(_nfib):.0f} fibres, so against the "
+                  f"STACK this chi2 would be ~{_fac:.0f}x larger.")
 
     rmse_subset_results = {
         "row_positions": sel_pos,
@@ -987,4 +1116,8 @@ else:
         "summary_display": summary_disp_df,
         "sci_residuals": sci_resid_arr,
         "chi2_photon": _chi2_ph,   # ABSOLUTE reduced chi2; see the panel
+        # Same, over lambda < CHI2_BLUE_MAX_A only: OH dominates the red half
+        # and swamps the continuum this predictor exists to get right.
+        "chi2_photon_blue": _chi2_blue,
+        "chi2_blue_max_a": CHI2_BLUE_MAX_A,
     }

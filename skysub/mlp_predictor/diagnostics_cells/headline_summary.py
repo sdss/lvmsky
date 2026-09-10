@@ -69,12 +69,29 @@ if _have['full_spectrum_batch_rmse']:
         _c2 = np.asarray(_c2, dtype=float); _c2 = _c2[np.isfinite(_c2)]
         if _c2.size:
             print(f"  reduced chi2   median {np.median(_c2):.4g}  "
-                  f"p90 {np.percentile(_c2, 90):.4g}   (ABSOLUTE: 1 = at the "
-                  f"photon limit)")
-            print(f"                 the DECOMPOSITION's own fit to the same "
-                  f"rows sits near 1e3 (p10 26, p90 5e3, random 300 every10 "
-                  f"rows), so that,\n                 not 1, is the floor a "
-                  f"coefficient prediction can reach.")
+                  f"p90 {np.percentile(_c2, 90):.4g}   (ABSOLUTE, vs ONE "
+                  f"900 s fibre's shot noise)")
+            print(f"                 1 = the reconstruction error is at the "
+                  f"noise of the single fibre it will be\n"
+                  f"                 subtracted from.  The DECOMPOSITION's own "
+                  f"fit sits at 4.2 on this scale\n"
+                  f"                 (p10 1.9, p90 22; random 300 every10 sci "
+                  f"rows), so ~4, not 1, is the\n"
+                  f"                 floor a coefficient prediction can reach.")
+    _c2b = _rs.get('chi2_photon_blue')
+    if _c2b is not None:
+        _c2b = np.asarray(_c2b, dtype=float); _c2b = _c2b[np.isfinite(_c2b)]
+        if _c2b.size:
+            _cut = _rs.get('chi2_blue_max_a') or 6000.0
+            print(f"  blue < {_cut:.0f} A  median {np.median(_c2b):.4g}  "
+                  f"p90 {np.percentile(_c2b, 90):.4g}   (OH-poor, so this is "
+                  f"the CONTINUUM's chi2)")
+            print(f"                 not comparable to the full-band number: "
+                  f"the sky is fainter blueward, so\n"
+                  f"                 sigma/flux is larger and the same "
+                  f"fractional error scores lower.  The\n"
+                  f"                 DECOMPOSITION's own floor here is 1.1 "
+                  f"(p10 0.31, p90 15).")
 
 print('=' * 78)
 headline_summary_result = dict(available=_have)
