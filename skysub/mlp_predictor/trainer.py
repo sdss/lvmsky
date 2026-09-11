@@ -714,6 +714,9 @@ def train_compressed_group_mlp(
     flux_pixel_weight=None,
     flux_basis_matrices=None,
     flux_geom_sc_sci=None,
+    # 2026-09-11: native-grid per-coefficient template integrals, used to make
+    # the empirical mean-bias calibration correct the FLUX-weighted amplitude.
+    calib_amplitude_weights=None,
     # 2026-08-21 tight-mask bright-moon row boost (Phase A'').
     # Heteroscedastic-Gaussian loss weighting from decomposition COEF_ERR.
     coef_err_sigma_floor_rel=None,
@@ -1344,6 +1347,18 @@ def train_compressed_group_mlp(
     # dominated the estimator.  Stored as a uniform per-coefficient array so
     # `inverse_group_compressor` continues to accept the same shape.
     jensen_corrections = {}
+    # Which functional each scalar lift was fitted on, and the two means behind
+    # it, so the summary table reports the numbers the lift actually came from
+    # rather than recomputing an unweighted mean that no longer matches.
+    _calib_lift_basis = {}
+    _calib_lift_means = {}
+    _calib_amp_w = (np.asarray(calib_amplitude_weights, dtype=np.float64)
+                    if calib_amplitude_weights is not None else None)
+    if _calib_amp_w is not None and _calib_amp_w.size != int(coef_sci.shape[1]):
+        raise ValueError(
+            f'calib_amplitude_weights has {_calib_amp_w.size} entries but there '
+            f'are {int(coef_sci.shape[1])} coefficients; it must be aligned to '
+            f'coef_names or the lift would weight the wrong coefficients.')
     _calib_idx = np.concatenate([train_idx, val_idx]).astype(int)
     model.eval()
     with torch.no_grad():
@@ -1450,14 +1465,62 @@ def train_compressed_group_mlp(
                   f'{_lift_pc_clipped.max():.3f}] median={float(np.median(_lift_pc_clipped)):.3f} '
                   f'(clip range {_pc_clip})')
             continue
-        _mean_true = float(np.mean(_calib_true_phys[:, _gidx]))
-        _mean_pred = float(np.mean(_calib_pred_phys_naive[:, _gidx]))
+        # 2026-09-11: the scalar lift is fitted on the FLUX-WEIGHTED amplitude
+        # A_g = c_g . w_g, not on the unweighted mean coefficient.
+        #
+        # Why this had to change.  What the delivered sky spectrum depends on is
+        # the linear functional A_g, with w_g the per-coefficient template
+        # integral; mean(c_g) is a different functional, and for a group whose
+        # basis functions have very different integrals the two disagree in
+        # SIGN.  Measured on gaia-stars-mask-cont (956 filtered every10 rows,
+        # 10-seed ensemble): across the 357 OH sticks w spans 1.4e9x and
+        # rho(w, mean true coef) = -0.488 -- the template integral is
+        # ANTI-correlated with coefficient size, so the unweighted mean is
+        # dominated by exactly the sticks that carry the least flux.  The lift
+        # that came out was x0.98566 (scaling OH down) where the flux needed
+        # x1.0209 (up), which took the OH band-integrated bias from -0.38%
+        # before calibration to -1.81% after: the correction had the wrong sign
+        # for the functional that matters, and OH carries 72-78% of the
+        # band-integrated flux error tail.
+        #
+        # The same failure was already diagnosed for `continuum` on 2026-09-04
+        # (see `_precompute_flux_basis_and_geometry`) and patched there by
+        # wiring up its flux-space loss term; this fixes the calibration itself,
+        # which is the step that actually sets the mean bias.
+        #
+        # Corroboration that the functional is the whole story: the two groups
+        # that already used PER-COEFFICIENT lifts came out unbiased in amplitude
+        # (moon -0.00225 dex, zodi -0.00000) while both scalar-lift groups did
+        # not (continuum +0.00169, mesospheric -0.00793), ordered exactly by how
+        # far their template integrals spread (109x, 3.4x, 11.7x, 1.4e9x).
+        #
+        # Coefficients with no static basis get w = 0 and so drop out of the
+        # FIT (O2_b01, whose template is the per-row VECTOR_O2).  The resulting
+        # scalar still multiplies them, exactly as before -- a uniform per-group
+        # lift is all `inverse_group_compressor` accepts, and O2_b01's flux is
+        # not separable here to do better.
+        _w_g = None
+        if _calib_amp_w is not None:
+            _w_try = np.asarray(_calib_amp_w, dtype=np.float64)[_gidx]
+            if np.any(np.isfinite(_w_try) & (_w_try > 0.0)):
+                _w_g = np.where(np.isfinite(_w_try), np.clip(_w_try, 0.0, None), 0.0)
+        if _w_g is None:
+            _mean_true = float(np.mean(_calib_true_phys[:, _gidx]))
+            _mean_pred = float(np.mean(_calib_pred_phys_naive[:, _gidx]))
+            _lift_basis = 'mean coefficient (no basis weights)'
+        else:
+            _mean_true = float(np.mean(_calib_true_phys[:, _gidx] @ _w_g))
+            _mean_pred = float(np.mean(_calib_pred_phys_naive[:, _gidx] @ _w_g))
+            _lift_basis = 'flux amplitude'
+        _calib_lift_basis[_gname] = _lift_basis
+        _calib_lift_means[_gname] = (_mean_true, _mean_pred)
         _rel_mag = abs(_mean_pred) / max(abs(_mean_true), 1e-30)
         if (not np.isfinite(_mean_true) or not np.isfinite(_mean_pred)
                 or _mean_true * _mean_pred <= 0.0
                 or _rel_mag < 0.05):
-            print(f'Calibration: {_gname} skipped (degenerate or near-zero mean; '
-                  f'true={_mean_true:.4g}, pred_naive={_mean_pred:.4g}).')
+            print(f'Calibration: {_gname} skipped (degenerate or near-zero '
+                  f'{_lift_basis}; true={_mean_true:.4g}, '
+                  f'pred_naive={_mean_pred:.4g}).')
             continue
         _raw_lift = _mean_true / _mean_pred
         _lift = float(np.clip(_raw_lift, _CALIB_LIFT_CLIP[0], _CALIB_LIFT_CLIP[1]))
@@ -1468,11 +1531,16 @@ def train_compressed_group_mlp(
     if jensen_corrections:
         print('Empirical per-group mean-bias calibration (train+val rows, uniform per-group scalar):')
         print(f"  {'group':<14s} {'n_g':>4s} {'mean_true':>10s} {'mean_pred_naive':>16s} "
-              f"{'lift':>7s} {'delta_%':>8s}")
+              f"{'lift':>7s} {'delta_%':>8s}  fitted on")
         for _gname, _corr in jensen_corrections.items():
             _gidx = np.asarray(compressors[_gname]['coef_indices'], dtype=int)
-            _mean_true = float(np.mean(_calib_true_phys[:, _gidx]))
-            _mean_pred = float(np.mean(_calib_pred_phys_naive[:, _gidx]))
+            # Prefer the means the lift was actually computed from; the per-coef
+            # groups never recorded any, so fall back to the unweighted mean for
+            # display only.
+            _mean_true, _mean_pred = _calib_lift_means.get(
+                _gname, (float(np.mean(_calib_true_phys[:, _gidx])),
+                         float(np.mean(_calib_pred_phys_naive[:, _gidx]))))
+            _basis_txt = _calib_lift_basis.get(_gname, 'per-coefficient')
             # 2026-08-24e: regime lift dict summary uses the moon_horizon per-coef vector.
             if isinstance(_corr, dict) and ('moon_horizon' in _corr or 'phase_q2_moon_horizon' in _corr):
                 _lift_vec = np.asarray((_corr['moon_horizon'] if 'moon_horizon' in _corr else _corr['phase_q2_moon_horizon']), dtype=np.float64)
@@ -1480,12 +1548,14 @@ def train_compressed_group_mlp(
                 _n_show = int(_lift_vec.size)
                 _delta_pct = 100.0 * (_lift - 1.0)
                 print(f'  {_gname:<14s} {_n_show:>4d} {_mean_true:>10.4g} '
-                      f'{_mean_pred:>16.4g} {_lift:>7.4f} {_delta_pct:>+7.2f}% (regime, median)')
+                      f'{_mean_pred:>16.4g} {_lift:>7.4f} {_delta_pct:>+7.2f}% '
+                      f' {_basis_txt} (regime, median)')
                 continue
             _lift = float(_corr[0])
             _delta_pct = 100.0 * (_lift - 1.0)
             print(f'  {_gname:<14s} {len(_corr):>4d} {_mean_true:>10.4g} '
-                  f'{_mean_pred:>16.4g} {_lift:>7.4f} {_delta_pct:>+7.2f}%')
+                  f'{_mean_pred:>16.4g} {_lift:>7.4f} {_delta_pct:>+7.2f}%'
+                  f'  {_basis_txt}')
 
     # Per-group upper cap = 3.0 x max(coef_sci_train, axis=0) per coefficient.
     # Defensive guard applied at inference in expand_scores_to_coefs (§11 item 11).
@@ -1747,7 +1817,20 @@ def _precompute_flux_basis_and_geometry(
     flux_exptime_s=900.0,
     verbose=True,
 ):
-    """Flux basis matrices (stride 5), per-row geometry, and photon pixel weights."""
+    """Flux basis matrices (stride 5), geometry, pixel weights, calib weights.
+
+    The fourth return value, ``calib_amplitude_weights``, is a length-n_coef
+    vector of NATIVE-GRID template integrals, one per coefficient, aligned to
+    ``filtered_triplet['coef_names']`` BY NAME.  The empirical mean-bias
+    calibration below uses it to correct the flux-weighted amplitude rather
+    than the unweighted mean coefficient -- see the comment on
+    ``_CALIB_AMPLITUDE_WEIGHTED`` in the training function.
+
+    Native grid, not the stride-5 one used for the flux loss: the OH sticks are
+    ~2.35 A FWHM and a 2.5 A sampling aliases each one by a different amount
+    depending on where its centre falls between grid points, which is exactly
+    the per-stick weighting the calibration depends on.
+    """
 
     with fits.open(str(input_fits_for_basis)) as hdul:
         wave_ref = np.asarray(hdul["WAVE"].data, dtype=np.float64)
@@ -1758,6 +1841,39 @@ def _precompute_flux_basis_and_geometry(
         palace_diffuse_suffix=palace_diffuse_suffix,
         split_zodi=split_zodi, n_zodi_spline_knots=n_zodi_knots,
     )
+    # Per-coefficient NATIVE-grid template integral, keyed BY NAME.
+    # `design_names` and `_assemble_design_matrix()` are built from the same
+    # block order inside `_build_static_basis`, so zipping them is the class's
+    # own invariant rather than an assumption made here; the length check makes
+    # a future reordering a loud failure instead of a silent mis-pairing.
+    _design_names = [str(_n) for _n in getattr(model, "design_names", ())]
+    _design_matrix = np.asarray(getattr(model, "design_matrix", np.empty((0, 0))),
+                                dtype=np.float64)
+    calib_amplitude_weights = None
+    if _design_names and _design_matrix.shape[0] == len(_design_names):
+        _w_by_name = dict(zip(_design_names,
+                              _design_matrix.sum(axis=1).astype(np.float64)))
+        _coef_names_calib = [str(_n) for _n in filtered_triplet["coef_names"]]
+        _absent = [_n for _n in _coef_names_calib if _n not in _w_by_name]
+        if _absent:
+            print(f"  [calib-weights] {len(_absent)} coefficient(s) have no basis "
+                  f"row in design_names ({_absent[:4]}); amplitude-weighted "
+                  f"calibration disabled, falling back to the mean coefficient.")
+        else:
+            calib_amplitude_weights = np.array(
+                [_w_by_name[_n] for _n in _coef_names_calib], dtype=np.float64)
+            if verbose:
+                _nz = int(np.sum(calib_amplitude_weights > 0))
+                print(f"  [calib-weights] native-grid template integrals for "
+                      f"{calib_amplitude_weights.size} coefficients "
+                      f"({_nz} non-zero; a zero means no static basis, e.g. "
+                      f"O2_b01 whose template is the per-row VECTOR_O2).")
+    elif verbose:
+        print(f"  [calib-weights] model exposes no aligned design_names / "
+              f"design_matrix pair (names={len(_design_names)}, "
+              f"rows={_design_matrix.shape[0]}); amplitude-weighted "
+              f"calibration disabled.")
+
     stride = slice(None, None, int(_WAVE_STRIDE_FLUX_LOSS))
     flux_basis_matrices = {
         "moon": np.asarray(model.matrix_moon[:, stride], dtype=np.float32),
@@ -1888,7 +2004,8 @@ def _precompute_flux_basis_and_geometry(
             f"[flux-mse prep] geom sc_sci: shape={flux_geom_sc_sci.shape}, "
             f"median={float(np.median(flux_geom_sc_sci)):.3g}"
         )
-    return flux_basis_matrices, flux_geom_sc_sci, flux_pixel_weight
+    return (flux_basis_matrices, flux_geom_sc_sci, flux_pixel_weight,
+            calib_amplitude_weights)
 
 
 @dataclass
@@ -1973,7 +2090,8 @@ class Trainer:
                 f"Start from mlp_predictor.trainer.default_dual_group_config.")
 
     def _shared_train_kwargs(self, *, flux_basis_matrices, flux_geom_sc_sci,
-                             flux_pixel_weight=None):
+                             flux_pixel_weight=None,
+                             calib_amplitude_weights=None):
         c = self.cfg
         return dict(
             n_epochs=int(c["n_epochs"]),
@@ -2009,6 +2127,7 @@ class Trainer:
             flux_basis_matrices=flux_basis_matrices,
             flux_geom_sc_sci=flux_geom_sc_sci,
             flux_pixel_weight=flux_pixel_weight,
+            calib_amplitude_weights=calib_amplitude_weights,
             moon_down_amp_free=bool(c.get("moon_down_amp_free", True)),
             moon_down_amp_rule=bool(c.get("moon_down_amp_rule", True)),
             moon_down_alt_deg=float(c.get("moon_down_alt_deg",
@@ -2055,6 +2174,7 @@ class Trainer:
         flux_basis_matrices = None
         flux_geom_sc_sci = None
         flux_pixel_weight = None
+        calib_amplitude_weights = None
         if self.cfg.get("flux_mse_groups"):
             # Pixel weighting needs the full-corpus stack.  When the caller does
             # not supply it the loss falls back to the unweighted mean, so an
@@ -2064,8 +2184,8 @@ class Trainer:
                 print("  [flux-mse] flux_pixel_weighting is on but "
                       "input_fits_flux was not given; pixels stay UNWEIGHTED "
                       "(pass cfg.data.input_fits_flux to enable it).")
-            (flux_basis_matrices, flux_geom_sc_sci,
-             flux_pixel_weight) = _precompute_flux_basis_and_geometry(
+            (flux_basis_matrices, flux_geom_sc_sci, flux_pixel_weight,
+             calib_amplitude_weights) = _precompute_flux_basis_and_geometry(
                 filtered_triplet=filtered_triplet,
                 compress_geom_kwargs=geom_kwargs,
                 input_fits_for_basis=input_fits_for_basis,
@@ -2084,6 +2204,7 @@ class Trainer:
             flux_basis_matrices=flux_basis_matrices,
             flux_geom_sc_sci=flux_geom_sc_sci,
             flux_pixel_weight=flux_pixel_weight,
+            calib_amplitude_weights=calib_amplitude_weights,
         )
         split_for_members = (
             filtered_triplet["compress_train_idx"],

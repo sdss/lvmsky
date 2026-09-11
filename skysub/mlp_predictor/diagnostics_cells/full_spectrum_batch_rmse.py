@@ -326,6 +326,13 @@ else:
     sci_resid_rows = []
     sci_wave_rows = []
     sci_obs_rows = []          # observed sci flux, for the photon chi2 below
+    # DECOMPOSITION SELF-FIT residual: recon(coef_sci_TRUE) - observed sci.
+    # This is the decomposition's own miss on the row it was fitted to, so it
+    # is the floor the ML transfer is measured against: the predictor cannot
+    # beat the model it is predicting the coefficients OF.  Kept in native
+    # units and float32 like the others -- at 500 rows the float64 version of
+    # this one array is another 50 MB on top of an already tight cell.
+    sci_selfres_rows = []
     # Per-component residuals: comps_sci[<comp>] - comps_sci_true[<comp>] per row,
     # stored in native units (like sci_resid_rows) and multiplied by FACTOR at plot time.
     sci_moon_resid_rows = []
@@ -536,6 +543,13 @@ else:
         _ddiffuse = (np.asarray(comps_sci["diffuse"], dtype=np.float64)
                      - np.asarray(comps_sci_true_batch["diffuse"], dtype=np.float64)) / FACTOR
         _dlines   = (_lines_sum(comps_sci) - _lines_sum(comps_sci_true_batch)) / FACTOR
+        # Same reconstruction path, same LSF state, same O2 vector as the
+        # prediction above -- only the coefficients differ (fitted, not
+        # predicted) -- so the two chi2 distributions below differ ONLY by the
+        # coefficient error and are directly comparable.
+        sci_selfres_rows.append(
+            (np.asarray(comps_sci_true_batch["total"], dtype=np.float64) / FACTOR
+             - flux_sci_true).astype(np.float32))
         sci_moon_resid_rows.append(_dmoon)
         sci_zodi_resid_rows.append(_dzodi)
         sci_diffuse_resid_rows.append(_ddiffuse)
@@ -636,9 +650,10 @@ else:
     sci_lines_arr = np.vstack(sci_lines_resid_rows) * FACTOR
     # The per-component lists are dead once stacked, and each is n_use x 12401
     # float64 -- 50 MB apiece at n_use=500, 200 MB across the four, held for
-    # the whole rest of the cell for nothing.  (sci_resid_rows, sci_obs_rows
-    # and sci_wave_rows are NOT freed: the chi2 block and the ragged-grid
-    # branch still read them.)
+    # the whole rest of the cell for nothing.  (sci_resid_rows, sci_obs_rows,
+    # sci_wave_rows and sci_selfres_rows are NOT freed here: the chi2 block and
+    # the ragged-grid branch still read them, and the chi2 block frees the
+    # self-residual list itself once it has stacked it.)
     del sci_moon_resid_rows, sci_zodi_resid_rows
     del sci_diffuse_resid_rows, sci_lines_resid_rows
     wave_ref = sci_wave_rows[0]
@@ -945,6 +960,8 @@ else:
         _chi2_ok = False
     _chi2_ph = None
     _chi2_blue = None
+    _chi2_self = None
+    _chi2_self_blue = None
     if _chi2_ok and sci_obs_rows:
         _obs_a = np.vstack(sci_obs_rows)
         _res_a = np.vstack(sci_resid_rows)
@@ -998,6 +1015,36 @@ else:
         _chi2_blue = (np.nanmean(_pull2[:, _blue_m], axis=1) if _n_blue_pix
                       else np.full(_chi2_ph.shape, np.nan))
         _c2b = _chi2_blue[np.isfinite(_chi2_blue)]
+
+        # DECOMPOSITION SELF-FIT chi2, the reference distribution (2026-09-11).
+        # Identical noise model, identical pixels, identical mask -- the only
+        # difference is that the coefficients are the FITTED ones rather than
+        # the predicted ones.  Overlaid on both panels below so the reader can
+        # see the two questions separately:
+        #
+        #   self-fit chi2   how well the DECOMPOSITION describes this spectrum
+        #                   (its own residual; the ML floor)
+        #   recon chi2      how well the PREDICTED coefficients describe it
+        #
+        # Their ratio is the only honest statement of how much the transfer
+        # costs.  Reading the reconstruction chi2 alone conflates the two: a
+        # median of 4 looks like a prediction failure until the decomposition
+        # itself is shown sitting at 3.9 on the same rows.
+        if sci_selfres_rows:
+            _self_a = np.vstack(sci_selfres_rows).astype(np.float64)
+            _pull2_self = np.where(_good, _self_a ** 2 / _var_c2, np.nan)
+            _chi2_self = np.nanmean(_pull2_self, axis=1)
+            _chi2_self_blue = (np.nanmean(_pull2_self[:, _blue_m], axis=1)
+                               if _n_blue_pix
+                               else np.full(_chi2_self.shape, np.nan))
+            del _pull2_self, _self_a
+            # float32 but still n_use x 12401 -- 25 MB at n_use=500, and the
+            # figure below has yet to be built.  Nothing reads it again.
+            sci_selfres_rows = []
+        _c2fs = (_chi2_self[np.isfinite(_chi2_self)] if _chi2_self is not None
+                 else np.empty(0))
+        _c2bs = (_chi2_self_blue[np.isfinite(_chi2_self_blue)]
+                 if _chi2_self_blue is not None else np.empty(0))
         # Both chi2 vectors are now n_use-long scalars; the n_use x 12401
         # intermediates behind them are dead.  Four of them at 50 MB each on
         # a 500-row sample, and the figure below still has to be built.
@@ -1011,8 +1058,16 @@ else:
                             f"blue of {CHI2_BLUE_MAX_A:.0f} A only, OH-poor  "
                             f"({_n_blue_pix} px)"))
 
-        def _c2_panel(_v, _col, _colour):
-            """One linear chi2 histogram, with a robust display range.
+        def _c2_panel(_v, _vs, _col, _colour):
+            """Two overlaid linear chi2 histograms: reconstruction vs self-fit.
+
+            `_v`  = chi2 of the ML reconstruction against the photon noise.
+            `_vs` = chi2 of the DECOMPOSITION'S OWN fit on the same rows, same
+                    pixels, same sigma.  It is the floor: the predictor is
+                    predicting the coefficients of that model, so it cannot do
+                    better than the model does, and the gap between the two
+                    histograms is the whole cost of the sky-to-science
+                    transfer.  Drawn behind, in grey.
 
             Upper edge from TUKEY'S FENCE, q75 + 3*IQR, not a percentile.  The
             distribution has a hard tail -- a handful of rows run 100x the
@@ -1022,25 +1077,44 @@ else:
             residual the fence lands at 17-22 across seeds and keeps 87-91% of
             rows on-scale; p99 landed at 336-5150.  Clipped rows are counted
             in the annotation, never dropped from the statistics.
+
+            The fence is taken over the UNION of the two series so both are on
+            the same bins; a fence from the reconstruction alone would clip
+            whichever distribution happens to be broader and make the overlay
+            a comparison of two different axes.
             """
             _vf = np.asarray(_v, dtype=np.float64)
             _vf = _vf[np.isfinite(_vf)]
+            _vsf = np.asarray(_vs, dtype=np.float64)
+            _vsf = _vsf[np.isfinite(_vsf)]
+            _both = np.concatenate([_vf, _vsf]) if _vsf.size else _vf
             _lo = 0.0
-            if _vf.size:
-                _q25, _q75 = np.percentile(_vf, [25, 75])
+            if _both.size:
+                _q25, _q75 = np.percentile(_both, [25, 75])
                 _hi = float(_q75 + 3.0 * (_q75 - _q25))
-                _p99 = float(np.percentile(_vf, 99))
+                _p99 = float(np.percentile(_both, 99))
                 if np.isfinite(_p99):
                     _hi = min(_hi, _p99)   # a tight distribution needs no fence
                 if not np.isfinite(_hi) or _hi <= 0:
-                    _hi = float(np.nanmax(_vf))
+                    _hi = float(np.nanmax(_both))
             else:
                 _hi = 1.2
             _hi = max(_hi, 1.2)   # always keep the photon limit on-scale
+            _bins = dict(start=_lo, end=_hi, size=(_hi - _lo) / 36.0)
+            if _vsf.size:
+                _figc.add_trace(go.Histogram(
+                    x=_vsf, xbins=_bins, name="decomposition self-fit",
+                    marker=dict(color="#999999"), opacity=0.55,
+                    legendgroup="self", showlegend=(_col == 1),
+                    hovertemplate=("self-fit chi2_red=%{x:.3g}"
+                                   "<br>n=%{y}<extra></extra>")),
+                    row=1, col=_col)
             _figc.add_trace(go.Histogram(
-                x=_vf, xbins=dict(start=_lo, end=_hi, size=(_hi - _lo) / 36.0),
-                marker=dict(color=_colour), showlegend=False,
-                hovertemplate="chi2_red=%{x:.3g}<br>n=%{y}<extra></extra>"),
+                x=_vf, xbins=_bins, name="ML reconstruction",
+                marker=dict(color=_colour), opacity=0.75,
+                legendgroup="recon", showlegend=(_col == 1),
+                hovertemplate=("recon chi2_red=%{x:.3g}"
+                               "<br>n=%{y}<extra></extra>")),
                 row=1, col=_col)
             _figc.update_xaxes(range=[_lo, _hi * 1.02], row=1, col=_col)
             # 1 = the reconstruction error equals the noise it is measured
@@ -1050,20 +1124,29 @@ else:
                                              dash="dash"), row=1, col=_col)
             if _vf.size:
                 _n_out = int(np.sum(_vf > _hi))
-                _txt = f"median {np.median(_vf):.3g}"
+                _med_r = float(np.median(_vf))
+                _txt = f"recon median {_med_r:.3g}"
+                if _vsf.size:
+                    _med_s = float(np.median(_vsf))
+                    _txt += (f"<br>self-fit median {_med_s:.3g}"
+                             f"<br>ratio {_med_r / _med_s:.2f}x"
+                             if _med_s > 0 else
+                             f"<br>self-fit median {_med_s:.3g}")
                 if _n_out:
-                    _txt += (f"<br>{_n_out} rows above {_hi:.3g}"
+                    _txt += (f"<br>{_n_out} recon rows above {_hi:.3g}"
                              f"<br>(max {float(_vf.max()):.3g})")
                 _figc.add_annotation(
                     x=0.98, y=0.94, xref="x domain", yref="y domain",
                     text=_txt, showarrow=False, xanchor="right", align="right",
                     font=dict(size=10, color="#666666"), row=1, col=_col)
 
-        _c2_panel(_c2f, 1, "#1f78b4")
-        _c2_panel(_c2b, 2, "#6a3d9a")
+        _c2_panel(_c2f, _c2fs, 1, "#1f78b4")
+        _c2_panel(_c2b, _c2bs, 2, "#6a3d9a")
         _q = np.nanpercentile(_chi2_ph, [10, 90])
         _figc.update_layout(
-            template="plotly_white", height=380,
+            template="plotly_white", height=420, barmode="overlay",
+            legend=dict(orientation="h", yanchor="bottom", y=1.02,
+                        xanchor="right", x=1.0, font=dict(size=10)),
             title=dict(text=(f"SCI reconstruction vs the PHOTON noise of a "
                              f"{_c2_mode.upper()} "
                              f"(n={_n_c2_rows} rows)<br><sub>ABSOLUTE reduced "
@@ -1072,7 +1155,13 @@ else:
                              f"{_c2_mode}, which is what the sky model will be "
                              f"subtracted from.  p10/p50/p90 = "
                              f"{_q[0]:.3g} / {float(np.nanmedian(_chi2_ph)):.3g} / "
-                             f"{_q[1]:.3g}</sub>"),
+                             f"{_q[1]:.3g}."
+                             + ("" if _chi2_self is None else
+                                f"  Grey = the DECOMPOSITION'S OWN fit on the "
+                                f"same rows and the same noise, median "
+                                f"{float(np.nanmedian(_chi2_self)):.3g} -- the "
+                                f"floor the transfer is measured against.")
+                             + "</sub>"),
                        font=dict(size=13), x=0.02, xanchor="left"),
             margin=dict(t=110))
         _figc.update_xaxes(title_text="reduced chi2", row=1, col=1)
@@ -1092,6 +1181,20 @@ else:
                   f"p90 {_qb[1]:.4g}   <- continuum-sensitive; not "
                   f"comparable to the full-band number above (fainter sky "
                   f"there means a larger sigma/flux)")
+        if _chi2_self is not None:
+            _ms = float(np.nanmedian(_chi2_self))
+            _mr = float(np.nanmedian(_chi2_ph))
+            print(f"  [chi2] DECOMPOSITION SELF-FIT on the same rows/noise: "
+                  f"median {_ms:.4g} full band"
+                  + (f", {float(np.nanmedian(_chi2_self_blue)):.4g} blue"
+                     if _chi2_self_blue is not None else "")
+                  + f"   -> the reconstruction costs "
+                    f"{(_mr / _ms if _ms > 0 else float('nan')):.2f}x the "
+                    f"decomposition's own residual full band"
+                  + ("" if (_chi2_self_blue is None or _chi2_blue is None)
+                     else f", {(float(np.nanmedian(_chi2_blue)) / float(np.nanmedian(_chi2_self_blue))):.2f}x blue"))
+            print(f"  [chi2] a ratio near 1 means the ML transfer is no longer "
+                  f"the error source on these rows -- the decomposition is.")
         if CHI2_SINGLE_FIBRE and _nfib is not None:
             _fac = float(np.nanmedian(_nfib)) * (2.0 / np.pi)
             print(f"  [chi2] single-fibre sigma; the rows are stacks of a "
@@ -1120,4 +1223,9 @@ else:
         # and swamps the continuum this predictor exists to get right.
         "chi2_photon_blue": _chi2_blue,
         "chi2_blue_max_a": CHI2_BLUE_MAX_A,
+        # Decomposition self-fit chi2 on the SAME rows, pixels and sigma.
+        # `headline_summary` reads these so the reported floor is measured on
+        # this corpus rather than carried over as a hard-coded constant.
+        "chi2_self": _chi2_self,
+        "chi2_self_blue": _chi2_self_blue,
     }

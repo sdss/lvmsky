@@ -206,13 +206,58 @@ SPLIT_ZODI_DIFFUSE_RATIO_NOMINAL = (0.0396, 0.7026, 0.2578)
 # chi2-FREE at 0.25: blue -0.21% on binding rows, 0.00% elsewhere, zero dark
 # rows touched, collapse rate unchanged at 2.40%.
 #
-# KNOWN RISK: 0.15 dex is ~0.7x the dark-time robust sigma of
-# log10(A_diffuse/A_OH) (0.216 dex), which is our only estimate of the
-# intrinsic spread.  On gated rows the intrinsic and moon-driven parts cannot
-# be separated, so this may clip legitimate variation.  Watch the blue chi2 on
-# gated-but-not-binding rows and the diffuse-collapse rate.
+# The KNOWN RISK recorded here for 0.15 dex -- that it is only ~0.7x the
+# dark-time robust sigma of log10(A_diffuse/A_OH) (0.216 dex) and so may clip
+# legitimate variation -- WAS REAL, and is why the bound is now 0.30.
+#
+# BOUND LOOSENED 0.15 -> 0.30 dex on 2026-09-11, from the full-corpus A/B
+# between `gaia-stars-mask-cont` (no cap) and `gaia-stars-mask-cont2` (cap at
+# 0.15).  Identical row gates, 9 951 vs 9 943 filtered rows, so the comparison
+# is not confounded by the row set.  At 0.15 the cap does its job on the leak
+# -- rho(log A_FeO/A_OH, A_moon) +0.480 -> +0.208, FeO/OH by moon quartile
+# Q4/Q1 3.43x -> 1.33x with quartiles 1-3 untouched, continuum amplitude MAD
+# 0.01868 -> 0.01434 (-23%), zodi MAD 0.00163 -> 0.00022, decomposition
+# reduced_chi2 median ratio 1.0000 -- but it costs the OH COEFFICIENT
+# transfer: mesospheric ML 38.94 -> 45.0, its gain over B1_near_geo
+# +1.3% -> -8.3%, GROUP-EQUAL +3.0% -> -5.1% (both now lose to the naive
+# baseline), mean_eRMSE 7.956 -> 8.516, and the seed-to-seed std 0.191 ->
+# 0.614, i.e. 3.2x less stable training.  Those gains are same-test-row
+# ratios, so the sign flips are not a row-set artefact.
+#
+# Mechanism: on the 41% of rows that are gated the cap welds the diffuse block
+# to OH.  That makes the diffuse trivially predictable (the -23% above) and
+# pushes the broadband structure it used to absorb into the OH stick
+# distribution -- OH TOTAL amplitude stays accurate (MAD 0.00648, median
+# +0.00033) while its 357-coefficient shape degrades, and mesospheric is 358
+# of the 388 coefficients, so GROUP-EQUAL follows it.
+#
+# NOTE the watch-items named for 0.15 all stayed clean: blue chi2 on
+# gated-but-not-binding rows -0.03%, dark rows -0.00%, collapse rate 2.28% ->
+# 2.35%.  The damage appeared only in ML transferability, which no
+# decomposition-side diagnostic would have caught.  Watch the mesospheric and
+# GROUP-EQUAL naive-baseline gains as well next time.
+#
+# WHY 0.30: the one-sided dark-time spread of log10(A_diffuse/A_OH), measured
+# on moon-down sci rows, is p84-p50 = 0.305 dex (the 0.216 above is a robust
+# sigma of the same distribution; 0.30 is ~1.4x that).  At 0.30 the bound
+# admits the full dark-time 1-sigma and only clips excursions past it, instead
+# of cutting into genuine variability, and it should roughly halve the 64-69%
+# of gated rows that currently bind.  It still clips the bright-moon tail with
+# room to spare: the gated distribution reaches p99 ~1.6 dex above the
+# dark-time median.
+#
+# The CENTRE is confirmed and unchanged: c = -0.6489 against a measured
+# dark-time median of -0.6616, agreeing to 0.013 dex.
+#
+# BASIS WARNING for anyone re-measuring this bound: the stored OH coefficients
+# live on the convolved STICK basis, not on `matrix_oh`
+# (sum(COMP_OH)/(coef . stick_rowsum) = 1.0005 against 0.19956 for
+# matrix_oh.sum(axis=1)), while the diffuse coefficients DO live on
+# matrix_diffuse.  A cross-family ratio built from matrix_* is 5.01x wrong on
+# the OH side; integrate the stored COMP_* planes instead.  Measured that way
+# the 0.15 cap binds at log10 = -0.4924 against the specified -0.4989.
 SPLIT_ZODI_DIFFUSE_OH_CENTRE_LOG10 = -0.6489
-SPLIT_ZODI_DIFFUSE_OH_BOUND_DEX = 0.15
+SPLIT_ZODI_DIFFUSE_OH_BOUND_DEX = 0.30
 SPLIT_ZODI_DIFFUSE_OH_GATE_FRAC = 0.6
 SPLIT_ZODI_DIFFUSE_OH_RELAX_DEX = 0.0
 # Absolute recentring of the Leinert anchor.  The anchor brackets the fitted
@@ -1572,12 +1617,19 @@ def main():
         type=float,
         default=SPLIT_ZODI_DIFFUSE_OH_BOUND_DEX,
         help=(
-            "Half-width in dex of the MOON-GATED upper bound on A_FeO / A_OH, "
-            "above --diffuse-oh-centre-log10. 0 disables. FeO is mesospheric and "
-            "cannot depend on the moon, but its amplitude relative to OH rises "
-            "a factor 4.5 with moon_frac_po, so the template is absorbing "
-            "scattered moonlight. One-sided and gated because the dark-time "
-            "scatter of the ratio is 0.306 dex and real."
+            "Half-width in dex of the MOON-GATED upper bound on the WHOLE "
+            "diffuse block, (A_HO2 + A_FeO + A_O2Ac) / A_OH, above "
+            "--diffuse-oh-centre-log10. 0 disables. The species are mesospheric "
+            "and cannot depend on the moon, but the block's amplitude relative "
+            "to OH rises a factor 4.5 with moon_frac_po, so the templates are "
+            "absorbing scattered moonlight. One-sided and gated because the "
+            "dark-time scatter of the ratio is 0.306 dex and real. The block, "
+            "not FeO alone: an FeO-only cap left 195 of 415 gated rows above "
+            "their bound because the three species move together. Default "
+            "raised 0.15 -> 0.30 on 2026-09-11; at 0.15 the cap suppressed the "
+            "leak but cost the OH coefficient transfer (mesospheric gain "
+            "+1.3%% -> -8.3%%). See the block comment at "
+            "SPLIT_ZODI_DIFFUSE_OH_BOUND_DEX."
         ),
     )
     parser.add_argument(
@@ -1585,9 +1637,14 @@ def main():
         type=float,
         default=SPLIT_ZODI_DIFFUSE_OH_CENTRE_LOG10,
         help=(
-            "log10(A_FeO / A_OH) centre for the bound above: the DARK-TIME "
-            "median over FeO-live rows, where there is no moon to leak. "
-            "Re-measure per corpus."
+            "log10 of the (A_HO2 + A_FeO + A_O2Ac) / A_OH centre for the bound "
+            "above: the DARK-TIME median over diffuse-live rows, where there is "
+            "no moon to leak. Re-measure per corpus -- but note the stored OH "
+            "coefficients are on the convolved STICK basis, not matrix_oh, so "
+            "integrate the stored COMP_* planes rather than assembling the "
+            "ratio from matrix_*.sum(axis=1), which is 5.01x wrong on the OH "
+            "side. Confirmed -0.6489 against a measured -0.6616 on "
+            "gaia-stars-mask-cont."
         ),
     )
     parser.add_argument(

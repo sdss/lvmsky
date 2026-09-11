@@ -64,6 +64,15 @@ if _have['full_spectrum_batch_rmse']:
         print(f"\nspectrum space, {_sci.size}-row sample")
         print(f"  sci pRMSE      median {np.median(_sci):.4g}  "
               f"p90 {np.percentile(_sci, 90):.4g}")
+    # The floor is MEASURED, not carried over.  `full_spectrum_batch_rmse`
+    # now computes the decomposition's own self-fit chi2 on the same rows,
+    # pixels and sigma, so the floor quoted here always belongs to the corpus
+    # actually loaded.  The previous hard-coded 3.96 / 1.20 were measured on
+    # gaia-stars-mask-cont and would have silently misreported any other one.
+    _c2s = _rs.get('chi2_self')
+    _c2s = (np.asarray(_c2s, dtype=float) if _c2s is not None else None)
+    if _c2s is not None:
+        _c2s = _c2s[np.isfinite(_c2s)]
     _c2 = _rs.get('chi2_photon')
     if _c2 is not None:
         _c2 = np.asarray(_c2, dtype=float); _c2 = _c2[np.isfinite(_c2)]
@@ -72,13 +81,21 @@ if _have['full_spectrum_batch_rmse']:
                   f"p90 {np.percentile(_c2, 90):.4g}   (ABSOLUTE, vs ONE "
                   f"900 s fibre's shot noise)")
             print(f"                 1 = the reconstruction error is at the "
-                  f"noise of the single fibre it will be\n"
-                  f"                 subtracted from.  The DECOMPOSITION's own "
-                  f"fit sits at 3.96 on this scale\n"
-                  f"                 (p10 2.0, p90 28; 500 every10 sci rows, "
-                  f"gaia-stars-mask-cont), so ~4,\n"
-                  f"                 not 1, is the floor a coefficient "
-                  f"prediction can reach.")
+                  f"noise of the single fibre it will be subtracted from.")
+            if _c2s is not None and _c2s.size:
+                _fl = float(np.median(_c2s))
+                print(f"  decomp self-fit median {_fl:.4g}  "
+                      f"p10 {np.percentile(_c2s, 10):.3g}  "
+                      f"p90 {np.percentile(_c2s, 90):.3g}   <- the FLOOR: "
+                      f"the same model fitted to")
+                print(f"                 this very row.  A coefficient "
+                      f"prediction cannot go below it, so read the\n"
+                      f"                 ratio, not the absolute value: "
+                      f"reconstruction / self-fit = "
+                      f"{(np.median(_c2) / _fl if _fl > 0 else float('nan')):.2f}x.")
+            else:
+                print(f"                 (decomposition self-fit floor "
+                      f"unavailable -- re-run the batch RMSE cell)")
     _c2b = _rs.get('chi2_photon_blue')
     if _c2b is not None:
         _c2b = np.asarray(_c2b, dtype=float); _c2b = _c2b[np.isfinite(_c2b)]
@@ -90,9 +107,18 @@ if _have['full_spectrum_batch_rmse']:
             print(f"                 not comparable to the full-band number: "
                   f"the sky is fainter blueward, so\n"
                   f"                 sigma/flux is larger and the same "
-                  f"fractional error scores lower.  The\n"
-                  f"                 DECOMPOSITION's own floor here is 1.20 "
-                  f"(p10 0.37, p90 40).")
+                  f"fractional error scores lower.")
+            _c2sb = _rs.get('chi2_self_blue')
+            if _c2sb is not None:
+                _c2sb = np.asarray(_c2sb, dtype=float)
+                _c2sb = _c2sb[np.isfinite(_c2sb)]
+                if _c2sb.size:
+                    _flb = float(np.median(_c2sb))
+                    print(f"  decomp self-fit median {_flb:.4g}  "
+                          f"p10 {np.percentile(_c2sb, 10):.3g}  "
+                          f"p90 {np.percentile(_c2sb, 90):.3g}   <- the blue "
+                          f"floor; ratio "
+                          f"{(np.median(_c2b) / _flb if _flb > 0 else float('nan')):.2f}x.")
 
 print('=' * 78)
 headline_summary_result = dict(available=_have)

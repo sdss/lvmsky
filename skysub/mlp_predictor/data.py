@@ -2776,9 +2776,39 @@ def apply_triplet_filters(
     chi2_min=0.0,
     chi2_max=10.0,
     hard_coef_bounds=None,
-    kappa=6.0,
+    # 2026-09-11: kappa 6 -> 8, oh_kappa 4 -> 6.  Measured on gaia-stars-mask-cont
+    # every10, both gates were removing valid extreme data rather than broken
+    # decompositions.  Judged on the DECOMPOSITION'S OWN fit -- absolute
+    # single-fibre photon chi2 from BESTFIT_LSF vs FLUX_SCI, plus the median
+    # FRACTIONAL residual, because photon chi2 grows with brightness even at
+    # fixed fractional accuracy.  Of the rows passing every other gate:
+    #
+    #   the OTHER gates   chi2 96.1 vs 3.65 kept (26x, p90 3610) -- real failures
+    #   kappa-sigma (37)  chi2 1.26x, fractional residual 1.02x -- indistinguishable
+    #   OH-MAD (34)       chi2 2.37x, fractional residual 1.45x, airmass 1.63 (p86)
+    #
+    # The kappa gate was also mis-specified: it uses a non-robust mean/std and
+    # median std/MAD over its 30 columns is 13.46 against the Gaussian 1.483.
+    # The heavy tails sit in the moon knots (std/MAD 29-104, skew ~2 -- bimodal,
+    # ~0 moon-down and large moon-up), which inflates their sigma and disarms the
+    # gate there, leaving the near-Gaussian atomic columns (std/MAD 2.14) with
+    # the tightest effective threshold -- so it had become an accidental
+    # atomic-line gate.  That is the same failure this file already documents for
+    # the OH block below, still present in the moon columns.  Raising kappa is a
+    # mitigation, not a fix; the fix is a robust per-column scale.
+    #
+    # The OH-MAD rows are high-airmass pointings (alt 37.8 deg p14, van Rhijn
+    # 1.60 p86) sitting 1.15x past a threshold built to catch runaways at
+    # 1e6-1e15x the median.  Their fits are genuinely 1.45x worse fractionally,
+    # plausibly from LSF and telluric treatment at high airmass -- real data the
+    # current decomposition fits less well, not bad data.
+    #
+    # Keep these values in step with the notebook filter cell, which passes them
+    # explicitly; a default that disagrees with the deployed call is worse than
+    # no default.  Revert both to 6.0 / 4.0 if the retrain A/B loses.
+    kappa=8.0,
     kappa_iter=3,
-    oh_kappa=4.0,
+    oh_kappa=6.0,
     oh_kappa_iter=3,
     exclude_field_regions=None,
     airmass_max=3.0,
