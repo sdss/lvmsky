@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 from dataclasses import replace
+import os
 from pathlib import Path
 import shutil
 
@@ -20,6 +21,7 @@ from skysub.sky_decomp.moon_zodi_model import (
     MoonZodiObservation,
     MoonZodiPhysicalModel,
     file_sha256,
+    validate_decomposition_asset_contract,
     validate_decomposition_data_root,
     wave_sha256,
 )
@@ -101,6 +103,30 @@ def test_complete_data_root_reports_exact_palace_failure(tmp_path, failure):
     with pytest.raises((FileNotFoundError, ValueError), match=match):
         validate_decomposition_data_root.cache_clear()
         validate_decomposition_data_root(str(copied))
+
+
+def test_method_specific_assets_are_validated_independently(tmp_path):
+    copied = tmp_path / "data"
+    shutil.copytree(DEFAULT_DATA_ROOT, copied, copy_function=os.symlink)
+    missing = copied / "residual_pca/palace_aijc_vnf_line_adjoint_pca_v1.npz"
+    missing.unlink()
+    (copied / "palace/PMD/pmd_popmodel_OH_h_family_default_ef_v1.dat").unlink()
+    validate_decomposition_data_root.cache_clear()
+    validate_decomposition_asset_contract.cache_clear()
+
+    validate_decomposition_data_root(str(copied))
+    residual = validate_decomposition_asset_contract(
+        str(copied),
+        "residual_pca_contract",
+        "residual PCA",
+    )
+    assert residual["path"] == "residual_pca/palace_aijc_full_native_pca_v1.npz"
+    with pytest.raises(FileNotFoundError, match="VNF line-adjoint PCA asset is missing"):
+        validate_decomposition_asset_contract(
+            str(copied),
+            "vnf_line_adjoint_pca_contract",
+            "VNF line-adjoint PCA",
+        )
 
 
 def test_predictor_matches_three_frozen_jax_reference_cases():

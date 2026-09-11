@@ -24,6 +24,7 @@ from skysub.sky_decomp.moon_zodi_lsf_surface_iterative import (
 )
 from skysub.sky_decomp.moon_zodi_model import (
     DEFAULT_DATA_ROOT,
+    DEFAULT_PALACE_OH_SUFFIX,
     MoonZodiObservation,
 )
 
@@ -86,7 +87,7 @@ def fitted_case():
     assert decomposer.data_root == DEFAULT_DATA_ROOT.resolve()
     assert decomposer.base_dir == DEFAULT_DATA_ROOT.resolve()
     assert decomposer.pmd_dir == DEFAULT_DATA_ROOT.resolve() / "palace" / "PMD"
-    assert decomposer.palace_oh_suffix == "_h_family_default_ef_v1"
+    assert decomposer.palace_oh_suffix == DEFAULT_PALACE_OH_SUFFIX
     assert (
         decomposer.palace_diffuse_suffix
         == "_joint_native_adam_invsky_p2_10000iter"
@@ -421,8 +422,125 @@ def test_batch_role_coordinate_and_lsf_contract(monkeypatch):
         "baseline": "",
         "lsf-surface-iterative": "_lsf_surface_iterative",
         "lsf-surface-iterative-split-zodi": "_lsf_surface_iterative_split_zodi",
+        "lsf-spline2d-split-zodi": "_lsf_spline2d_split_zodi",
         "moon-zodi-lsf-surface-iterative": "_moon_zodi_lsf_surface_iterative",
+        "adam25k-telluric-lsf-spline2d": "_adam25k_telluric_lsf_spline2d",
+        "palace-aijc-vnf-line-amplitude-pca30": (
+            "_palace_aijc_vnf_line_amplitude_pca30"
+        ),
     }
+
+
+@pytest.mark.parametrize(
+    ("fit_model", "class_path"),
+    [
+        (
+            decompose_parallel.ADAM25K_TELLURIC_FIT_MODEL,
+            "skysub.sky_decomp.telluric_corrected_lines."
+            "SkyDecompAdam25kTelluricLSFSpline2D",
+        ),
+        (
+            decompose_parallel.PALACE_VNF_PCA30_FIT_MODEL,
+            "skysub.sky_decomp.residual_pca."
+            "SkyDecompPalaceAijcVNFLineAmplitudePCA",
+        ),
+    ],
+)
+def test_telluric_cli_models_use_role_lsf_pwv_and_airmass(
+    monkeypatch,
+    tmp_path,
+    fit_model,
+    class_path,
+):
+    from astropy.table import Table
+    import lvmdrp.core.fluxcal
+
+    wave = np.array([5000.0, 5001.0, 5002.0])
+    flux = np.array([[1.0, 2.0, 3.0]])
+    meta = Table(
+        {
+            "pwv_med": [4.2],
+            "sci_airmass": [1.3],
+            "skye_airmass": [1.4],
+            "skyw_airmass": [1.5],
+            "sky_near_label": ["SkyW"],
+            "sky_far_label": ["SkyE"],
+        }
+    )
+    input_path = tmp_path / "stack.fits"
+    fits.HDUList(
+        [
+            fits.PrimaryHDU(),
+            *(fits.ImageHDU(flux, name=name) for name in (
+                "FLUX_SCI",
+                "FLUX_SKY_NEAR",
+                "FLUX_SKY_FAR",
+            )),
+            *(fits.ImageHDU(np.full_like(flux, value), name=name) for name, value in (
+                ("LSF_SCI", 1.1),
+                ("LSF_SKY_NEAR", 1.2),
+                ("LSF_SKY_FAR", 1.3),
+            )),
+            fits.BinTableHDU(meta, name="META"),
+        ]
+    ).writeto(input_path)
+
+    transmissions = []
+
+    class DummyTelluricCalculator:
+        def __init__(self, path=None):
+            assert path is None
+
+        def match_to_data(
+            self,
+            target_wave,
+            lsf,
+            pwv,
+            *,
+            airmass,
+            lsf_in_wavelength,
+        ):
+            transmissions.append((lsf.copy(), pwv, airmass, lsf_in_wavelength))
+            return np.full_like(target_wave, 0.9)
+
+    constructor_calls = []
+
+    class DummyDecomposer:
+        def __init__(self, model_wave, **kwargs):
+            np.testing.assert_array_equal(model_wave, wave)
+            constructor_calls.append(kwargs)
+
+        def fit(self, row_flux, row_ivar, *, verbose):
+            assert not verbose
+            np.testing.assert_array_equal(row_flux, flux[0] * 2.0)
+            np.testing.assert_array_equal(row_ivar, np.ones(wave.size))
+            return len(constructor_calls)
+
+    monkeypatch.setattr(lvmdrp.core.fluxcal, "TelluricCalculator", DummyTelluricCalculator)
+    monkeypatch.setattr(class_path, DummyDecomposer)
+    decompose_parallel.init_worker(
+        wave,
+        0.5,
+        DEFAULT_DATA_ROOT,
+        2.0,
+        input_path,
+        fit_model=fit_model,
+    )
+    try:
+        for kind in ("sci", "sky1", "sky2"):
+            returned_kind, rows = decompose_parallel.fit_chunk_worker((kind, 0, 1))
+            assert returned_kind == kind
+            assert rows == [(0, len(constructor_calls))]
+    finally:
+        decompose_parallel._WORKER_HDU.close()
+
+    assert [call["source_airmass"] for call in constructor_calls] == [1.3, 1.5, 1.4]
+    assert all(call["pwv_mm"] == 4.2 for call in constructor_calls)
+    assert all(np.array_equal(call["drp_transmission"], np.full(3, 0.9)) for call in constructor_calls)
+    assert [float(values[0][0]) for values in transmissions] == [1.1, 1.2, 1.3]
+    assert all(values[1:] == (4.2, 1.3, True) for values in transmissions)
+    if fit_model == decompose_parallel.PALACE_VNF_PCA30_FIT_MODEL:
+        assert all(call["n_line_amplitude_pca_components"] == 30 for call in constructor_calls)
 
 
 def test_batch_preserves_placeholder_and_propagates_unexpected_errors(monkeypatch):
@@ -507,6 +625,13 @@ def test_runtime_data_roots_are_selected_by_fit_model(monkeypatch, tmp_path):
     )
     assert base_dir == default_root.resolve()
     assert data_root == default_root.resolve()
+
+    validated.clear()
+    for fit_model in decompose_parallel.TELLURIC_FIT_MODELS:
+        base_dir, data_root = decompose_parallel.resolve_runtime_data_roots(fit_model)
+        assert base_dir == default_root.resolve()
+        assert data_root == default_root.resolve()
+    assert validated == [str(default_root.resolve())] * 2
 
 
 def test_runtime_data_roots_preserve_legacy_resolution(monkeypatch, tmp_path):

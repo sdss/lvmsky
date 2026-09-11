@@ -779,6 +779,70 @@ def results_to_fits(results, filename):
         if any(state is None for state in states):
             raise ValueError("Every iterative result must contain a compact LSF state")
         hdul.extend(build_lsf_hdus(states))
+        if states[0].legacy_kernel_representation == "continuous_mspline_density":
+            residual_pca_names = [
+                name for name in design_names if name.startswith("ResidualPCA_")
+            ]
+            line_amplitude_pca_names = [
+                name
+                for name in design_names
+                if name.startswith("LineAmplitudePCA_")
+            ]
+            line_adjoint_pca_names = [
+                name for name in design_names if name.startswith("LineAdjointPCA_")
+            ]
+            uses_vn_oh_groups = any(name.startswith("OHVN_") for name in design_names)
+            vnf_pca_names = [
+                name
+                for name in design_names
+                if name.startswith("OHVNFPCAPrep_")
+            ]
+            if line_adjoint_pca_names:
+                hdul[0].header["DECOMPM"] = (
+                    "telluric-corrected-lines-palace-aijc-vnf-line-adjoint-pca"
+                )
+                hdul[0].header["LADPCAK"] = len(line_adjoint_pca_names) - 1
+                hdul[0].header["OHCOEF"] = "PALACE Aijc"
+                hdul[0].header["OHGROUP"] = "v_upper,N_upper,F_upper"
+            elif line_amplitude_pca_names:
+                if vnf_pca_names:
+                    hdul[0].header["DECOMPM"] = (
+                        "telluric-corrected-lines-palace-aijc-vnf-pca-line-pca"
+                    )
+                elif uses_vn_oh_groups:
+                    hdul[0].header["DECOMPM"] = (
+                        "telluric-corrected-lines-palace-aijc-vn-line-amplitude-pca"
+                    )
+                else:
+                    hdul[0].header["DECOMPM"] = (
+                        "telluric-corrected-lines-palace-aijc-line-amplitude-pca"
+                    )
+                hdul[0].header["LAPCAK"] = len(line_amplitude_pca_names) - 1
+                hdul[0].header["OHCOEF"] = "PALACE Aijc"
+            elif residual_pca_names:
+                hdul[0].header["DECOMPM"] = (
+                    "telluric-corrected-lines-palace-aijc-residual-pca"
+                )
+                hdul[0].header["RESPCAK"] = len(residual_pca_names) - 1
+                hdul[0].header["OHCOEF"] = "PALACE Aijc"
+            elif vnf_pca_names:
+                hdul[0].header["DECOMPM"] = (
+                    "telluric-corrected-lines-palace-aijc-vnf-pca-prep"
+                )
+                hdul[0].header["OHCOEF"] = "PALACE Aijc"
+            elif uses_vn_oh_groups:
+                hdul[0].header["DECOMPM"] = (
+                    "telluric-corrected-lines-palace-aijc-vn"
+                )
+                hdul[0].header["OHCOEF"] = "PALACE Aijc"
+            else:
+                hdul[0].header["DECOMPM"] = "lsf-spline2d-split-zodi"
+            if uses_vn_oh_groups:
+                hdul[0].header["OHGROUP"] = "v_upper,N_upper"
+            if vnf_pca_names:
+                hdul[0].header["OHGROUP"] = "v_upper,N_upper,F_upper"
+                hdul[0].header["OHPCAK"] = len(vnf_pca_names) - 1
+            hdul["LSF_COEF"].header["BASIS"] = "M-spline"
 
     if is_moon_zodi:
         hdul[0].header["DECOMPM"] = "moon-zodi-lsf-surface-iterative"

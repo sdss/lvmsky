@@ -1,6 +1,7 @@
 import numpy as np
 import pytest
 
+import skysub.sky_decomp.fit as fit_module
 from skysub.sky_decomp.fit import SkyDecomp
 
 
@@ -118,6 +119,57 @@ def test_coef_err_active_set_uses_per_column_chi2():
     assert err_percol[1] == pytest.approx(err_scalar[1] * 3.0)
     assert np.isnan(err_percol[2])
     assert np.isnan(err_scalar[2])
+
+
+def test_fit_design_allows_only_selected_coefficients_to_be_signed():
+    model = object.__new__(SkyDecomp)
+    model.wave = np.arange(2.0)
+    model.moon_smooth_lambda = 0.0
+    model.zodi_smooth_lambda = 0.0
+    model.moon_interline_boost = 0.0
+    model.moon_boosted_pixels_used = np.array([], dtype=float)
+    model._d2_moon = np.zeros((0, 0), dtype=float)
+    model._d2_zodi = np.zeros((0, 0), dtype=float)
+
+    result = model._fit_design(
+        np.eye(2),
+        np.array([-1.0, -2.0]),
+        np.ones(2),
+        unconstrained_indices=np.array([1]),
+    )
+
+    assert result["status"] in {"Solved", "AlmostSolved"}
+    assert result["coef"][0] >= -1.0e-9
+    assert result["coef"][1] == pytest.approx(-2.0, abs=1.0e-7)
+    assert np.isfinite(result["coef_err"][1])
+
+
+def test_fit_design_retries_insufficient_progress_only_when_configured(monkeypatch):
+    model = object.__new__(SkyDecomp)
+    model.wave = np.arange(2.0)
+    model.moon_smooth_lambda = 0.0
+    model.zodi_smooth_lambda = 0.0
+    model.moon_interline_boost = 0.0
+    model.moon_boosted_pixels_used = np.array([], dtype=float)
+    model._d2_moon = np.zeros((0, 0), dtype=float)
+    model._d2_zodi = np.zeros((0, 0), dtype=float)
+    model.qp_retry_static_regularization_constant = 1.0e-6
+    regularization = []
+
+    class FakeSolver:
+        def __init__(self, *args):
+            regularization.append(args[-1].static_regularization_constant)
+
+        def solve(self):
+            status = "InsufficientProgress" if len(regularization) == 1 else "Solved"
+            return type("Result", (), {"status": status, "x": np.ones(2)})()
+
+    monkeypatch.setattr(fit_module.clarabel, "DefaultSolver", FakeSolver)
+    result = model._fit_design(np.eye(2), np.ones(2), np.ones(2))
+
+    assert result["status"] == "Solved"
+    assert regularization[0] != pytest.approx(1.0e-6)
+    assert regularization[1] == pytest.approx(1.0e-6)
 
 
 def test_coef_err_active_set_per_column_never_shrinks():

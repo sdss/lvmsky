@@ -333,6 +333,8 @@ class SkyDecompResult:
 
 
 class SkyDecomp:
+    oh_group_keys = OH_GROUP_KEYS
+
     def __init__(
         self,
         wave: np.ndarray,
@@ -732,8 +734,9 @@ class SkyDecomp:
         reduced_chi2: float,
         per_column_chi2: np.ndarray | None = None,
         cov_block_slices: dict[str, slice] | None = None,
+        unconstrained_indices: np.ndarray | None = None,
     ) -> np.ndarray | tuple[np.ndarray, dict[str, np.ndarray]]:
-        """Active-set posterior 1σ uncertainty for a nonnegative WLS solve.
+        """Active-set posterior 1σ uncertainty for a constrained WLS solve.
 
         Notes
         -----
@@ -849,8 +852,13 @@ class SkyDecomp:
                 return coef_err, cov_blocks
             return coef_err
 
-        active_tol = 1e-8 * float(max(np.max(coef), 1.0))
+        active_tol = 1e-8 * float(max(np.max(np.abs(coef)), 1.0))
         active_mask = coef > active_tol
+        if unconstrained_indices is not None:
+            unconstrained_indices = np.asarray(unconstrained_indices, dtype=int)
+            active_mask[unconstrained_indices] = (
+                np.abs(coef[unconstrained_indices]) > active_tol
+            )
         coef_err[~active_mask] = np.nan
 
         scalar_inflate = float(max(reduced_chi2, 1.0))
@@ -939,8 +947,9 @@ class SkyDecomp:
         moon_slice: slice | None = None,
         diffuse_slice: slice | None = None,
         zodi_slice: slice | None = None,
+        unconstrained_indices: np.ndarray | None = None,
     ) -> dict[str, object]:
-        """Weighted nonnegative least-squares fit of one design matrix.
+        """Weighted constrained least-squares fit of one design matrix.
 
         Solves the quadratic program
 
@@ -951,6 +960,8 @@ class SkyDecomp:
         holds the physical basis; ``λ = moon_smooth_lambda`` (from the model
         config) is nonzero only for the moon block, whose curvature operator
         ``L`` penalises second differences of adjacent spline coefficients.
+        Columns listed in ``unconstrained_indices`` may take either sign; all
+        other coefficients retain the historical nonnegative constraint.
 
         For numerical stability the solve is performed on a doubly-rescaled
         version of the problem: ``y'' = y / data_scale`` and
@@ -998,6 +1009,18 @@ class SkyDecomp:
         n_good = int(np.sum(good))
 
         a = design_matrix[:, good].T
+        n_par = int(a.shape[1])
+        unconstrained = np.asarray(
+            [] if unconstrained_indices is None else unconstrained_indices,
+            dtype=int,
+        )
+        if (
+            unconstrained.ndim != 1
+            or np.any(unconstrained < 0)
+            or np.any(unconstrained >= n_par)
+            or np.unique(unconstrained).size != unconstrained.size
+        ):
+            raise ValueError("unconstrained_indices must contain unique valid columns")
 
         def _solve_nonnegative_weighted(
             a_mat: np.ndarray,
@@ -1005,6 +1028,7 @@ class SkyDecomp:
             w_vec: np.ndarray,
             moon_slice_local: slice | None,
             zodi_slice_local: slice | None = None,
+            unconstrained_local: np.ndarray | None = None,
         ) -> tuple[np.ndarray, str, float, np.ndarray, np.ndarray, float]:
             aw = a_mat * w_vec[:, None]
             yw = y_vec * w_vec
@@ -1044,15 +1068,41 @@ class SkyDecomp:
             q_local = -(aw.T @ yw)
             p_local = sp.csc_matrix((p_dense_local + p_dense_local.T) / 2.0)
             p_local = sp.triu(p_local).tocsc()
-            a_con = -sp.eye(n_par_local, format="csc")
-            b_con = np.zeros(n_par_local, dtype=np.float64)
-            cones = [clarabel.NonnegativeConeT(n_par_local)]
+            free = np.asarray(
+                [] if unconstrained_local is None else unconstrained_local,
+                dtype=int,
+            )
+            constrained_local = np.setdiff1d(
+                np.arange(n_par_local, dtype=int), free, assume_unique=True
+            )
+            a_con = -sp.eye(n_par_local, format="csc")[constrained_local]
+            b_con = np.zeros(constrained_local.size, dtype=np.float64)
+            cones = [clarabel.NonnegativeConeT(constrained_local.size)]
             settings = clarabel.DefaultSettings()
             settings.verbose = False
 
             t_qp_local = time.perf_counter()
             solver = clarabel.DefaultSolver(p_local, np.asarray(q_local, dtype=np.float64), a_con, b_con, cones, settings)
             qp_result_local = solver.solve()
+            retry_regularization = getattr(
+                self,
+                "qp_retry_static_regularization_constant",
+                None,
+            )
+            if (
+                str(qp_result_local.status) == "InsufficientProgress"
+                and retry_regularization is not None
+            ):
+                settings.static_regularization_constant = float(retry_regularization)
+                solver = clarabel.DefaultSolver(
+                    p_local,
+                    np.asarray(q_local, dtype=np.float64),
+                    a_con,
+                    b_con,
+                    cones,
+                    settings,
+                )
+                qp_result_local = solver.solve()
             qp_dt_local = time.perf_counter() - t_qp_local
             coef_local = np.asarray(qp_result_local.x, float) / col_scale
             # `p_dense_local` is the column- and data-scaled Fisher information
@@ -1067,7 +1117,6 @@ class SkyDecomp:
                 float(data_scale),
             )
 
-        n_par = int(a.shape[1])
         (
             coef,
             status,
@@ -1078,6 +1127,7 @@ class SkyDecomp:
         ) = _solve_nonnegative_weighted(
             a, y, base_w, moon_slice,
             zodi_slice_local=zodi_slice,
+            unconstrained_local=unconstrained,
         )
 
         # Track whichever solve produced the FINAL value of each coefficient,
@@ -1105,6 +1155,9 @@ class SkyDecomp:
                 y_target = y_target - a[:, fixed_cols_arr] @ coef[fixed_cols_arr]
 
             a_target = a[:, target_cols_arr]
+            unconstrained_target = np.flatnonzero(
+                np.isin(target_cols_arr, unconstrained)
+            )
             moon_slice_local = None
             if moon_slice is not None:
                 m0 = moon_slice.start or 0
@@ -1123,6 +1176,7 @@ class SkyDecomp:
                 boosted_w,
                 moon_slice_local,
                 zodi_slice_local=None,
+                unconstrained_local=unconstrained_target,
             )
             coef[target_cols_arr] = coef_target
             for local_pos_i, global_col in enumerate(target_cols_arr):
@@ -1160,6 +1214,7 @@ class SkyDecomp:
             reduced_chi2,
             per_column_chi2=per_column_chi2,
             cov_block_slices=cov_block_slices or None,
+            unconstrained_indices=unconstrained,
         )
         if cov_block_slices:
             coef_err, cov_blocks = _err_ret
@@ -1367,15 +1422,22 @@ class SkyDecomp:
         oh["wave"] = vac_to_air(np.asarray(oh["lam"], float) * 1e4)
         mask = (oh["wave"] >= self.wave.min() - CAP_WAVE) & (oh["wave"] <= self.wave.max() + CAP_WAVE)
         oh = decode_hitran_id(oh[mask])
-        groups = oh.group_by(OH_GROUP_KEYS).groups
+        groups = oh.group_by(self.oh_group_keys).groups
 
         matrix = np.zeros((len(groups), self.wave.size))
         self.matrix_oh_stick = np.zeros_like(matrix)
+        self._oh_line_groups = []
         for idx, grp in enumerate(groups):
-            amp = np.asarray(grp["Aij"] * grp["gi"], float)
-            matrix[idx] = grp2vector(grp["wave"], amp, self.wave, self.lsf_sigma)
-            self.matrix_oh_stick[idx] = sticks2vector(grp["wave"], amp, self.wave)
+            amp = self._oh_amplitude(grp)
+            line_wave = np.asarray(grp["wave"], float)
+            self._oh_line_groups.append((line_wave.copy(), amp.copy()))
+            matrix[idx] = grp2vector(line_wave, amp, self.wave, self.lsf_sigma)
+            self.matrix_oh_stick[idx] = sticks2vector(line_wave, amp, self.wave)
         return matrix
+
+    @staticmethod
+    def _oh_amplitude(group: Table) -> np.ndarray:
+        return np.asarray(group["Aij"] * group["gi"], dtype=float)
 
     def _build_moon(self) -> tuple[np.ndarray, list[str]]:
         sol = np.loadtxt(self._require_path(self.solar_path), comments=";")
@@ -1556,12 +1618,15 @@ class SkyDecomp:
 
         matrix = np.zeros((len(groups), self.wave.size))
         self.matrix_atom_stick = np.zeros_like(matrix)
+        self._atom_line_groups = []
         names = []
         for idx, grp in enumerate(groups):
             amp = np.asarray(grp["I"], float)
             amp /= np.nansum(amp)
-            matrix[idx] = grp2vector(grp["wave"], amp, self.wave, self.lsf_sigma)
-            self.matrix_atom_stick[idx] = sticks2vector(grp["wave"], amp, self.wave)
+            line_wave = np.asarray(grp["wave"], float)
+            self._atom_line_groups.append((line_wave.copy(), amp.copy()))
+            matrix[idx] = grp2vector(line_wave, amp, self.wave, self.lsf_sigma)
+            self.matrix_atom_stick[idx] = sticks2vector(line_wave, amp, self.wave)
             names.append(f"ATOM_{grp['class'][0]}")
         return matrix, names
 
@@ -1573,11 +1638,14 @@ class SkyDecomp:
 
         matrix = np.zeros((len(groups), self.wave.size))
         self.matrix_orc_stick = np.zeros_like(matrix)
+        self._orc_line_groups = []
         names = []
         for idx, grp in enumerate(groups):
             amp = np.asarray(grp["I"], float)
-            matrix[idx] = grp2vector(grp["wave"], amp, self.wave, self.lsf_sigma)
-            self.matrix_orc_stick[idx] = sticks2vector(grp["wave"], amp, self.wave)
+            line_wave = np.asarray(grp["wave"], float)
+            self._orc_line_groups.append((line_wave.copy(), amp.copy()))
+            matrix[idx] = grp2vector(line_wave, amp, self.wave, self.lsf_sigma)
+            self.matrix_orc_stick[idx] = sticks2vector(line_wave, amp, self.wave)
             names.append(f"ATOM_Orc_{grp['reffeat'][0]}")
         return matrix, names
 

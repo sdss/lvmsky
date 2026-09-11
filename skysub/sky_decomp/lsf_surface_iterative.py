@@ -686,7 +686,7 @@ def _kernel_constraint_system(
     return sp.vstack(constraints, format="csc"), np.concatenate(rhs), cones
 
 
-def fit_bspline_channel(
+def _fit_bspline_channel(
     wave: np.ndarray,
     source: np.ndarray,
     target: np.ndarray,
@@ -701,6 +701,8 @@ def fit_bspline_channel(
     background_degree: int = 3,
     free_amplitude: bool = False,
     knot_vector: np.ndarray | None = None,
+    kernel_design: np.ndarray | None = None,
+    offset_roughness_fraction: float = 0.0,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict[str, float | str]]:
     """Fit one normalized, central-peak B-spline kernel surface.
 
@@ -733,10 +735,15 @@ def fit_bspline_channel(
         if persisted_n_basis != n_basis:
             raise ValueError("persisted knot vector does not match n_basis and degree")
         basis = evaluate_bspline_basis(wave, knots, degree)
-    kernel_design = (shifted[:, :, None] * basis[:, None, :]).reshape(
-        wave.size,
-        fallback.size * n_basis,
-    )
+    if kernel_design is None:
+        kernel_design = (shifted[:, :, None] * basis[:, None, :]).reshape(
+            wave.size,
+            fallback.size * n_basis,
+        )
+    else:
+        kernel_design = np.asarray(kernel_design, dtype=float)
+        if kernel_design.shape != (wave.size, fallback.size * n_basis):
+            raise ValueError("kernel_design has an incompatible shape")
 
     midpoint = 0.5 * (wave[0] + wave[-1])
     half_width = max(0.5 * (wave[-1] - wave[0]), 1.0)
@@ -775,6 +782,12 @@ def fit_bspline_channel(
     if n_basis >= 3 and roughness_fraction > 0.0:
         curvature_gram = _curvature_gram_cached(fallback.size, n_basis)
         hessian[:n_kernel, :n_kernel] += roughness_fraction * hessian_scale * curvature_gram
+    if fallback.size >= 3 and offset_roughness_fraction > 0.0:
+        d2_offset = np.diff(np.eye(fallback.size), n=2, axis=0)
+        operator = np.kron(d2_offset, np.eye(n_basis))
+        hessian[:n_kernel, :n_kernel] += (
+            offset_roughness_fraction * hessian_scale * (operator.T @ operator)
+        )
 
     basis_information = np.divide(
         basis.T @ information,
@@ -821,8 +834,12 @@ def fit_bspline_channel(
     solution = solver.solve()
     runtime = time.perf_counter() - started
     status = str(solution.status)
-    vector = np.asarray(solution.x, dtype=float)
-    if status not in {"Solved", "AlmostSolved"} or not np.all(np.isfinite(vector)):
+    vector = None if solution.x is None else np.asarray(solution.x, dtype=float)
+    if (
+        status not in {"Solved", "AlmostSolved"}
+        or vector is None
+        or not np.all(np.isfinite(vector))
+    ):
         return _channel_fallback(basis, fallback, knots, "solver_failed", runtime)
 
     raw_coefficient = vector[:n_kernel].reshape(fallback.size, n_basis)
@@ -852,6 +869,40 @@ def fit_bspline_channel(
         "runtime_sec": runtime,
     }
     return surface, coefficient, knots, metrics
+
+
+def fit_bspline_channel(
+    wave: np.ndarray,
+    source: np.ndarray,
+    target: np.ndarray,
+    ivar: np.ndarray,
+    fallback_kernel: np.ndarray,
+    *,
+    n_basis: int = 6,
+    degree: int = 3,
+    roughness_fraction: float = 0.01,
+    fallback_prior_fraction: float = 1.0e-4,
+    information_prior_max_boost: float = 50.0,
+    background_degree: int = 3,
+    free_amplitude: bool = False,
+    knot_vector: np.ndarray | None = None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict[str, float | str]]:
+    """Fit one normalized, central-peak B-spline kernel surface."""
+    return _fit_bspline_channel(
+        wave,
+        source,
+        target,
+        ivar,
+        fallback_kernel,
+        n_basis=n_basis,
+        degree=degree,
+        roughness_fraction=roughness_fraction,
+        fallback_prior_fraction=fallback_prior_fraction,
+        information_prior_max_boost=information_prior_max_boost,
+        background_degree=background_degree,
+        free_amplitude=free_amplitude,
+        knot_vector=knot_vector,
+    )
 
 
 def fit_lsf_surface(
@@ -1102,6 +1153,8 @@ def evaluate_lsf_surface(
     wave: np.ndarray,
 ) -> np.ndarray:
     """Reconstruct a fitted LSF surface from persisted knots and coefficients."""
+    if state.legacy_kernel_representation != "native_grid_channel_median":
+        raise ValueError("state does not contain a discrete 11-tap LSF")
     if state.schema_version != LSF_STATE_SCHEMA_VERSION:
         raise ValueError(f"Unsupported LSF state schema version: {state.schema_version}")
     evaluation_wave = np.asarray(wave, dtype=float)

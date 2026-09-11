@@ -1,9 +1,9 @@
 # Sky decomposition data bundle
 
-This directory is the portable data root for
-`SkyDecompMoonZodiLSFSurfaceIterative`. It contains the physical Moon/Zodi
-model, the exact PALACE tables used by the validated fit, and an unchanged copy
-of the Meftah SOLAR-HRS text spectrum used by the historical decomposition.
+This directory is the portable data root for the production sky-decomposition
+methods. It contains the physical Moon/Zodi model, the exact PALACE tables used
+by the validated fits, the frozen full-grid residual PCA basis, and an unchanged
+copy of the Meftah SOLAR-HRS text spectrum used by the historical decomposition.
 
 The historical `SkyDecomp` and non-split `SkyDecompLSFSurfaceIterative`
 defaults are not redirected here. Their existing `base_dir` and
@@ -26,7 +26,13 @@ data/
 │   ├── meftah_solar_hrs_disk_integrated_v1_1_vacuum_velocity_step_2kms.npz
 │   ├── eso_skycalc_rolo_moon_albedo.dat
 │   └── eso_skycalc_leinert_zodiacal_light.dat
+├── residual_pca/
+│   ├── palace_aijc_full_native_pca_v1.npz
+│   ├── palace_aijc_line_amplitude_pca_v1.npz
+│   ├── palace_aijc_vnf_coefficient_pca_prep_v1.npz
+│   └── palace_aijc_vnf_coefficient_line_amplitude_pca_v1.npz
 └── palace/PMD/
+    ├── pmd_popmodel_OH_telluric_upper_parity_lsf_adam_25000_v1.dat
     ├── pmd_popmodel_OH_h_family_default_ef_v1.dat
     ├── pmd_popmodel_OH_joint_v2_updated.dat
     ├── pmd_refcont_joint_native_adam_invsky_p2_10000iter.dat
@@ -112,9 +118,15 @@ DOI `10.5281/zenodo.14064022`; the model description is Noll et al. (2025),
 under CC BY 4.0 and code under GPLv3.
 
 The new method needs five selected PALACE-compatible ASCII tables. This bundle
-also retains the preceding OH table for explicit backward-compatible runs:
+also retains the preceding OH tables for explicit backward-compatible runs:
 
-- `pmd_popmodel_OH_h_family_default_ef_v1.dat`: current runtime OH table with
+- `pmd_popmodel_OH_telluric_upper_parity_lsf_adam_25000_v1.dat`: current runtime
+  OH table. It changes only `Aij` for 11,393 mapped PALACE rows using the frozen
+  25,000-step telluric-aware Adam result. The optimization jointly varied
+  upper-state/per-family parity weights and each spectrum's continuous 2-D LSF;
+  it used 9 development spectra, excluded `expnum=45851`, and was checked with
+  frozen OH weights on 3 separate validation spectra. Holdout was not evaluated;
+- `pmd_popmodel_OH_h_family_default_ef_v1.dat`: previous runtime OH table with
   the latest export of the terminal 30,000-step refined upper-group/per-family
   weights and the PALACE e/f split retained. It reproduces the previously
   promoted corrected-decoder flat-family export to within text-rounding
@@ -138,6 +150,194 @@ their headers and in `bundle_manifest.json`. The three remaining tables are
 copied unchanged from the local PALACE v1.0 installation. The original files under
 `skysub/palace/PMD/` remain in place for backward compatibility.
 
+## Full-grid residual PCA
+
+`residual_pca/palace_aijc_full_native_pca_v1.npz` contains the residual mean and
+the first 30 orthonormal components from 1,000 PALACE-`Aijc` fits. The matrix was
+built on all 12,401 native wavelength pixels in float64 with column-mean
+subtraction only; `expnum=45851` was excluded. The 10- and 20-component models
+are exact prefixes of the same basis, rather than duplicated assets.
+
+Use the basis only with the PALACE `Aijc` OH strengths from which its residuals
+were constructed:
+
+```python
+from skysub.sky_decomp.residual_pca import (
+    SkyDecompTelluricCorrectedLinesResidualPCA,
+)
+
+decomposer = SkyDecompTelluricCorrectedLinesResidualPCA(
+    wave,
+    telluric_calculator=telluric_calculator,
+    pwv_mm=pwv_mm,
+    source_airmass=source_airmass,
+    drp_transmission=drp_transmission,
+    n_residual_pca_components=30,  # or 10/20
+)
+```
+
+## Line-amplitude residual PCA
+
+`residual_pca/palace_aijc_line_amplitude_pca_v1.npz` is the separate
+line-space alternative. For every one of the same 1,000 PALACE-`Aijc` fits,
+the full 12,401-pixel residual was fitted without sign constraints using the
+saved final LSF and 11,552 separate PALACE catalogue transitions. The group ID
+is metadata only: every OH parity/branch transition is an independent signed
+coefficient. Each sparse column uses the exact telluric-corrected, integrated
+continuous-2D-LSF profile and is normalized to unit native-grid integral, so
+the coefficient is an observed integrated residual-line flux. A weak,
+scale-invariant ridge (`lambda=1e-4`) stabilizes unresolved blends. Of the
+11,552 catalogue transitions, 11,538 have line centres and nonzero support on
+the native grid; the 14 edge transitions remain explicit zero columns. PCA
+uses per-amplitude column-mean subtraction only.
+
+At prediction time the baseline decomposition and its five LSF cycles run
+first. The selected amplitude components are then projected through that
+spectrum's final individual-line design and fitted to its residual with the
+LSF fixed:
+
+```python
+from skysub.sky_decomp.residual_pca import (
+    SkyDecompTelluricCorrectedLinesLineAmplitudePCA,
+)
+
+decomposer = SkyDecompTelluricCorrectedLinesLineAmplitudePCA(
+    wave,
+    telluric_calculator=telluric_calculator,
+    pwv_mm=pwv_mm,
+    source_airmass=source_airmass,
+    drp_transmission=drp_transmission,
+    n_line_amplitude_pca_components=30,  # or 10/20
+)
+```
+
+Both PCA methods retain the compact fitted LSF in the result's `lsf_state`.
+`results_to_fits` writes it as `LSF_COEF`, `LSF_KNOTS`, and `LSF_META`; use
+`load_lsf_surface_state` to reconstruct it without refitting.
+
+## VN-grouped OH and individual-line amplitude PCA
+
+`SkyDecompTelluricCorrectedLinesPalaceAijcVN` ties OH transitions only by
+upper `(v_upper, N_upper)`, reducing the OH fit from 357 to 188 groups. The
+relative `F_upper`, branch, and e/f parity strengths inside each VN group stay
+fixed at PALACE `Aijc * gi`; the 11,393 OH transitions themselves are unchanged.
+With the five non-OH atomic groups, two oxygen-recombination groups, and one O2
+group, the emission-line fit has 196 non-negative coefficients.
+
+`residual_pca/palace_aijc_vn_line_amplitude_pca_v1.npz` contains the first 30
+PCA components from signed amplitudes of all 11,552 individual catalogue lines
+fitted to the full-grid VN residuals. The frozen corpus contains 1,000 spectra;
+`expnum=45851` was excluded before selection and `expnum=45858` was removed by
+the recorded 7-robust-sigma RMS rule, leaving 999 PCA-training spectra. The
+cumulative amplitude-space variance fractions are 0.6581, 0.7234, and 0.7569
+for 10, 20, and 30 components.
+
+At prediction time, the VN baseline first determines the continuous 2-D LSF.
+The selected signed amplitude components are projected through that exact
+telluric-plus-LSF individual-line design. The physical VN model and projected
+PCA columns are then solved together in one final linear fit while the LSF is
+held fixed:
+
+```python
+from skysub.sky_decomp.residual_pca import (
+    SkyDecompTelluricCorrectedLinesVNLineAmplitudePCA,
+)
+
+decomposer = SkyDecompTelluricCorrectedLinesVNLineAmplitudePCA(
+    wave,
+    telluric_calculator=telluric_calculator,
+    pwv_mm=pwv_mm,
+    source_airmass=source_airmass,
+    drp_transmission=drp_transmission,
+    n_line_amplitude_pca_components=30,  # or 10/20
+)
+```
+
+## VNF coefficient PCA Prep and final line-amplitude PCA
+
+`palace_aijc_vnf_coefficient_pca_prep_v1.npz` compresses the 357 non-negative
+PALACE-`Aijc` VNF OH coefficients from 994 spectra retained after the recorded
+7-robust-sigma cut. Eighteen signed PCs plus one non-negative mean scale explain
+0.9999991015 of the centered training variance. The fit expands those latent
+coefficients back to all 357 physical VNF amplitudes before each LSF update, so
+the LSF is still inferred from the complete line catalogue.
+
+`palace_aijc_vnf_coefficient_line_amplitude_pca_v1.npz` is trained from signed,
+lightly ridge-regularized fits of all 11,552 individual line amplitudes to the
+full-grid Prep residuals. Its first 200 PCs are stored. Fifty are the production
+default selected from the held-out diminishing-returns checkpoint. The stricter
+0.999999 amplitude-space variance target would require 993 PCs, and the asset
+records that failure explicitly instead of presenting the 50-PC default as an
+exact amplitude reconstruction.
+
+```python
+from skysub.sky_decomp.residual_pca import (
+    SkyDecompTelluricCorrectedLinesPalaceAijcVNFPCAPrep,
+    SkyDecompTelluricCorrectedLinesVNFPCALineAmplitudePCA,
+)
+
+prep = SkyDecompTelluricCorrectedLinesPalaceAijcVNFPCAPrep(
+    wave,
+    telluric_calculator=telluric_calculator,
+    pwv_mm=pwv_mm,
+    source_airmass=source_airmass,
+    drp_transmission=drp_transmission,
+)
+final = SkyDecompTelluricCorrectedLinesVNFPCALineAmplitudePCA(
+    wave,
+    telluric_calculator=telluric_calculator,
+    pwv_mm=pwv_mm,
+    source_airmass=source_airmass,
+    drp_transmission=drp_transmission,
+    n_line_amplitude_pca_components=50,
+)
+```
+
+Both results retain every fitted coefficient and the compact per-spectrum B/R/Z
+LSF spline state. `results_to_fits` writes them through the existing `COEFF`,
+`LSF_COEF`, `LSF_KNOTS`, and `LSF_META` extensions without changing older output
+schemas.
+
+## Direct line-adjoint PCA
+
+`palace_aijc_vnf_line_adjoint_pca_v1.npz` is the no-full-dictionary-fit
+alternative trained on 994 retained residuals from the 1,000-spectrum
+PALACE-`Aijc` 357-group VNF corpus. For spectrum `i`, its saved
+telluric-plus-LSF line operator `A_i` maps the native residual
+directly to diagonal matched-filter amplitudes,
+`x_i = diag(A_i.T @ A_i)^-1 @ A_i.T @ residual_i`. No coupled 11,552-parameter
+amplitude solve is performed. Consequently unresolved blends remain cross-talk
+in `x_i`; these coordinates must not be described as deblended line fluxes.
+
+The frozen float64 asset stores 500 PCs, which are also the held-out-selected
+default. They explain 0.9975226 of the centered adjoint-amplitude variance. At
+prediction time the vectors are projected through the fitted spectrum's exact
+individual telluric-plus-LSF operator and joined to the physical VNF-PCA model
+in one final linear solve with signed PCA coefficients:
+
+```python
+from skysub.sky_decomp.residual_pca import (
+    SkyDecompTelluricCorrectedLinesPalaceAijcVNFLineAdjointPCA,
+)
+
+decomposer = SkyDecompTelluricCorrectedLinesPalaceAijcVNFLineAdjointPCA(
+    wave,
+    telluric_calculator=telluric_calculator,
+    pwv_mm=pwv_mm,
+    source_airmass=source_airmass,
+    drp_transmission=drp_transmission,
+)
+```
+
+The fitted result records these columns as `LineAdjointPCA_*`; FITS output uses
+`DECOMPM=telluric-corrected-lines-palace-aijc-vnf-line-adjoint-pca` and
+`LADPCAK=500`. The compact LSF output is unchanged.
+
+Across the four frozen held-out spectra, the median full-grid RMS is 0.14796,
+versus 0.32445 for the source VNF fit. The coupled full-dictionary amplitude
+PCA remains more accurate (0.08344 at 50 PCs); the adjoint method exists to
+avoid that training solve, not as a claim of superior residual reconstruction.
+
 ## Runtime selection
 
 The new method uses this bundle without a caller-supplied `base_dir`:
@@ -158,7 +358,7 @@ python skysub/decompose_parallel.py input.fits \
 ```
 
 Both bundled command-line modes select
-`pmd_popmodel_OH_h_family_default_ef_v1.dat` and
+`pmd_popmodel_OH_telluric_upper_parity_lsf_adam_25000_v1.dat` and
 `pmd_refcont_joint_native_adam_invsky_p2_10000iter.dat` by default. Explicit
 `--palace-oh-suffix` and `--palace-diffuse-suffix` values still override those
 defaults.

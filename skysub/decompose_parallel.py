@@ -86,15 +86,26 @@ _WORKER_META = None
 _WORKER_PROGRESS_QUEUE = None
 _WORKER_FIT_MODEL = "baseline"
 _WORKER_EXPOSURE_SECONDS = 900.0
+_WORKER_WAVE = None
+_WORKER_TELLURIC_CALCULATOR = None
+_WORKER_DECOMPOSER_KWARGS = {}
 
 FIT_MODEL_SUFFIXES = {
     "baseline": "",
     "lsf-surface-iterative": "_lsf_surface_iterative",
     "lsf-surface-iterative-split-zodi": "_lsf_surface_iterative_split_zodi",
+    "lsf-spline2d-split-zodi": "_lsf_spline2d_split_zodi",
     "moon-zodi-lsf-surface-iterative": "_moon_zodi_lsf_surface_iterative",
+    "adam25k-telluric-lsf-spline2d": "_adam25k_telluric_lsf_spline2d",
+    "palace-aijc-vnf-line-amplitude-pca30": "_palace_aijc_vnf_line_amplitude_pca30",
 }
 MOON_ZODI_FIT_MODEL = "moon-zodi-lsf-surface-iterative"
 SPLIT_ZODI_FIT_MODEL = "lsf-surface-iterative-split-zodi"
+SPLINE2D_SPLIT_ZODI_FIT_MODEL = "lsf-spline2d-split-zodi"
+SPLIT_ZODI_FIT_MODELS = (SPLIT_ZODI_FIT_MODEL, SPLINE2D_SPLIT_ZODI_FIT_MODEL)
+ADAM25K_TELLURIC_FIT_MODEL = "adam25k-telluric-lsf-spline2d"
+PALACE_VNF_PCA30_FIT_MODEL = "palace-aijc-vnf-line-amplitude-pca30"
+TELLURIC_FIT_MODELS = (ADAM25K_TELLURIC_FIT_MODEL, PALACE_VNF_PCA30_FIT_MODEL)
 
 # Defaults for the SkyDecompLSFSurfaceIterative(split_zodi=True) knobs; match the
 # settings validated on the p40_p70 every10 identifiability notebook.
@@ -137,7 +148,10 @@ def init_worker(
         _WORKER_META, \
         _WORKER_PROGRESS_QUEUE, \
         _WORKER_FIT_MODEL, \
-        _WORKER_EXPOSURE_SECONDS
+        _WORKER_EXPOSURE_SECONDS, \
+        _WORKER_WAVE, \
+        _WORKER_TELLURIC_CALCULATOR, \
+        _WORKER_DECOMPOSER_KWARGS
 
     _clamp_native_threads(1)
 
@@ -158,6 +172,9 @@ def init_worker(
     _WORKER_FACTOR = float(factor)
     _WORKER_FIT_MODEL = fit_model
     _WORKER_EXPOSURE_SECONDS = float(exposure_seconds)
+    _WORKER_WAVE = np.asarray(wave, dtype=np.float64)
+    _WORKER_TELLURIC_CALCULATOR = None
+    _WORKER_DECOMPOSER_KWARGS = {}
     # Keep worker-local memmapped access to flux tables to avoid large IPC payloads.
     _WORKER_HDU = fits.open(data_file, memmap=True)
     _WORKER_PROGRESS_QUEUE = progress_queue
@@ -166,7 +183,7 @@ def init_worker(
         "sky1": np.asarray(_WORKER_HDU["FLUX_SKY_NEAR"].data),
         "sky2": np.asarray(_WORKER_HDU["FLUX_SKY_FAR"].data),
     }
-    if fit_model == MOON_ZODI_FIT_MODEL:
+    if fit_model == MOON_ZODI_FIT_MODEL or fit_model in TELLURIC_FIT_MODELS:
         _WORKER_LSF = {
             "sci": np.asarray(_WORKER_HDU["LSF_SCI"].data),
             "sky1": np.asarray(_WORKER_HDU["LSF_SKY_NEAR"].data),
@@ -212,13 +229,18 @@ def init_worker(
                 n_refinement_cycles=n_refinement_cycles,
             ),
         )
-    elif fit_model == SPLIT_ZODI_FIT_MODEL:
+    elif fit_model in SPLIT_ZODI_FIT_MODELS:
         from skysub.sky_decomp.lsf_surface_iterative import (
             LSFSurfaceIterativeConfig,
             SkyDecompLSFSurfaceIterative,
         )
 
-        _WORKER_DECOMPOSER = SkyDecompLSFSurfaceIterative(
+        decomposer_class = SkyDecompLSFSurfaceIterative
+        if fit_model == SPLINE2D_SPLIT_ZODI_FIT_MODEL:
+            from skysub.sky_decomp.lsf_spline2d import SkyDecompLSFSpline2D
+
+            decomposer_class = SkyDecompLSFSpline2D
+        _WORKER_DECOMPOSER = decomposer_class(
             wave,
             lsf_sigma=lsf_sigma,
             base_dir=base_dir,
@@ -235,6 +257,11 @@ def init_worker(
             zodi_color_exponent=SPLIT_ZODI_COLOR_EXPONENT,
             config=LSFSurfaceIterativeConfig(
                 n_refinement_cycles=n_refinement_cycles,
+                **(
+                    {"roughness_fraction": 1.0e-4}
+                    if fit_model == SPLINE2D_SPLIT_ZODI_FIT_MODEL
+                    else {}
+                ),
             ),
         )
     elif fit_model == MOON_ZODI_FIT_MODEL:
@@ -260,6 +287,39 @@ def init_worker(
                 n_refinement_cycles=n_refinement_cycles,
             ),
         )
+    elif fit_model in TELLURIC_FIT_MODELS:
+        from lvmdrp.core.fluxcal import TelluricCalculator
+        from skysub.sky_decomp.lsf_surface_iterative import LSFSurfaceIterativeConfig
+
+        if fit_model == ADAM25K_TELLURIC_FIT_MODEL:
+            from skysub.sky_decomp.telluric_corrected_lines import (
+                SkyDecompAdam25kTelluricLSFSpline2D,
+            )
+
+            _WORKER_DECOMPOSER = SkyDecompAdam25kTelluricLSFSpline2D
+        else:
+            from skysub.sky_decomp.residual_pca import (
+                SkyDecompPalaceAijcVNFLineAmplitudePCA,
+            )
+
+            _WORKER_DECOMPOSER = SkyDecompPalaceAijcVNFLineAmplitudePCA
+        _WORKER_TELLURIC_CALCULATOR = TelluricCalculator()
+        _WORKER_DECOMPOSER_KWARGS = {
+            "lsf_sigma": lsf_sigma,
+            "base_dir": base_dir,
+            "palace_suffix": palace_suffix,
+            "palace_oh_suffix": palace_oh_suffix,
+            "palace_diffuse_suffix": palace_diffuse_suffix,
+            "moon_smooth_lambda": 0.1,
+            "moon_interline_boost": 0.0,
+            "n_spline_knots": int(n_spline_knots),
+            "config": LSFSurfaceIterativeConfig(
+                n_refinement_cycles=n_refinement_cycles,
+                roughness_fraction=1.0e-4,
+            ),
+        }
+        if fit_model == PALACE_VNF_PCA30_FIT_MODEL:
+            _WORKER_DECOMPOSER_KWARGS["n_line_amplitude_pca_components"] = 30
     else:
         raise ValueError(f"Unknown fit model: {fit_model}")
 
@@ -337,6 +397,59 @@ def _moon_zodi_observation(kind, row_index):
     )
 
 
+def _telluric_decomposer(kind, row_index):
+    from skysub.sky_decomp.telluric_corrected_lines import calculate_drp_transmission
+
+    row = _WORKER_META[row_index]
+    names = set(_WORKER_META.dtype.names or ())
+    required = {
+        "pwv_med",
+        "sci_airmass",
+        "skye_airmass",
+        "skyw_airmass",
+        "sky_near_label",
+        "sky_far_label",
+    }
+    missing = sorted(required - names)
+    if missing:
+        raise KeyError(f"Telluric fit requires META columns: {', '.join(missing)}")
+
+    pwv_mm = float(row["pwv_med"])
+    sci_airmass = float(row["sci_airmass"])
+    if kind == "sci":
+        source_airmass = sci_airmass
+    else:
+        label_column = "sky_near_label" if kind == "sky1" else "sky_far_label"
+        label = _text_value(row[label_column]).lower()
+        airmass_column = {"skye": "skye_airmass", "skyw": "skyw_airmass"}.get(label)
+        if airmass_column is None:
+            raise ValueError(f"Unknown {label_column} value: {label!r}")
+        source_airmass = float(row[airmass_column])
+    physical_values = (pwv_mm, sci_airmass, source_airmass)
+    if not all(np.isfinite(value) and value > 0.0 for value in physical_values):
+        raise ValueError(
+            f"Telluric fit requires positive finite META.pwv_med and airmass values "
+            f"at row {row_index}"
+        )
+
+    lsf_row = np.asarray(_WORKER_LSF[kind][row_index], dtype=np.float64)
+    drp_transmission = calculate_drp_transmission(
+        _WORKER_WAVE,
+        lsf_row[None, :],
+        pwv_mm,
+        sci_airmass,
+        _WORKER_TELLURIC_CALCULATOR,
+    )
+    return _WORKER_DECOMPOSER(
+        _WORKER_WAVE,
+        telluric_calculator=_WORKER_TELLURIC_CALCULATOR,
+        pwv_mm=pwv_mm,
+        source_airmass=source_airmass,
+        drp_transmission=drp_transmission,
+        **_WORKER_DECOMPOSER_KWARGS,
+    )
+
+
 def fit_chunk_worker(args):
     """Fit one chunk of spectra using the worker-local SkyDecomp instance."""
     global _WORKER_DECOMPOSER, _WORKER_FACTOR, _WORKER_PROGRESS_QUEUE, _WORKER_FIT_MODEL
@@ -356,13 +469,7 @@ def fit_chunk_worker(args):
                 verbose=False,
                 n_lsf_refits=3,
             )
-        elif _WORKER_FIT_MODEL == "lsf-surface-iterative":
-            result = _WORKER_DECOMPOSER.fit(
-                flux_row,
-                ivar_row,
-                verbose=False,
-            )
-        elif _WORKER_FIT_MODEL == SPLIT_ZODI_FIT_MODEL:
+        elif _WORKER_FIT_MODEL in ("lsf-surface-iterative", *SPLIT_ZODI_FIT_MODELS):
             result = _WORKER_DECOMPOSER.fit(
                 flux_row,
                 ivar_row,
@@ -378,6 +485,12 @@ def fit_chunk_worker(args):
                 ivar_row,
                 observation=_moon_zodi_observation(kind, idx),
                 detector_lsf_fwhm=lsf_row,
+                verbose=False,
+            )
+        elif _WORKER_FIT_MODEL in TELLURIC_FIT_MODELS:
+            result = _telluric_decomposer(kind, idx).fit(
+                flux_row,
+                ivar_row,
                 verbose=False,
             )
         else:
@@ -409,7 +522,7 @@ def resolve_runtime_data_roots(
     moon_zodi_data_root=None,
 ):
     """Resolve only the data contract used by the selected fit model."""
-    if fit_model == MOON_ZODI_FIT_MODEL:
+    if fit_model == MOON_ZODI_FIT_MODEL or fit_model in TELLURIC_FIT_MODELS:
         candidate = (
             moon_zodi_data_root
             if moon_zodi_data_root is not None
@@ -421,7 +534,7 @@ def resolve_runtime_data_roots(
         validate_decomposition_data_root(str(data_root))
         return data_root, data_root
 
-    if fit_model == SPLIT_ZODI_FIT_MODEL and (
+    if fit_model in SPLIT_ZODI_FIT_MODELS and (
         moon_zodi_data_root is not None or palace_dir is None
     ):
         candidate = (
@@ -433,7 +546,7 @@ def resolve_runtime_data_roots(
         validate_decomposition_data_root(str(data_root))
         return data_root, data_root
 
-    if fit_model == SPLIT_ZODI_FIT_MODEL and palace_dir is not None:
+    if fit_model in SPLIT_ZODI_FIT_MODELS and palace_dir is not None:
         candidate = Path(palace_dir).expanduser().resolve()
         if (candidate / "bundle_manifest.json").is_file():
             validate_decomposition_data_root(str(candidate))
@@ -506,10 +619,14 @@ def run(
     print(f"  exposure_seconds_fallback={exposure_seconds}")
     if resolved_moon_zodi_data_root is not None:
         print(f"  bundled_data_root={str(resolved_moon_zodi_data_root)!r}")
-    if fit_model in ("lsf-surface-iterative", SPLIT_ZODI_FIT_MODEL):
+    if fit_model in (
+        "lsf-surface-iterative",
+        *SPLIT_ZODI_FIT_MODELS,
+        *TELLURIC_FIT_MODELS,
+    ):
         print(f"  n_spline_knots={n_spline_knots} "
               f"(Moon_bs basis = {int(n_spline_knots) + 4})")
-    if fit_model == SPLIT_ZODI_FIT_MODEL:
+    if fit_model in SPLIT_ZODI_FIT_MODELS:
         print(f"  n_zodi_spline_knots={n_zodi_spline_knots}, "
               f"zodi_smooth_lambda={zodi_smooth_lambda}")
     print(f"  pin_workers={pin_workers}, diagnose_threads={diagnose_threads}")
@@ -671,7 +788,9 @@ def extract_meta_and_coef_products(
         out_path = decomp_outputs[index - 1]
         if out_path is None:
             stem_lower = Path(decomp_path).stem.lower()
-            if "moon_zodi_lsf_surface_iterative" in stem_lower:
+            if "lsf_spline2d_split_zodi" in stem_lower:
+                variant = "_lsf_spline2d_split_zodi"
+            elif "moon_zodi_lsf_surface_iterative" in stem_lower:
                 variant = "_moon_zodi_lsf_surface_iterative"
             elif "lsf_surface_iterative" in stem_lower:
                 variant = "_lsf_surface_iterative"
@@ -812,7 +931,7 @@ def main():
         help=(
             "Legacy project/PALACE root, or a complete bundled data root containing "
             "bundle_manifest.json. Required by baseline and non-split "
-            "lsf-surface-iterative; optional for split-zodi and Moon/Zodi modes."
+            "lsf-surface-iterative; optional for bundled production modes."
         ),
     )
     parser.add_argument(
@@ -846,7 +965,7 @@ def main():
         "--n-refinement-cycles",
         type=int,
         default=5,
-        help="Continuum/LSF/line cycles for lsf-surface-iterative (default: 5)",
+        help="Continuum/LSF/line cycles for iterative LSF methods (default: 5)",
     )
     parser.add_argument(
         "--palace-suffix",
@@ -884,7 +1003,7 @@ def main():
         default=None,
         help=(
             "Complete data root containing moon_zodi/ and palace/PMD for the "
-            "Moon/Zodi or split-zodi method (default for both: packaged "
+            "Moon/Zodi, split-zodi, or telluric method (default: packaged "
             "skysub/sky_decomp/data)."
         ),
     )
@@ -894,7 +1013,7 @@ def main():
         default=MOON_N_KNOTS_DEFAULT,
         help=(
             f"Interior B-spline knots for Moon_bs when --fit-model is "
-            f"lsf-surface-iterative or {SPLIT_ZODI_FIT_MODEL} "
+            f"lsf-surface-iterative, split-zodi, or telluric "
             f"(default: {MOON_N_KNOTS_DEFAULT}; Moon_bs basis = knots + 4)."
         ),
     )
@@ -903,8 +1022,8 @@ def main():
         type=int,
         default=SPLIT_ZODI_N_KNOTS_DEFAULT,
         help=(
-            f"Interior B-spline knots for Zodi_bs when "
-            f"--fit-model={SPLIT_ZODI_FIT_MODEL} (default: {SPLIT_ZODI_N_KNOTS_DEFAULT})."
+            f"Interior B-spline knots for Zodi_bs with a split-zodi method "
+            f"(default: {SPLIT_ZODI_N_KNOTS_DEFAULT})."
         ),
     )
     parser.add_argument(
@@ -912,8 +1031,8 @@ def main():
         type=float,
         default=SPLIT_ZODI_SMOOTH_LAMBDA_DEFAULT,
         help=(
-            f"Curvature penalty on the Zodi_bs spline when "
-            f"--fit-model={SPLIT_ZODI_FIT_MODEL} (default: {SPLIT_ZODI_SMOOTH_LAMBDA_DEFAULT})."
+            f"Curvature penalty on Zodi_bs with a split-zodi method "
+            f"(default: {SPLIT_ZODI_SMOOTH_LAMBDA_DEFAULT})."
         ),
     )
     parser.add_argument(
@@ -965,7 +1084,8 @@ def main():
         )
     if (
         not args.only_thin
-        and args.fit_model not in (MOON_ZODI_FIT_MODEL, SPLIT_ZODI_FIT_MODEL)
+        and args.fit_model
+        not in (MOON_ZODI_FIT_MODEL, *SPLIT_ZODI_FIT_MODELS, *TELLURIC_FIT_MODELS)
         and args.palace_dir is None
     ):
         parser.error(

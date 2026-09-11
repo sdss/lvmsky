@@ -39,7 +39,7 @@ FORMULA_VERSION = "moon-zodi-geometry-v1"
 CORRECTION_SCOPE = "moon_plus_zodi"
 DATA_BUNDLE_SCHEMA_VERSION = 1
 DATA_BUNDLE_ID = "sky_decomp_moon_zodi_lsf_surface_iterative_v1"
-DEFAULT_PALACE_OH_SUFFIX = "_h_family_default_ef_v1"
+DEFAULT_PALACE_OH_SUFFIX = "_telluric_upper_parity_lsf_adam_25000_v1"
 DEFAULT_PALACE_DIFFUSE_SUFFIX = "_joint_native_adam_invsky_p2_10000iter"
 EPHEMERIS_ASSET = "jpl_de432s_short_planetary_ephemeris.bsp"
 SOLAR_ASSET = (
@@ -89,7 +89,7 @@ def wave_sha256(wave: np.ndarray) -> str:
 
 @lru_cache(maxsize=None)
 def validate_decomposition_data_root(data_root: str) -> dict[str, object]:
-    """Validate the complete portable data contract used by the new method."""
+    """Validate the portable PALACE and Moon/Zodi core data contract."""
     root = Path(data_root)
     manifest_path = root / "bundle_manifest.json"
     if not manifest_path.is_file():
@@ -121,15 +121,17 @@ def validate_decomposition_data_root(data_root: str) -> dict[str, object]:
         "palace/PMD/pmd_intmodel_Orc.dat",
         "palace/PMD/pmd_popmodel_O2.dat",
     }
-    recorded_palace_paths = {str(record.get("path")) for record in records}
+    records_by_path = {str(record.get("path")): record for record in records}
+    recorded_palace_paths = set(records_by_path)
     missing_palace_paths = required_palace_paths - recorded_palace_paths
     if missing_palace_paths:
         raise ValueError(
             "Sky decomposition data bundle lacks required PALACE assets: "
             + ", ".join(sorted(missing_palace_paths))
         )
-    for record in records:
-        path = root / str(record["path"])
+    for relative_path in sorted(required_palace_paths):
+        record = records_by_path[relative_path]
+        path = root / relative_path
         expected = str(record["sha256"])
         if not path.is_file():
             raise FileNotFoundError(f"Required PALACE asset is missing: {path}")
@@ -152,6 +154,30 @@ def validate_decomposition_data_root(data_root: str) -> dict[str, object]:
             f"expected {solar['sha256']}, found {actual_solar}"
         )
     return payload
+
+
+@lru_cache(maxsize=None)
+def validate_decomposition_asset_contract(
+    data_root: str,
+    contract_key: str,
+    label: str,
+) -> dict[str, object]:
+    """Validate one method-specific asset without coupling sibling methods."""
+    root = Path(data_root)
+    payload = validate_decomposition_data_root(data_root)
+    contract = payload.get(contract_key)
+    if not isinstance(contract, dict):
+        raise ValueError(f"Sky decomposition data bundle lacks a {label} contract")
+    asset_path = root / str(contract["path"])
+    if not asset_path.is_file():
+        raise FileNotFoundError(f"Required {label} asset is missing: {asset_path}")
+    actual = file_sha256(asset_path)
+    if actual != str(contract["sha256"]):
+        raise ValueError(
+            f"Checksum mismatch for {label} asset {asset_path.name}: "
+            f"expected {contract['sha256']}, found {actual}"
+        )
+    return contract
 
 
 @dataclass(frozen=True, slots=True)
@@ -1044,6 +1070,7 @@ __all__ = [
     "build_projection_operator",
     "compute_midpoint_geometry",
     "file_sha256",
+    "validate_decomposition_asset_contract",
     "validate_decomposition_data_root",
     "wave_sha256",
 ]
