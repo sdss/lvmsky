@@ -417,6 +417,11 @@ class SkyDecomp:
         zodi_amp_bound: float = 0.0,
         diffuse_ratio_bound_dex: float = 0.0,
         diffuse_ratio_nominal: tuple[float, ...] | None = None,
+        diffuse_oh_centre_log10: float | None = None,
+        diffuse_oh_bound_dex: float = 0.0,
+        diffuse_oh_gate_frac: float = 0.6,
+        diffuse_oh_relax_dex: float = 0.0,
+        diffuse_oh_scope: str = "block",
         moon_scatter_envelope: bool = False,
         moon_ms_coeff: float = 3.5,
         moon_relax_gate: tuple[float, float] | None = None,
@@ -539,6 +544,30 @@ class SkyDecomp:
                     "diffuse_ratio_nominal must be >=2 finite positive flux shares, "
                     f"got {diffuse_ratio_nominal!r}")
             self.diffuse_ratio_nominal = tuple(_dn / _dn.sum())
+        # FeO-vs-OH upper bound, moon-gated.  FeO is mesospheric
+        # chemiluminescence and cannot depend on the moon, yet measured on
+        # gaia-stars-mask-cont its amplitude relative to OH rises a factor 4.5
+        # with moon_frac_po (rho +0.69) while airmass and van Rhijn show
+        # nothing -- the FeO template is absorbing scattered moonlight, ~74% of
+        # the fitted FeO on full-moon rows.  This caps it.
+        #
+        # UPPER BOUND ONLY and MOON-GATED, both measured: the dark-time scatter
+        # of log10(A_FeO/A_OH) is 0.306 dex and is REAL -- clipping it costs
+        # 15-32% of the blue chi2 -- so a two-sided or ungated bound is
+        # unaffordable.  The allowed width ramps from `+relax` at the gate to
+        # `bound` at full moon, so the constraint tightens where the leak is
+        # worst and vanishes below the gate.
+        self.diffuse_oh_centre_log10 = (None if diffuse_oh_centre_log10 is None
+                                    else float(diffuse_oh_centre_log10))
+        self.diffuse_oh_bound_dex = float(max(diffuse_oh_bound_dex, 0.0))
+        self.diffuse_oh_gate_frac = float(np.clip(diffuse_oh_gate_frac, 0.0, 0.999))
+        self.diffuse_oh_relax_dex = float(max(diffuse_oh_relax_dex, 0.0))
+        if str(diffuse_oh_scope) not in ("block", "feo"):
+            raise ValueError(
+                f"diffuse_oh_scope must be 'block' or 'feo', got {diffuse_oh_scope!r}")
+        self.diffuse_oh_scope = str(diffuse_oh_scope)
+        # Installed per row by `set_diffuse_oh_reference`; None disables the bound.
+        self._diffuse_oh_amp = None
         self._amp_prior_zodi_total = None
         # Two-channel (Rayleigh + aerosol) scattered-moonlight envelope with a
         # multiple-scattering enhancement, installed per row by
@@ -1420,6 +1449,53 @@ class SkyDecomp:
                                 ratio_rows.append(_row / _norm)
                                 ratio_rhs.append(0.0)
 
+            # --- Moon-gated upper bound on A_FeO / A_OH ---------------------
+            # A_FeO <= 10**(centre + W(f)) * A_OH with A_OH a KNOWN constant
+            # (OH lives in the line model, which is fixed during this solve),
+            # so this is one linear inequality with a right-hand side.
+            #   W(f) = bound + relax * (1 - s),  s = (f - gate) / (1 - gate)
+            # clipped to [0, 1]; no bound at all for f <= gate.  See the
+            # constructor for why it is one-sided and gated.
+            _fo_amp = getattr(self, '_diffuse_oh_amp', None)
+            _fo_c = getattr(self, 'diffuse_oh_centre_log10', None)
+            _fo_w = float(getattr(self, 'diffuse_oh_bound_dex', 0.0))
+            _fo_f = getattr(self, '_amp_prior_moon_fraction', None)
+            if (_fo_amp is not None and _fo_c is not None and _fo_w > 0.0
+                    and _fo_f is not None and np.isfinite(_fo_f)
+                    and diffuse_slice_local is not None):
+                _g = float(getattr(self, 'diffuse_oh_gate_frac', 0.6))
+                _fr = float(np.clip(_fo_f, 0.0, 1.0))
+                if _fr > _g:
+                    _s = np.clip((_fr - _g) / max(1.0 - _g, 1e-6), 0.0, 1.0)
+                    _w_eff = _fo_w + float(getattr(self, 'diffuse_oh_relax_dex', 0.0)) * (1.0 - _s)
+                    _d0 = diffuse_slice_local.start or 0
+                    _d1 = diffuse_slice_local.stop or _d0
+                    if (_d1 - _d0) == 3:          # HO2, FeO, O2Ac
+                        _fcol = np.asarray(a_mat.sum(axis=0), dtype=np.float64) / col_scale
+                        # 'block' constrains HO2 + FeO + O2Ac against OH.  That
+                        # is the right scope: the +/-0.2 dex species-ratio
+                        # bracket ties the three together, so an FeO-only cap
+                        # is limited by that bracket's lower edge on ~40% of
+                        # gated rows (occupancy rose 25.8% -> 40.5% when the
+                        # FeO-only version ran).  The block ratio is also the
+                        # better-behaved quantity: dark-time robust sigma
+                        # 0.216 dex against FeO's 0.306, Theil-Sen slope
+                        # against OH +1.16 against +1.40, and a STRONGER moon
+                        # correlation (+0.716 against +0.693).
+                        if str(getattr(self, 'diffuse_oh_scope', 'block')) == 'block':
+                            _cols = np.arange(_d0, _d1)
+                        else:
+                            _cols = np.array([_d0 + 1])
+                        _i_feo = float(np.sum(_fcol[_cols]))
+                        if _i_feo > 0.0:
+                            _row = np.zeros(n_par_local, dtype=np.float64)
+                            _row[_cols] = _fcol[_cols]
+                            _cap = (10.0 ** (_fo_c + _w_eff)) * _fo_amp
+                            _nrm = float(np.max(np.abs(_row)))
+                            if _nrm > 0.0:
+                                ratio_rows.append(_row / _nrm)
+                                ratio_rhs.append(_cap / _nrm)
+
             # --- Absolute bracket on int(zodi) against the Leinert prediction --
             #   Z_pred / kappa <= v <= kappa * Z_pred
             # stated in native flux units, so `a_mat` enters unscaled and only
@@ -2093,6 +2169,23 @@ class SkyDecomp:
         self.matrix_moon_hr = (
             (self._moon_envelope_base_hr * shape)[:, None] * self._moon_bspl).T
         self.design_matrix = self._assemble_design_matrix()
+
+    def set_diffuse_oh_reference(self, oh_amplitude: float | None) -> None:
+        """Install this row's band-integrated OH amplitude for the FeO bound.
+
+        ``oh_amplitude`` must be on the same flux scale as the array passed to
+        ``fit`` (the caller multiplies by ``physical_to_fit_flux_scale``), and
+        is the integral of the CURRENT line model's OH block, so it has to be
+        re-installed on every continuum solve as the LSF refines.  ``None``
+        clears the bound.  Takes effect only when ``diffuse_oh_bound_dex > 0`` and
+        ``diffuse_oh_centre_log10`` is set; the moon gate reads the fraction
+        already installed by :meth:`set_amplitude_prior`, so no extra
+        per-row plumbing is needed.
+        """
+        if oh_amplitude is None or not np.isfinite(oh_amplitude) or oh_amplitude <= 0:
+            self._diffuse_oh_amp = None
+        else:
+            self._diffuse_oh_amp = float(oh_amplitude)
 
     def set_amplitude_prior(self, moon_fraction: float | None,
                             zodi_total: float | None = None) -> None:

@@ -162,6 +162,59 @@ SPLIT_ZODI_ZODI_AMP_BOUND = 2.0
 # those downstream; count them after a run.
 SPLIT_ZODI_DIFFUSE_RATIO_BOUND_DEX = 0.2
 SPLIT_ZODI_DIFFUSE_RATIO_NOMINAL = (0.0396, 0.7026, 0.2578)
+
+# Moon-gated upper bound on the DIFFUSE BLOCK relative to OH.
+# The three diffuse species are mesospheric chemiluminescence and cannot
+# depend on the moon, yet on gaia-stars-mask-cont their amplitude relative to
+# OH rises with moon_frac_po -- rho +0.716 for the block (FeO alone +0.693,
+# and HO2/O2Ac inherit it through the species-ratio bracket) -- while airmass
+# and van Rhijn give +0.015.  The templates are absorbing scattered
+# moonlight: ~74% of the fitted FeO on full-moon rows, 3-5% of the fitted
+# continuum.  OH itself is moon-independent (rho +0.088), so it is a clean
+# normaliser.
+#
+# SCOPE IS THE BLOCK, not FeO alone.  An FeO-only cap was implemented and
+# validated first; it worked (chi2-free, 99% of the released flux to the
+# moon) but on ~40% of gated rows the +/-0.2 dex species-ratio bracket became
+# the binding constraint instead -- log10(FeO/HO2) lower-edge occupancy rose
+# 25.8% -> 40.5% -- so FeO could not fall further and the Noll anchor barely
+# moved.  Capping the block lets the ratio bracket distribute the reduction
+# rather than block it.  The block ratio is also better behaved: dark-time
+# robust sigma 0.216 dex against 0.306 for FeO, and Theil-Sen slope against
+# OH +1.16 against +1.40.
+#
+# CENTRE is the dark-time median of log10(A_diffuse/A_OH) over diffuse-live
+# rows, where there is no moon to leak.  Re-measure it per corpus.
+#
+# ONE-SIDED AND GATED, both forced by measurement: the dark-time scatter is
+# real -- clipping it cost 15-32% of the blue chi2 in the FeO-only sizing
+# test -- so a two-sided or ungated bound is unaffordable.
+#
+# RELAX = 0, i.e. a flat width above the gate.  The ramp was there to avoid a
+# discontinuity at the gate, but it is unnecessary: the measured excess is
+# only -0.04 to +0.04 dex just above the gate, well inside the allowed 0.25,
+# so the bound is naturally inactive there and turns on where the excess
+# exceeds the legitimate scatter.  Median excess by moon_frac_po:
+# +0.04 dex at 0.61-0.82, +0.22 at 0.82-0.91, +0.37 at 0.91-0.95,
+# +0.52 at 0.95-1.00.
+#
+# BOUND TIGHTENED 0.25 -> 0.15 dex on 2026-09-11.  At 0.25 the bound sat at a
+# ratio of 0.3991, ABOVE the observed 0.244 and 0.374 in the two lower gated
+# bins, so the real moon dependence over moon_frac_po 0.6-0.9 went untouched
+# and the residual correlation stayed at +0.644.  0.15 puts the bound at
+# 0.317, which bites in those bins too.  Affordable because the cap measured
+# chi2-FREE at 0.25: blue -0.21% on binding rows, 0.00% elsewhere, zero dark
+# rows touched, collapse rate unchanged at 2.40%.
+#
+# KNOWN RISK: 0.15 dex is ~0.7x the dark-time robust sigma of
+# log10(A_diffuse/A_OH) (0.216 dex), which is our only estimate of the
+# intrinsic spread.  On gated rows the intrinsic and moon-driven parts cannot
+# be separated, so this may clip legitimate variation.  Watch the blue chi2 on
+# gated-but-not-binding rows and the diffuse-collapse rate.
+SPLIT_ZODI_DIFFUSE_OH_CENTRE_LOG10 = -0.6489
+SPLIT_ZODI_DIFFUSE_OH_BOUND_DEX = 0.15
+SPLIT_ZODI_DIFFUSE_OH_GATE_FRAC = 0.6
+SPLIT_ZODI_DIFFUSE_OH_RELAX_DEX = 0.0
 # Absolute recentring of the Leinert anchor.  The anchor brackets the fitted
 # zodi total to [Z_pred/kappa_z, kappa_z * Z_pred], and Z_pred comes from
 # _physics_only_model, whose learned scale factors are deliberately zeroed --
@@ -489,6 +542,8 @@ def init_worker(
     centre_on_halpha=SCIENCE_LINE_MASK_CENTRE_ON_HALPHA,
     diffuse_ratio_bound_dex=SPLIT_ZODI_DIFFUSE_RATIO_BOUND_DEX,
     diffuse_ratio_nominal=SPLIT_ZODI_DIFFUSE_RATIO_NOMINAL,
+    diffuse_oh_centre_log10=SPLIT_ZODI_DIFFUSE_OH_CENTRE_LOG10,
+    diffuse_oh_bound_dex=SPLIT_ZODI_DIFFUSE_OH_BOUND_DEX,
 ):
     """Initialise one SkyDecomp instance per worker process."""
     global \
@@ -607,6 +662,11 @@ def init_worker(
             zodi_amp_bound=SPLIT_ZODI_ZODI_AMP_BOUND,
             diffuse_ratio_bound_dex=float(diffuse_ratio_bound_dex),
             diffuse_ratio_nominal=diffuse_ratio_nominal,
+            diffuse_oh_centre_log10=diffuse_oh_centre_log10,
+            diffuse_oh_bound_dex=float(diffuse_oh_bound_dex),
+            diffuse_oh_gate_frac=SPLIT_ZODI_DIFFUSE_OH_GATE_FRAC,
+            diffuse_oh_relax_dex=SPLIT_ZODI_DIFFUSE_OH_RELAX_DEX,
+            diffuse_oh_scope="block",
             config=LSFSurfaceIterativeConfig(
                 n_refinement_cycles=n_refinement_cycles,
             ),
@@ -1045,6 +1105,8 @@ def run(
     zodi_smooth_lambda=SPLIT_ZODI_SMOOTH_LAMBDA_DEFAULT,
     diffuse_ratio_bound_dex=SPLIT_ZODI_DIFFUSE_RATIO_BOUND_DEX,
     diffuse_ratio_nominal=SPLIT_ZODI_DIFFUSE_RATIO_NOMINAL,
+    diffuse_oh_centre_log10=SPLIT_ZODI_DIFFUSE_OH_CENTRE_LOG10,
+    diffuse_oh_bound_dex=SPLIT_ZODI_DIFFUSE_OH_BOUND_DEX,
     mask_science_lines=SCIENCE_LINE_MASK_ENABLED,
     centre_on_halpha=SCIENCE_LINE_MASK_CENTRE_ON_HALPHA,
 ):
@@ -1138,6 +1200,8 @@ def run(
             bool(centre_on_halpha),
             float(diffuse_ratio_bound_dex),
             diffuse_ratio_nominal,
+            diffuse_oh_centre_log10,
+            float(diffuse_oh_bound_dex),
         ),
     ) as executor:
         pbar = tqdm(
@@ -1504,6 +1568,29 @@ def main():
         ),
     )
     parser.add_argument(
+        "--diffuse-oh-bound-dex",
+        type=float,
+        default=SPLIT_ZODI_DIFFUSE_OH_BOUND_DEX,
+        help=(
+            "Half-width in dex of the MOON-GATED upper bound on A_FeO / A_OH, "
+            "above --diffuse-oh-centre-log10. 0 disables. FeO is mesospheric and "
+            "cannot depend on the moon, but its amplitude relative to OH rises "
+            "a factor 4.5 with moon_frac_po, so the template is absorbing "
+            "scattered moonlight. One-sided and gated because the dark-time "
+            "scatter of the ratio is 0.306 dex and real."
+        ),
+    )
+    parser.add_argument(
+        "--diffuse-oh-centre-log10",
+        type=float,
+        default=SPLIT_ZODI_DIFFUSE_OH_CENTRE_LOG10,
+        help=(
+            "log10(A_FeO / A_OH) centre for the bound above: the DARK-TIME "
+            "median over FeO-live rows, where there is no moon to leak. "
+            "Re-measure per corpus."
+        ),
+    )
+    parser.add_argument(
         "--diffuse-ratio-nominal",
         type=str,
         default=",".join(str(v) for v in SPLIT_ZODI_DIFFUSE_RATIO_NOMINAL),
@@ -1622,6 +1709,8 @@ def main():
             n_zodi_spline_knots=args.n_zodi_spline_knots,
             zodi_smooth_lambda=args.zodi_smooth_lambda,
             diffuse_ratio_bound_dex=args.diffuse_ratio_bound_dex,
+            diffuse_oh_bound_dex=args.diffuse_oh_bound_dex,
+            diffuse_oh_centre_log10=args.diffuse_oh_centre_log10,
             diffuse_ratio_nominal=(
                 None if not args.diffuse_ratio_nominal
                 else tuple(float(v) for v in args.diffuse_ratio_nominal.split(","))
