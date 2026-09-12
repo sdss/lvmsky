@@ -68,7 +68,19 @@ def save_ensemble(ensemble_artifacts: Mapping[str, Any], out_path: str | Path) -
         "score_scaler": first["score_scaler"],
         "ctx_scaler":   first["ctx_scaler"],
         "compressors":  ensemble_artifacts["compressors"],
+        # LEGACY, kept so an older loader still works: member 0's calibration.
         "jensen_corrections": first["jensen_corrections"],
+        # PER-MEMBER calibration (2026-09-12).  `jensen_corrections` is fitted
+        # from each member's OWN predictions, so the ten members do NOT share
+        # it -- on gaia-stars-mask-cont2 the per-coef moon lift spans
+        # 0.991-1.012 across seeds and the mesospheric scalar 0.9997-1.0074.
+        # Saving only member 0's and applying it to all ten made the RESTORED
+        # ensemble a different predictor from the one that was validated:
+        # moon amplitude MAD 0.01163 -> 0.01192, mesospheric ML 45.0 -> 45.56,
+        # blue chi2 1.202 -> 1.238, while a fresh retrain reproduced the
+        # original numbers EXACTLY (training is deterministic given the seeds).
+        # The shipped artifact has to be the model that was measured.
+        "member_jensen_corrections": [m["jensen_corrections"] for m in members],
         "coef_upper_bound":   ensemble_artifacts["coef_upper_bound"],
         "geom_kwargs":  ensemble_artifacts["geom_kwargs"],
         "group_indices":    ensemble_artifacts["group_indices"],
@@ -176,7 +188,27 @@ def load_ensemble(path: str | Path, *, device: str | None = None,
     n_input_score = int(payload["n_input_score"])
 
     members: list[dict] = []
-    for sd in payload["member_state_dicts"]:
+    # Per-member calibration, with a fallback for files written before
+    # 2026-09-12 that carry only member 0's.  Loading such a file gives a
+    # predictor that differs measurably from the one that was validated
+    # (moon amplitude MAD 2.5%, blue chi2 3%), so say so rather than silently
+    # degrading -- retrain to regain exactness.
+    _n_members = len(payload["member_state_dicts"])
+    _member_jc = payload.get("member_jensen_corrections")
+    if _member_jc is None or len(_member_jc) != _n_members:
+        if _member_jc is not None:
+            print(f"[load_ensemble] WARNING: member_jensen_corrections has "
+                  f"{len(_member_jc)} entries for {_n_members} members; "
+                  f"falling back to the shared copy.")
+        else:
+            print("[load_ensemble] NOTE: this file predates per-member "
+                  "calibration (2026-09-12) and carries only member 0's "
+                  "`jensen_corrections`; every member will use it. Predictions "
+                  "will differ slightly from the trained-in-session model "
+                  "(measured: moon amplitude MAD 2.5%, blue chi2 3%). Retrain "
+                  "to regain exactness.")
+        _member_jc = [payload["jensen_corrections"]] * _n_members
+    for _i_member, sd in enumerate(payload["member_state_dicts"]):
         model = _build_model_from_config(
             cfg,
             n_input_score=n_input_score,
@@ -192,7 +224,7 @@ def load_ensemble(path: str | Path, *, device: str | None = None,
             "score_scaler": payload["score_scaler"],
             "ctx_scaler":   payload["ctx_scaler"],
             "compressors":  payload["compressors"],
-            "jensen_corrections": payload["jensen_corrections"],
+            "jensen_corrections": _member_jc[_i_member],
             "moon_down_amp_rule": payload.get("moon_down_amp_rule"),
             "zodi_ceiling_rule":  payload.get("zodi_ceiling_rule"),
             "coef_upper_bound":   payload["coef_upper_bound"],

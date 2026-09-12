@@ -1053,10 +1053,14 @@ else:
         del _pull2, _var_c2, _res_a, _obs_a, _good
 
         _figc = _make_subplots_resid(
-            rows=1, cols=2, column_widths=[0.5, 0.5], horizontal_spacing=0.10,
-            subplot_titles=(f"full band  ({_wr.size} px)",
-                            f"blue of {CHI2_BLUE_MAX_A:.0f} A only, OH-poor  "
-                            f"({_n_blue_pix} px)"))
+            rows=2, cols=2, column_widths=[0.5, 0.5], horizontal_spacing=0.10,
+            vertical_spacing=0.13,
+            subplot_titles=(
+                f"full band  ({_wr.size} px)",
+                f"blue of {CHI2_BLUE_MAX_A:.0f} A only, OH-poor  "
+                f"({_n_blue_pix} px)",
+                "full band: decomposition vs prediction, per row",
+                f"blue < {CHI2_BLUE_MAX_A:.0f} A: decomposition vs prediction"))
 
         def _c2_panel(_v, _vs, _col, _colour):
             """Two overlaid linear chi2 histograms: reconstruction vs self-fit.
@@ -1140,11 +1144,101 @@ else:
                     text=_txt, showarrow=False, xanchor="right", align="right",
                     font=dict(size=10, color="#666666"), row=1, col=_col)
 
+        def _c2_scatter(_v, _vs, _col, _colour):
+            """Per-row decomposition self-fit chi2 (x) against prediction (y).
+
+            The histograms above show the two DISTRIBUTIONS; this shows the two
+            numbers ROW BY ROW, which is what separates the failure modes:
+
+              * on the diagonal   the prediction is at the decomposition's own
+                                  floor -- this row is as good as it can be, no
+                                  matter how large both numbers are
+              * far above it      the DECOMPOSITION describes this row but the
+                                  PREDICTION does not: a transfer failure, and
+                                  the only kind this predictor can fix
+              * far to the right  the decomposition itself failed, so the
+                                  "truth" this row is scored against is not
+                                  trustworthy and a large y is not the
+                                  predictor's fault
+
+            A marginal histogram cannot tell the second from the third: a row
+            at chi2 40 looks equally bad in both, and only the pairing says
+            whether its target was ever any good.
+
+            LOG-LOG here, unlike the linear histograms above.  The histograms
+            are fenced to the bulk and deliberately hide the tail; this panel
+            exists FOR the tail, which spans three decades.
+            """
+            _x = np.asarray(_vs, dtype=np.float64)
+            _y = np.asarray(_v, dtype=np.float64)
+            if _x.size != _y.size or _x.size == 0:
+                return
+            try:                      # a local of this cell, not a global
+                _lab = list(_row_label)[:_x.size]
+            except NameError:
+                _lab = [f'row {i}' for i in range(_x.size)]
+            if len(_lab) != _x.size:   # never mislabel a point
+                _lab = [f'row {i}' for i in range(_x.size)]
+            _ok = np.isfinite(_x) & np.isfinite(_y) & (_x > 0) & (_y > 0)
+            if not _ok.any():
+                return
+            _xo, _yo = _x[_ok], _y[_ok]
+            _lo_o = [l for l, k in zip(_lab, _ok) if k]
+            _rat = _yo / _xo
+            # Split at 2x so the failures are visually separate, not a colour ramp
+            # the eye has to decode.
+            _bad = _rat > 2.0
+            for _m, _nm, _cc, _sz in ((~_bad, "at the floor (<= 2x)", _colour, 4),
+                                      (_bad, "transfer failure (> 2x)", "#e31a1c", 6)):
+                if not _m.any():
+                    continue
+                _figc.add_trace(go.Scattergl(
+                    x=_xo[_m], y=_yo[_m], mode="markers", name=_nm,
+                    marker=dict(color=_cc, size=_sz, opacity=0.55,
+                                line=dict(width=0)),
+                    legendgroup=_nm, showlegend=(_col == 1),
+                    text=[f"{l}<br>ratio {r:.2f}x"
+                          for l, r in zip([_l for _l, _k in zip(_lo_o, _m) if _k],
+                                          _rat[_m])],
+                    hovertemplate=("%{text}<br>decomposition %{x:.3g}"
+                                   "<br>prediction %{y:.3g}<extra></extra>")),
+                    row=2, col=_col)
+            _lo = float(min(_xo.min(), _yo.min())) * 0.7
+            _hi = float(max(_xo.max(), _yo.max())) * 1.4
+            _ref = np.array([_lo, _hi])
+            for _f, _dash, _w in ((1.0, "solid", 1.5), (2.0, "dash", 1.0),
+                                  (10.0, "dot", 1.0)):
+                _figc.add_trace(go.Scattergl(
+                    x=_ref, y=_ref * _f, mode="lines", showlegend=False,
+                    line=dict(color="#444444", width=_w, dash=_dash),
+                    hoverinfo="skip"), row=2, col=_col)
+            _figc.update_xaxes(type="log", range=[np.log10(_lo), np.log10(_hi)],
+                               row=2, col=_col)
+            _figc.update_yaxes(type="log", range=[np.log10(_lo), np.log10(_hi)],
+                               row=2, col=_col)
+            _figc.add_annotation(
+                x=0.02, y=0.97, xref="x domain", yref="y domain",
+                text=(f"median ratio {float(np.median(_rat)):.2f}x<br>"
+                      f"{int((_rat > 2).sum())} rows > 2x, "
+                      f"{int((_rat > 10).sum())} > 10x<br>"
+                      f"lines: 1x (floor), 2x, 10x"),
+                showarrow=False, xanchor="left", align="left",
+                font=dict(size=10, color="#666666"), row=2, col=_col)
+
         _c2_panel(_c2f, _c2fs, 1, "#1f78b4")
         _c2_panel(_c2b, _c2bs, 2, "#6a3d9a")
+        # NOT _c2f/_c2fs: those are each filtered by their OWN finite mask, so
+        # they can differ in length and are not row-aligned.  The scatter pairs
+        # rows, so it must take the raw n_use-long vectors and apply one JOINT
+        # mask itself.
+        if _chi2_self is not None:
+            _c2_scatter(_chi2_ph, _chi2_self, 1, "#1f78b4")
+        if _chi2_self_blue is not None:
+            _c2_scatter(_chi2_blue, _chi2_self_blue, 2, "#6a3d9a")
         _q = np.nanpercentile(_chi2_ph, [10, 90])
         _figc.update_layout(
-            template="plotly_white", height=420, barmode="overlay",
+            template="plotly_white",
+            height=(420 if _chi2_self is None else 840), barmode="overlay",
             legend=dict(orientation="h", yanchor="bottom", y=1.02,
                         xanchor="right", x=1.0, font=dict(size=10)),
             title=dict(text=(f"SCI reconstruction vs the PHOTON noise of a "
@@ -1160,7 +1254,12 @@ else:
                                 f"  Grey = the DECOMPOSITION'S OWN fit on the "
                                 f"same rows and the same noise, median "
                                 f"{float(np.nanmedian(_chi2_self)):.3g} -- the "
-                                f"floor the transfer is measured against.")
+                                f"floor the transfer is measured against.  "
+                                f"Bottom row pairs the two PER ROW: on the "
+                                f"diagonal = at the floor, above it = a "
+                                f"transfer failure, far right = the "
+                                f"decomposition failed and the target is not "
+                                f"trustworthy.")
                              + "</sub>"),
                        font=dict(size=13), x=0.02, xanchor="left"),
             margin=dict(t=110))
@@ -1168,6 +1267,11 @@ else:
         _figc.update_yaxes(title_text="rows", row=1, col=1)
         _figc.update_xaxes(title_text="reduced chi2", row=1, col=2)
         _figc.update_yaxes(title_text="rows", row=1, col=2)
+        if _chi2_self is not None:
+            for _cc in (1, 2):
+                _figc.update_xaxes(title_text="decomposition self-fit chi2",
+                                   row=2, col=_cc)
+                _figc.update_yaxes(title_text="prediction chi2", row=2, col=_cc)
         _figc.show()
         print(f"  [chi2] ABSOLUTE reduced chi2 vs the {_c2_mode} photon "
               f"model: median {float(np.nanmedian(_chi2_ph)):.4g}, "
