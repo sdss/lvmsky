@@ -1,7 +1,7 @@
 """Diagnostic plots + metrics for the split-zodi coefficient predictor.
 
-Each of the 22 diagnostic cells from the notebook lives as a readable
-Python file under :mod:`.diagnostics_cells` and is exposed via one method
+Each diagnostic cell lives as a readable Python file under
+:mod:`.diagnostics_cells` and is exposed via one method
 on :class:`Diagnostics`.  The method reads the file, applies any per-call
 regex source patches (used for exposing tunable literals as kwargs), and
 :func:`exec` s the body against a persistent globals dict so cross-cell
@@ -14,9 +14,13 @@ Notebook usage::
     from mlp_predictor.diagnostics import Diagnostics, DiagnosticsContext
     ctx = DiagnosticsContext(filtered_triplet=..., mlp_artifacts=..., ...)
     diag = Diagnostics(ctx)
-    diag.coef_residual_vs_value()
-    diag.worst_recon()
-    diag.per_lunation_drift()
+    diag.naive_baseline()
+    diag.amplitude_error_vs_ctx()
+    diag.full_spectrum_batch_rmse()
+    diag.headline_summary()   # synthesises the three above; recomputes nothing
+
+Ten of the 28 cells are wired into the notebook as of 2026-09-09; the rest
+remain callable from a scratch cell when a specific question needs them.
 """
 
 from __future__ import annotations
@@ -56,6 +60,13 @@ from .data import (
     airglow_geometry_scale,
     airglow_van_rhijn_matrix,
     build_triplet_coef_dataset,
+    split_zodi_reversal_keep_mask,
+    sci_continuum_colour_keep_mask,
+    diffuse_zeroed_keep_mask,
+    sci_continuum_colour_excess,
+    SCI_COLOUR_EXCESS_MAX,
+    canonical_row_labels,
+    split_zodi_decomp_paths,
     load_lsf_state_if_available,
     load_o2_vector_if_available,
     reconstruct_with_lsf,
@@ -63,9 +74,11 @@ from .data import (
     _angular_separation_deg_vec,
     _augment_triplet_with_ecliptic,
     _augment_triplet_with_physics_priors,
+    _augment_triplet_with_moon_model,
     _build_group_indices,
     _decode_cyclic_context,
     _infer_base_dir_for_reconstruction,
+    _sun_ecliptic_longitude_deg,
 )
 from .metrics import (
     load_pixel_sigma_if_available,
@@ -123,12 +136,21 @@ def _base_globals() -> dict:
         "load_lsf_state_if_available": load_lsf_state_if_available,
         "load_o2_vector_if_available": load_o2_vector_if_available,
         "build_triplet_coef_dataset": build_triplet_coef_dataset,
+        "split_zodi_reversal_keep_mask": split_zodi_reversal_keep_mask,
+        "sci_continuum_colour_keep_mask": sci_continuum_colour_keep_mask,
+        "diffuse_zeroed_keep_mask": diffuse_zeroed_keep_mask,
+        "sci_continuum_colour_excess": sci_continuum_colour_excess,
+        "SCI_COLOUR_EXCESS_MAX": SCI_COLOUR_EXCESS_MAX,
+        "canonical_row_labels": canonical_row_labels,
+        "split_zodi_decomp_paths": split_zodi_decomp_paths,
         "_angular_separation_deg_vec": _angular_separation_deg_vec,
         "_augment_triplet_with_ecliptic": _augment_triplet_with_ecliptic,
         "_augment_triplet_with_physics_priors": _augment_triplet_with_physics_priors,
+        "_augment_triplet_with_moon_model": _augment_triplet_with_moon_model,
         "_build_group_indices": _build_group_indices,
         "_decode_cyclic_context": _decode_cyclic_context,
         "_infer_base_dir_for_reconstruction": _infer_base_dir_for_reconstruction,
+        "_sun_ecliptic_longitude_deg": _sun_ecliptic_longitude_deg,
         "airglow_geometry_scale": airglow_geometry_scale,
         "airglow_van_rhijn_matrix": airglow_van_rhijn_matrix,
         "airglow_extinction_matrix": airglow_extinction_matrix,
@@ -263,13 +285,6 @@ class Diagnostics:
         """
         return self._run('coef_hist_prepost')
 
-    def coef_residual_vs_value(self) -> dict:
-        """Notebook cell id=coef-residual-vs-value.  Body lives in ``diagnostics_cells/coef_residual_vs_value.py``.
-
-        Returns the persistent exec-globals dict for inspection.
-        """
-        return self._run('coef_residual_vs_value')
-
     def relationship_scatter_matrix(self) -> dict:
         """Notebook cell id=353da137.  Body lives in ``diagnostics_cells/relationship_scatter_matrix.py``.
 
@@ -311,6 +326,16 @@ class Diagnostics:
         Returns the persistent exec-globals dict for inspection.
         """
         return self._run('per_seed_vs_ensemble')
+
+    def headline_summary(self) -> dict:
+        """Consolidated read of the other cells' persisted results.
+
+        Recomputes nothing: reads ``naive_baseline_result``,
+        ``amplitude_error_vs_ctx_result`` and ``rmse_subset_results`` out of
+        the shared exec globals, so it cannot drift from the cells it
+        summarises.  Run those first.
+        """
+        return self._run('headline_summary')
 
     def naive_baseline(self) -> dict:
         """Notebook cell id=naive-baseline.  Body lives in ``diagnostics_cells/naive_baseline.py``.
@@ -367,6 +392,16 @@ class Diagnostics:
         Returns the persistent exec-globals dict for inspection.
         """
         return self._run('resid_over_sigma_per_group')
+
+    def amplitude_error_vs_ctx(self) -> dict:
+        """Body lives in ``diagnostics_cells/amplitude_error_vs_ctx.py``.
+
+        Moon and zodi integrated-amplitude error against every context feature,
+        shown SIGNED (can ctx predict the direction of the miss?) and as a
+        MAGNITUDE (can ctx predict which rows are missed?).  Returns the
+        persistent exec-globals dict for inspection.
+        """
+        return self._run('amplitude_error_vs_ctx')
 
     def resid_vs_sigma_per_decile(self) -> dict:
         """Notebook cell id=083a6c59.  Body lives in ``diagnostics_cells/resid_vs_sigma_per_decile.py``.
@@ -431,12 +466,28 @@ class Diagnostics:
         """
         return self._run('sky_arm_disagreement_floor')
 
-    def wavelength_residual_atlas(self) -> dict:
-        """Notebook cell id=wavelength-residual-atlas.  Body lives in ``diagnostics_cells/wavelength_residual_atlas.py``.
+    def wavelength_residual_atlas(self, size: int = 500,
+                                  seed: int = 42) -> dict:
+        """Wavelength-resolved residual atlas, split moon-down / moon-up.
 
+        ``size``  rows reconstructed.  The figure splits by moon state, so each
+                  panel sees roughly half of this -- which is why the default
+                  is 500 rather than the 200 it was before the split.  Cost is
+                  linear in time (two LSF reconstructions per row) and in
+                  memory (~0.7 MB/row across the residual and per-component
+                  stacks); the figure is aggregate lines only, ~7 MB at any n.
+        ``seed``  numpy rng seed for the sample.
+
+        Body lives in ``diagnostics_cells/wavelength_residual_atlas.py``.
         Returns the persistent exec-globals dict for inspection.
         """
-        return self._run('wavelength_residual_atlas')
+        return self._run(
+            'wavelength_residual_atlas',
+            source_patches=[
+                (r"^n_sample_atlas\s*=\s*\d+", f"n_sample_atlas = {int(size)}"),
+                (r"^rng_seed_atlas\s*=\s*\d+", f"rng_seed_atlas = {int(seed)}"),
+            ],
+        )
 
     def ensemble_spread_calibration(self) -> dict:
         """Notebook cell id=ensemble-spread-calibration.  Body lives in ``diagnostics_cells/ensemble_spread_calibration.py``.
@@ -475,9 +526,15 @@ class Diagnostics:
         return int(matches[0])
 
     def full_spectrum_single_row(self, row: int | None = None,
-                                 expnum: int | None = None) -> dict:
+                                 expnum: int | None = None,
+                                 show_moon_zodi_model: bool = True) -> dict:
         """Reconstruct a single every10 row.  Pass ``row`` (every10 index)
-        or ``expnum`` (looked up via the every10 META FITS)."""
+        or ``expnum`` (looked up via the every10 META FITS).
+
+        ``show_moon_zodi_model`` overlays the frozen physical Moon/Zodi model
+        (``sky_decomp.moon_zodi_model``) on the near/far/sci flux panels and
+        prints its fit/model amplitude table; set False to skip it.
+        """
         if expnum is not None and row is not None:
             raise TypeError("pass row OR expnum, not both")
         if expnum is not None:
@@ -486,18 +543,35 @@ class Diagnostics:
             row = 978
         return self._run(
             "full_spectrum_single_row",
-            source_patches=[(r"^REQUESTED_ROW\s*=\s*\d+", f"REQUESTED_ROW = {int(row)}")],
+            source_patches=[
+                (r"^REQUESTED_ROW\s*=\s*\d+", f"REQUESTED_ROW = {int(row)}"),
+                (r"^SHOW_MOON_ZODI_MODEL\s*=\s*(?:True|False)",
+                 f"SHOW_MOON_ZODI_MODEL = {bool(show_moon_zodi_model)}"),
+            ],
         )
 
-    def full_spectrum_batch_rmse(self, size: int = 100,
-                                 seed: int = 42) -> dict:
-        """Sample-based full-spectrum RMSE.  ``size`` = number of rows,
-        ``seed`` = numpy rng seed."""
+    def full_spectrum_batch_rmse(self, size: int = 100, seed: int = 42,
+                                 stroked: int = 60) -> dict:
+        """Sample-based full-spectrum RMSE.
+
+        ``size``    number of rows evaluated -- every statistic uses all of them.
+        ``seed``    numpy rng seed for the phase-stratified sample.
+        ``stroked`` how many of those rows are DRAWN as lines in the residual
+                    figure.  Only the drawing is capped; the RMS envelope, the
+                    histograms and every printed number still use all ``size``
+                    rows.  This is the memory knob: the figure has five
+                    spectrum panels and each line carries 12401 points, so an
+                    uncapped 500-row figure serialises to ~758 MB and kills
+                    the kernel, against ~49 MB at the default 60.  Budget
+                    roughly 0.8 MB per stroked row.
+        """
         return self._run(
             "full_spectrum_batch_rmse",
             source_patches=[
                 (r"^\s*n_sample\s*=\s*\d+", f"    n_sample = {int(size)}"),
                 (r"^\s*rng_seed\s*=\s*\d+", f"    rng_seed = {int(seed)}"),
+                (r"^\s*MAX_RESID_LINES\s*=\s*\d+",
+                 f"    MAX_RESID_LINES = {max(int(stroked), 0)}"),
             ],
         )
 

@@ -82,6 +82,8 @@ def build_triplet_from_pointings(
     sky_near_label=None,
     sky_far_label=None,
     context_columns=None,
+    moon_model_inputs=None,
+    verbose=True,
 ) -> dict:
     """Build a triplet dict with 39-dim per-arm ctx from minimal inputs.
 
@@ -189,6 +191,120 @@ def build_triplet_from_pointings(
     }
     data._augment_triplet_with_ecliptic(triplet, force=True)
     data._augment_triplet_with_physics_priors(triplet, force=True)
+    if moon_model_inputs:
+        _moon_model_augment_direct(triplet, verbose=verbose, **moon_model_inputs)
+    return triplet
+
+
+# --- moon/zodi model features, computed directly (no corpus cache) ----------
+# The deployed ensemble's context is 42 features: 28 base + 3 ecliptic + 8
+# physics priors + `moon_model_log_ratio` + `zodi_po_log10` + `moon_frac_po`.
+# The last three came in on 2026-09-09 and are normally read from a per-corpus
+# cache (`mlp_predictor.moon_model_cache`), which is keyed to a corpus stack
+# and so is unavailable for the arbitrary pointings this module serves.  They
+# are pure geometry plus the frozen physical model, so they can be evaluated
+# per row instead -- that is what this does, mirroring
+# `data._augment_triplet_with_moon_model` column for column.
+#
+# The extra cost over the cache path is one `MoonZodiPhysicalModel.predict` and
+# one `geometry_amplitude_prior` per arm per row.
+MOON_MODEL_CTX_INPUTS = ("wave", "lsf_near", "lsf_far", "lsf_sci", "date_obs")
+
+
+def _moon_model_augment_direct(triplet, *, wave, lsf_near, lsf_far, lsf_sci,
+                               date_obs, expnum=None, exposure_seconds=900.0,
+                               verbose=True):
+    """Append the three moon/zodi-model ctx features, computed per row.
+
+    Mirrors `data._augment_triplet_with_moon_model` exactly: one shared
+    `moon_model_log_ratio` (identical in all three arms, gated to 0.0 where the
+    moon is down or the ratio is not finite) followed by per-arm
+    `zodi_po_log10` and `moon_frac_po` (both 0.0 where the physics-only model
+    has no usable prediction).
+    """
+    from sky_decomp.moon_zodi_model import (MoonZodiObservation,
+                                            MoonZodiPhysicalModel,
+                                            geometry_amplitude_prior)
+    _FIT_FLUX_SCALE = 1.0e14          # moon_model_cache.FIT_FLUX_SCALE
+    _EXPOSURE_SOURCE = "assumed_900s"  # validated against a closed set
+    names = list(triplet["ctx_names"])
+    n_rows = int(np.asarray(triplet["ctx_sci"]).shape[0])
+    _date = np.atleast_1d(np.asarray(date_obs, dtype=object))
+    if _date.size == 1 and n_rows > 1:
+        _date = np.repeat(_date, n_rows)
+    if _date.size != n_rows:
+        raise ValueError(f"date_obs has {_date.size} entries for {n_rows} rows")
+    _exp = (np.full(n_rows, -1, dtype=np.int64) if expnum is None
+            else np.broadcast_to(np.asarray(expnum, dtype=np.int64),
+                                 (n_rows,)))
+    _wave = np.asarray(wave, dtype=np.float64)
+    _arms = {
+        "near": ("sky_near", triplet["near_ra"], triplet["near_dec"], lsf_near),
+        "far":  ("sky_far",  triplet["far_ra"],  triplet["far_dec"],  lsf_far),
+        "sci":  ("sci",      triplet["sci_ra"],  triplet["sci_dec"],  lsf_sci),
+    }
+    model = MoonZodiPhysicalModel()
+    moon_total, zodi_po, frac_po = {}, {}, {}
+    for arm, (role, ra, dec, lsf) in _arms.items():
+        _lsf = np.asarray(lsf, dtype=np.float64)
+        mt = np.full(n_rows, np.nan)
+        zp = np.full(n_rows, np.nan)
+        fp = np.full(n_rows, np.nan)
+        for i in range(n_rows):
+            _l = _lsf if _lsf.ndim == 1 else _lsf[i]
+            obs = MoonZodiObservation(
+                expnum=int(_exp[i]),
+                date_obs=str(_date[i]).strip(),
+                role=role,
+                target_ra_deg=float(np.asarray(ra, dtype=np.float64).ravel()[i]),
+                target_dec_deg=float(np.asarray(dec, dtype=np.float64).ravel()[i]),
+                exposure_seconds=float(exposure_seconds),
+                exposure_seconds_source=_EXPOSURE_SOURCE)
+            try:
+                pred = model.predict(_wave, _l, obs,
+                                     physical_to_fit_flux_scale=_FIT_FLUX_SCALE)
+                # moon_model_cache uses nansum(pred.moon), not an attribute.
+                mt[i] = float(np.nansum(np.asarray(pred.moon, dtype=np.float64)))
+            except Exception:
+                pass
+            try:
+                _f, _z, _ = geometry_amplitude_prior(
+                    _wave, _l, obs, physical_to_fit_flux_scale=_FIT_FLUX_SCALE)
+                zp[i] = float(_z); fp[i] = float(_f)
+            except Exception:
+                pass
+        moon_total[arm], zodi_po[arm], frac_po[arm] = mt, zp, fp
+    # `moon_alt` is already a base ctx column, so take the gate from there
+    # rather than recomputing an ephemeris that could disagree with it.
+    if "moon_alt" not in names:
+        raise RuntimeError("moon_alt is not in the base context; the "
+                           "moon-model gate cannot be reproduced")
+    _alt = np.asarray(triplet["ctx_sci"], dtype=np.float64)[:, names.index("moon_alt")]
+    with np.errstate(divide="ignore", invalid="ignore"):
+        _num, _den = moon_total["sci"], moon_total["near"]
+        _good = (np.isfinite(_num) & np.isfinite(_den)
+                 & (_num > 1e-30) & (_den > 1e-30))
+        ratio = np.where(_good, np.log10(np.where(_good, _num / _den, 1.0)), np.nan)
+    col = np.where((_alt > 0.0) & np.isfinite(ratio), ratio, 0.0).astype(np.float32)
+    _extra = {}
+    for _key, _arm in (("ctx_near", "near"), ("ctx_far", "far"), ("ctx_sci", "sci")):
+        _zp, _fp = zodi_po[_arm], frac_po[_arm]
+        _ok = np.isfinite(_zp) & (_zp > 0.0) & np.isfinite(_fp) & (_fp > 0.0)
+        _extra[_key] = np.column_stack([
+            np.where(_ok, np.log10(np.where(_zp > 0.0, _zp, 1.0)), 0.0),
+            np.where(_ok, _fp, 0.0)]).astype(np.float32)
+    for key in ("ctx_near", "ctx_far", "ctx_sci"):
+        triplet[key] = np.hstack([np.asarray(triplet[key], dtype=np.float32),
+                                  col[:, None], _extra[key]])
+    triplet["ctx_names"] = (names + list(data.MOON_MODEL_FEATURE_NAMES)
+                            + list(data.ZODI_CEILING_FEATURE_NAMES))
+    if verbose:
+        _n_gate = int((col == 0.0).sum())
+        _f = _extra["ctx_sci"][:, 1]
+        print(f"  moon-model augment (direct, no cache): n_ctx now "
+              f"{len(triplet['ctx_names'])}; {_n_gate}/{col.size} rows gated to "
+              f"0; {int((_f <= 0.0).sum())}/{_f.size} rows have no physics-only "
+              f"prediction")
     return triplet
 
 
@@ -202,6 +318,13 @@ def predict_sky_from_minimal_inputs(
     coef_e, coef_w,
     moon_phase_deg=None,
     return_per_seed: bool = False,
+    # Moon/zodi-model ctx inputs.  Named _e/_w like coef_e/coef_w because they
+    # are swapped in lockstep with the near-vs-far reassignment below -- an LSF
+    # that did not follow its own arm would pair each row's geometry with the
+    # other arm's resolution.
+    wave=None, lsf_e=None, lsf_w=None, lsf_sci=None,
+    date_obs=None, expnum=None, exposure_seconds=900.0,
+    verbose=True,
 ) -> dict:
     """Predict the science-arm decomposition coefficients + a confidence score.
 
@@ -288,6 +411,32 @@ def predict_sky_from_minimal_inputs(
     sky_near_label = np.where(near_is_east, "SKYE", "SKYW")
     sky_far_label  = np.where(near_is_east, "SKYW", "SKYE")
 
+    _mm_inputs = None
+    if wave is not None:
+        _missing = [k for k, v in (("lsf_e", lsf_e), ("lsf_w", lsf_w),
+                                   ("lsf_sci", lsf_sci), ("date_obs", date_obs))
+                    if v is None]
+        if _missing:
+            raise ValueError(f"wave= was given, so the moon/zodi-model context "
+                             f"features can be computed, but {_missing} "
+                             f"are missing.")
+        def _swap(_e, _w):
+            _e = np.asarray(_e, dtype=np.float64)
+            _w = np.asarray(_w, dtype=np.float64)
+            if _e.ndim == 1 and _w.ndim == 1:      # one LSF for every row
+                return (_e, _w) if bool(np.all(near_is_east)) else (
+                    (_w, _e) if not bool(np.any(near_is_east)) else
+                    (np.where(near_is_east[:, None], _e[None, :], _w[None, :]),
+                     np.where(near_is_east[:, None], _w[None, :], _e[None, :])))
+            _e2 = np.broadcast_to(_e, (near_is_east.size, _e.shape[-1]))
+            _w2 = np.broadcast_to(_w, (near_is_east.size, _w.shape[-1]))
+            return (np.where(near_is_east[:, None], _e2, _w2),
+                    np.where(near_is_east[:, None], _w2, _e2))
+        _lsf_near, _lsf_far = _swap(lsf_e, lsf_w)
+        _mm_inputs = dict(wave=wave, lsf_near=_lsf_near, lsf_far=_lsf_far,
+                          lsf_sci=lsf_sci, date_obs=date_obs, expnum=expnum,
+                          exposure_seconds=exposure_seconds)
+
     triplet = build_triplet_from_pointings(
         obstime_mjd=obstime_mjd_arr,
         sci_ra=sci_ra_arr, sci_dec=sci_dec_arr,
@@ -295,7 +444,16 @@ def predict_sky_from_minimal_inputs(
         sky_far_ra=sky_far_ra,   sky_far_dec=sky_far_dec,
         moon_phase_deg=moon_phase_deg,
         sky_near_label=sky_near_label, sky_far_label=sky_far_label,
+        moon_model_inputs=_mm_inputs, verbose=verbose,
     )
+    _need = [n for n in ensemble["ctx_names"] if n not in triplet["ctx_names"]]
+    if _need:
+        raise ValueError(
+            f"this ensemble needs {len(ensemble['ctx_names'])} context features "
+            f"but only {len(triplet['ctx_names'])} could be built; missing "
+            f"{_need}. Those come from the moon/zodi physical model, so pass "
+            f"wave=, lsf_e=, lsf_w=, lsf_sci= and date_obs= (and optionally "
+            f"expnum=, exposure_seconds=) to compute them for these pointings.")
 
     n_coef = len(ensemble["coef_names"])
     coef_e_arr = np.asarray(coef_e, dtype=np.float32)

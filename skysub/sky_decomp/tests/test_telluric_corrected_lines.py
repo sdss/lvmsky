@@ -10,10 +10,12 @@ from skysub.sky_decomp.moon_zodi_model import (
     DEFAULT_PALACE_OH_SUFFIX,
 )
 from skysub.sky_decomp.telluric_corrected_lines import (
+    SkyDecompAdam25kNivContinuumLSFSpline2D,
     SkyDecompAdam25kTelluricLSFSpline2D,
     SkyDecompTelluricCorrectedLinesLSFSpline2D,
     SkyDecompTelluricLinesLSFSpline2D,
     calculate_drp_transmission,
+    calculate_line_transmission,
     restore_drp_input,
 )
 
@@ -26,9 +28,11 @@ class _FakeTelluric:
         self.wave_air = np.asarray(wave_air, dtype=float)
         self.transmission = np.asarray(transmission, dtype=float)
         self.last_lsf = None
+        self.calc_calls = 0
 
     def calc_transmission(self, pwv, *, airmass):
         assert pwv > 0.0 and airmass > 0.0
+        self.calc_calls += 1
         return self.transmission.copy()
 
     def match_to_data(self, wave, lsf, pwv, *, airmass, lsf_in_wavelength):
@@ -82,7 +86,26 @@ def test_restore_drp_input_preserves_the_native_objective():
         restore_drp_input(flux, ivar, wave, lsf, 0.0, 1.2, telluric)
 
 
-def test_all_line_families_use_high_resolution_transmission_and_new_oh_default():
+def test_palace_line_formula_matches_the_published_equation():
+    transmission_ref = np.array([0.98, 0.72, 0.31])
+    fraction_h2o = np.array([0.0, 0.4, 1.0])
+    tau_ref = -np.log(transmission_ref)
+    pwv_mm = 6.0
+    airmass = 1.7
+
+    actual = calculate_line_transmission(
+        tau_ref * (1.0 - fraction_h2o),
+        tau_ref * fraction_h2o,
+        pwv_mm,
+        airmass,
+    )
+    expected = transmission_ref ** (
+        (1.0 + (pwv_mm / 2.5 - 1.0) * fraction_h2o) * airmass
+    )
+    np.testing.assert_allclose(actual, expected, rtol=2.0e-15, atol=0.0)
+
+
+def test_all_line_families_use_r4m_line_coefficients_and_new_oh_default():
     wave = _wave()
     wave_hr = np.linspace(wave[0] - 10.0, wave[-1] + 10.0, 40_000)
     transmission_hr = 0.65 + 0.3 * (wave_hr - wave_hr[0]) / np.ptp(wave_hr)
@@ -103,10 +126,14 @@ def test_all_line_families_use_high_resolution_transmission_and_new_oh_default()
     np.testing.assert_array_equal(candidate._line_wave, intrinsic._line_wave)
     np.testing.assert_allclose(
         candidate._line_weights(),
-        intrinsic._line_weights()
-        * np.interp(candidate._line_wave, wave_hr, transmission_hr),
+        intrinsic._line_weights() * candidate._line_transmission_values,
         rtol=1.0e-14,
         atol=0.0,
+    )
+    assert telluric.calc_calls == 0
+    assert np.any(
+        candidate._line_transmission_values
+        != np.interp(candidate._line_wave, wave_hr, transmission_hr)
     )
     for family in ("oh", "atom", "orc", "o2"):
         family_slice = candidate._group_slices[family]
@@ -177,4 +204,29 @@ def test_named_adam25k_class_locks_its_oh_asset():
             pwv_mm=2.0,
             source_airmass=1.1,
             drp_transmission=np.ones_like(wave),
+        )
+
+
+def test_niv_adam_class_locks_the_continuum_contract():
+    wave = _wave()
+    wave_hr = np.linspace(wave[0] - 10.0, wave[-1] + 10.0, 40_000)
+    common = {
+        **_model_kwargs(),
+        "telluric_calculator": _FakeTelluric(wave_hr, np.ones_like(wave_hr)),
+        "pwv_mm": 2.0,
+        "source_airmass": 1.1,
+        "drp_transmission": np.ones_like(wave),
+    }
+    common.pop("n_spline_knots", None)
+    common.pop("n_zodi_spline_knots", None)
+    model = SkyDecompAdam25kNivContinuumLSFSpline2D(wave, **common)
+
+    assert model.split_zodi is True
+    assert model.n_spline_knots == 11
+    assert model.n_zodi_spline_knots == 1
+    assert model.diffuse_oh_scope == "block"
+    with pytest.raises(ValueError, match="requires moon_ratio_bound=0.7"):
+        SkyDecompAdam25kNivContinuumLSFSpline2D(
+            wave,
+            **(common | {"moon_ratio_bound": 0.6}),
         )

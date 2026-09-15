@@ -5,7 +5,7 @@
   "moon_zodi_manifest": "moon_zodi/model_manifest.json",
   "palace_contract": {
     "oh_suffix": "_telluric_upper_parity_lsf_adam_25000_v1",
-    "diffuse_suffix": "_joint_native_adam_invsky_p2_10000iter",
+    "diffuse_suffix": "_canonhyb_v1",
     "assets": [
       {
         "path": "palace/PMD/pmd_popmodel_OH_telluric_upper_parity_lsf_adam_25000_v1.dat",
@@ -47,6 +47,13 @@
         "source": "Previous repository frozen joint-v2 OH weights retained for explicit backward-compatible selection"
       },
       {
+        "path": "palace/PMD/pmd_refcont_canonhyb_v1.dat",
+        "sha256": "d886bee23ee66d1b7559b6825b6fd5af5c07dfbe1e758035dc1ae49f3c2d1e4d",
+        "source": "Canonical PALACE v1.0 pmd_refcont.dat fcHO2 and fcFeO interpolated onto the native LVM grid, with fcO2Ac taken verbatim from the native-LVM joint diffuse refit",
+        "why": "Canonical fcHO2/fcFeO restore PALACE's species identification -- FeO peaks at 5966 A (Noll+24 put FeO(VIS) at 595 nm) and HO2 is the blue tail of the 1.51 um feature -- while the refit fcO2Ac keeps the blue. Canonical O2Ac peaks at 3220 A, outside the LVM band, so only its tail is in range and it runs ~2x high through 4200-5900 A. Measured on 10 far-arm dark off-ecliptic rows: fully canonical costs x1.43 in blue chi2 and biases the median pull to -0.26; the hybrid recovers that to -0.02 and has the best full-band chi2 of the three.",
+        "supersedes": "palace/PMD/pmd_refcont_joint_native_adam_invsky_p2_10000iter.dat"
+      },
+      {
         "path": "palace/PMD/pmd_refcont_joint_native_adam_invsky_p2_10000iter.dat",
         "sha256": "dba983057f3a710d4c12a8df6e3e9930db04937b4ecb8a2d93b92c54d2b815e2",
         "source": "PALACE v1.0 pmd_refcont.dat with the frozen native-LVM joint diffuse correction"
@@ -67,6 +74,22 @@
         "source": "PALACE v1.0 supplementary O2 population-model table"
       }
     ]
+  },
+  "line_telluric_contract": {
+    "path": "palace/PMD/palace_line_telluric_r4m_v1.fits",
+    "sha256": "fb56d5c14e3a6a3d7b2d9a8e68c015084b7c49c74bea771d74be8d9a56a5d1ee",
+    "source": "PALACE v1.0 line-specific T_ref and fH2O derived by the PALACE authors from LBLRTM transmission spectra at maximum resolving power 4000000",
+    "source_path": "PALACE/src/palace/data/palace_lines.fits",
+    "source_sha256": "280d45262d6fc14aac5c9e01ea79b96e001eb9d4702bf8272a0e47b9446f96a6",
+    "source_zenodo_doi": "10.5281/zenodo.14064023",
+    "source_max_resolving_power": 4000000,
+    "reference_pwv_mm": 2.5,
+    "physical_line_transitions": 11552,
+    "family_counts": {"OH": 11393, "ATOM": 8, "ORC": 108, "O2": 43},
+    "mapping": "exact PALACE ID for OH, ORC, and O2; unique PALACE varID plus nearest wavelength within 0.0051 A for rounded atomic source rows",
+    "maximum_mapping_delta_A": 0.005000000001018634,
+    "formula": "T=exp[-airmass*(tau_non_H2O_ref+(PWV_mm/2.5)*tau_H2O_ref)]",
+    "runtime_interpolation": false
   },
   "residual_pca_contract": {
     "path": "residual_pca/palace_aijc_full_native_pca_v1.npz",
@@ -203,6 +226,32 @@
     "removed_or_replaced_wavelength_pixels": 0,
     "preexcluded_expnums": [45851],
     "rms_outlier_expnums": [],
+    "wave_sha256": "78d6785c2ecda6afb2b1d4d02bfc2a28c9803dfca7477ad407d946c46e9e3dd1"
+  },
+  "niv_vnf_line_amplitude_pca_contract": {
+    "path": "residual_pca/palace_aijc_vnf_niv_continuum_line_amplitude_pca_v1.npz",
+    "sha256": "b2a1253fb50f78603cd18c16143a2060d4a6ddd2ae61412695e924f10c23da09",
+    "basis_id": "palace-aijc-vnf-niv-continuum-line-amplitude-pca30-v1",
+    "source_model": "SkyDecompPalaceAijcVNFNivContinuumLSFSpline2D",
+    "source_oh_group_keys": ["v_upper", "N_upper", "F_upper"],
+    "continuum_contract": "niv-v1",
+    "input_spectra": 1000,
+    "successful_input_fits": 1000,
+    "training_spectra": 983,
+    "line_amplitude_columns": 11552,
+    "observable_line_transitions": 11538,
+    "zero_support_edge_transitions": 14,
+    "variable_support_line_transitions": 4,
+    "amplitude_solver": "scipy.sparse.linalg.lsqr-unit-integral-line-ridge-v3",
+    "row_estimator": "native-finite-mask-lsqr-v2",
+    "amplitude_constraints": "none; all 11552 individual amplitudes signed",
+    "ridge_lambda": 0.0001,
+    "stored_components": 30,
+    "selected_components": 30,
+    "cumulative_explained_variance_30": 0.9997259516569318,
+    "removed_or_replaced_wavelength_pixels": 0,
+    "rms_outlier_source_rows": [126, 171, 595, 3812, 4506, 4890, 6177, 7630, 8036, 8320, 8936, 8950, 9657, 12001, 12067, 12374, 12901],
+    "selection_sha256": "f298851c59fc11fa4447180214c09ce5ec2e762d7dec8e2f4650e374189b1dd0",
     "wave_sha256": "78d6785c2ecda6afb2b1d4d02bfc2a28c9803dfca7477ad407d946c46e9e3dd1"
   },
   "vnf_line_adjoint_pca_contract": {

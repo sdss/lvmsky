@@ -59,7 +59,7 @@ def _text_value(value: object) -> str:
     return value.decode().strip() if isinstance(value, bytes) else str(value).strip()
 
 
-def _lsf_meta_row(spectrum_index, state, channel):
+def _lsf_meta_row(spectrum_index, state, channel, *, available=True, reason=None):
     coefficient = state.coefficients[channel]
     knot_vector = state.knot_vectors[channel]
     metric = state.metrics[channel]
@@ -67,7 +67,7 @@ def _lsf_meta_row(spectrum_index, state, channel):
     row = {
         "spectrum_index": spectrum_index,
         "channel": channel,
-        "available": True,
+        "available": bool(available),
         "lower": np.nan if lower is None else lower,
         "upper": np.nan if upper is None else upper,
         "degree": state.degrees[channel],
@@ -95,6 +95,12 @@ def _lsf_meta_row(spectrum_index, state, channel):
             row[column] = converter(state.config[name])
     for name, default, converter in METRIC_COLUMNS[2:]:
         row[name] = converter(metric.get(name, default))
+    if not available:
+        row["status"] = "unavailable"
+        row["reason"] = str(reason or "fit unavailable")
+        row["completed_cycles"] = 0
+        row["fit_status"] = "failed_input"
+        row["failure_reason"] = row["reason"]
     return row
 
 

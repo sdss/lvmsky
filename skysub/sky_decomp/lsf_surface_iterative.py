@@ -1612,6 +1612,18 @@ class SkyDecompLSFSurfaceIterative(SkyDecomp):
         else:
             zodi_slice_local = None
             diffuse_slice_local = slice(n_moon, design.shape[0])
+        # Install this iteration's OH amplitude for the moon-gated FeO bound.
+        # OH is in the LINE model, which is held fixed for this solve, so its
+        # band integral is a known constant here -- but it changes as the LSF
+        # refines, so it has to be re-installed every time.
+        if getattr(self, 'diffuse_oh_bound_dex', 0.0) > 0.0:
+            _oh = run.matrices.get('oh')
+            _lc = np.asarray(run.line_coefficient, dtype=float)
+            _amp = None
+            if _oh is not None and np.size(_oh) > 0 and _lc.size >= _oh.shape[0]:
+                _amp = float(np.nansum(np.asarray(_oh, dtype=float).sum(axis=1)
+                                       * _lc[:_oh.shape[0]]))
+            self.set_diffuse_oh_reference(_amp)
         fit = self._fit_design(
             design,
             flux - run.line_model,

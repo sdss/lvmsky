@@ -144,6 +144,31 @@ def test_fit_design_allows_only_selected_coefficients_to_be_signed():
     assert np.isfinite(result["coef_err"][1])
 
 
+def test_fit_design_keeps_signed_coefficient_free_with_shape_constraints():
+    model = object.__new__(SkyDecomp)
+    model.wave = np.arange(3.0)
+    model.moon_smooth_lambda = 0.0
+    model.zodi_smooth_lambda = 0.0
+    model.moon_interline_boost = 0.0
+    model.moon_boosted_pixels_used = np.array([], dtype=float)
+    model.moon_ratio_bound = 0.7
+    model._moon_relaxed_basis = None
+    model._d2_moon = np.zeros((0, 2), dtype=float)
+    model._d2_zodi = np.zeros((0, 0), dtype=float)
+
+    result = model._fit_design(
+        np.eye(3),
+        np.array([1.0, 1.0, -2.0]),
+        np.ones(3),
+        moon_slice=slice(0, 2),
+        unconstrained_indices=np.array([2]),
+    )
+
+    assert result["status"] in {"Solved", "AlmostSolved"}
+    assert np.all(result["coef"][:2] >= -1.0e-9)
+    assert result["coef"][2] == pytest.approx(-2.0, abs=1.0e-7)
+
+
 def test_fit_design_retries_insufficient_progress_only_when_configured(monkeypatch):
     model = object.__new__(SkyDecomp)
     model.wave = np.arange(2.0)

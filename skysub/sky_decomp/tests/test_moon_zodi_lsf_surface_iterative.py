@@ -60,6 +60,20 @@ EXPECTED_HDU_ORDER = [
 ]
 
 
+def test_science_mask_lsf_reference_preserves_arm_median_weighting():
+    wave = np.array([6562.8, 7000.0])
+    lsf = {
+        "sci": np.array([[1.0, 10.0], [100.0, 10.0]]),
+        "sky1": np.array([[2.0, 20.0], [2.0, 20.0]]),
+        "sky2": np.array([[3.0, 30.0], [3.0, 30.0]]),
+    }
+
+    reference = decompose_parallel._science_mask_lsf_reference(wave, lsf)
+
+    assert reference[0] == 3.0
+    assert np.isnan(reference[1])
+
+
 @pytest.fixture(scope="module")
 def fitted_case():
     with np.load(REFERENCE, allow_pickle=False) as reference:
@@ -87,10 +101,19 @@ def fitted_case():
     assert decomposer.data_root == DEFAULT_DATA_ROOT.resolve()
     assert decomposer.base_dir == DEFAULT_DATA_ROOT.resolve()
     assert decomposer.pmd_dir == DEFAULT_DATA_ROOT.resolve() / "palace" / "PMD"
-    assert decomposer.palace_oh_suffix == DEFAULT_PALACE_OH_SUFFIX
+    # Defaults combine the telluric-aware OH table with the hybrid continuum.
+    assert (
+        decomposer.palace_oh_suffix
+        == DEFAULT_PALACE_OH_SUFFIX
+        == "_telluric_upper_parity_lsf_adam_25000_v1"
+    )
+    # The hybrid table uses canonical PALACE
+    # fcHO2/fcFeO with the native-LVM fcO2Ac.  Asserted against the module
+    # constant AND the literal so a silent default change still trips here.
     assert (
         decomposer.palace_diffuse_suffix
-        == "_joint_native_adam_invsky_p2_10000iter"
+        == moon_zodi_model.DEFAULT_PALACE_DIFFUSE_SUFFIX
+        == "_canonhyb_v1"
     )
     # A finite native-grid spectrum with a nonzero independent diffuse block.
     flux = moon + zodi + 0.02 * np.sum(decomposer.matrix_diffuse, axis=0)
@@ -428,6 +451,10 @@ def test_batch_role_coordinate_and_lsf_contract(monkeypatch):
         "palace-aijc-vnf-line-amplitude-pca30": (
             "_palace_aijc_vnf_line_amplitude_pca30"
         ),
+        "adam25k-telluric-niv-continuum": "_adam25k_telluric_niv_continuum",
+        "palace-aijc-vnf-pca30-niv-continuum": (
+            "_palace_aijc_vnf_pca30_niv_continuum"
+        ),
     }
 
 
@@ -570,6 +597,7 @@ def test_batch_preserves_placeholder_and_propagates_unexpected_errors(monkeypatc
     monkeypatch.setattr(decompose_parallel, "_WORKER_LSF", {"sky2": np.ones((2, 2))})
     monkeypatch.setattr(decompose_parallel, "_WORKER_META", meta)
     monkeypatch.setattr(decompose_parallel, "_WORKER_PROGRESS_QUEUE", None)
+    monkeypatch.setattr(decompose_parallel, "_WORKER_SCIENCE_LINE_MASK", None)
     kind, rows = decompose_parallel.fit_chunk_worker(("sky2", 0, 2))
     assert kind == "sky2"
     assert rows == [(0, sentinels[42]), (1, sentinels[43])]
@@ -631,7 +659,9 @@ def test_runtime_data_roots_are_selected_by_fit_model(monkeypatch, tmp_path):
         base_dir, data_root = decompose_parallel.resolve_runtime_data_roots(fit_model)
         assert base_dir == default_root.resolve()
         assert data_root == default_root.resolve()
-    assert validated == [str(default_root.resolve())] * 2
+    assert validated == [str(default_root.resolve())] * len(
+        decompose_parallel.TELLURIC_FIT_MODELS
+    )
 
 
 def test_runtime_data_roots_preserve_legacy_resolution(monkeypatch, tmp_path):

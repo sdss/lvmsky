@@ -72,6 +72,17 @@ class DataConfig:
     def input_fits_for_basis(self) -> str:
         return f"{self.decomp_prefix}_every10.fits"
 
+    @property
+    def input_fits_flux(self) -> str:
+        """Full-corpus stack, the only file carrying every row's FLUX_* arrays.
+
+        ``input_fits_for_basis`` is the every10 subsample and ``input_fits_meta``
+        holds no flux at all, so any filter that has to look at the observed
+        spectra of the whole training corpus -- currently the science-continuum
+        colour gate -- needs this one.
+        """
+        return f"{self.decomp_prefix}.fits"
+
     def coef_fits(self, arm: str) -> str:
         return f"{self.decomp_prefix}_{arm}_meta_coef{self.decomp_suffix}.fits"
 

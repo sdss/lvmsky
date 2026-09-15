@@ -25,6 +25,7 @@ from .moon_zodi_model import (
     validate_decomposition_asset_contract,
     wave_sha256,
 )
+from .niv_continuum import apply_niv_continuum_contract
 from .lsf_surface_iterative import continuum_fit_weights
 from .telluric_corrected_lines import SkyDecompTelluricCorrectedLinesLSFSpline2D
 
@@ -61,6 +62,9 @@ VNF_LINE_ADJOINT_PCA_ASSET = (
 )
 VNF_LINE_ADJOINT_PCA_FIT_MODEL = (
     "telluric-corrected-lines-palace-aijc-vnf-line-adjoint-pca"
+)
+NIV_VNF_LINE_AMPLITUDE_PCA_ASSET = (
+    "residual_pca/palace_aijc_vnf_niv_continuum_line_amplitude_pca_v1.npz"
 )
 
 
@@ -587,6 +591,7 @@ class SkyDecompTelluricCorrectedLinesLineAmplitudePCA(
     """Add a signed PCA correction in individual-line amplitude space."""
 
     line_amplitude_pca_asset = LINE_AMPLITUDE_PCA_ASSET
+    line_amplitude_pca_contract = "line_amplitude_pca_contract"
 
     def __init__(
         self,
@@ -603,7 +608,7 @@ class SkyDecompTelluricCorrectedLinesLineAmplitudePCA(
         root = Path(kwargs.get("base_dir") or DEFAULT_DATA_ROOT).resolve()
         _validate_method_asset(
             root,
-            "line_amplitude_pca_contract",
+            self.line_amplitude_pca_contract,
             "line-amplitude PCA",
         )
         basis_wave, line_names, line_wave, line_group, mean, components, metadata = (
@@ -881,6 +886,48 @@ class SkyDecompPalaceAijcVNFLineAmplitudePCA(
         )
 
 
+class SkyDecompPalaceAijcVNFNivContinuumLSFSpline2D(
+    SkyDecompTelluricCorrectedLinesPalaceAijc
+):
+    """PALACE VNF lines with the frozen Niv continuum contract."""
+
+    oh_group_keys = ("v_upper", "N_upper", "F_upper")
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **apply_niv_continuum_contract(kwargs))
+
+    def _finalize_result(self, *args: Any, **kwargs: Any):
+        result = super()._finalize_result(*args, **kwargs)
+        result.fit_summary += (
+            " | oh_grouping=v_upper,N_upper,F_upper"
+            " | continuum_contract=niv-v1"
+        )
+        self.fit_summary = result.fit_summary
+        return result
+
+
+class SkyDecompPalaceAijcVNFNivContinuumLineAmplitudePCA(
+    SkyDecompPalaceAijcVNFLineAmplitudePCA
+):
+    """PALACE VNF plus PCA30 with Niv continuum and continuous 2-D LSF."""
+
+    line_amplitude_pca_asset = NIV_VNF_LINE_AMPLITUDE_PCA_ASSET
+    line_amplitude_pca_contract = "niv_vnf_line_amplitude_pca_contract"
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        kwargs = apply_niv_continuum_contract(kwargs)
+        count = int(kwargs.get("n_line_amplitude_pca_components", 30))
+        if count != 30:
+            raise ValueError("The integrated production method requires PCA30")
+        super().__init__(*args, **kwargs)
+
+    def fit(self, *args: Any, **kwargs: Any):
+        result = super().fit(*args, **kwargs)
+        result.fit_summary += " | continuum_contract=niv-v1"
+        self.fit_summary = result.fit_summary
+        return result
+
+
 class SkyDecompTelluricCorrectedLinesVNLineAmplitudePCA(
     SkyDecompTelluricCorrectedLinesPalaceAijcVN
 ):
@@ -1116,9 +1163,12 @@ __all__ = [
     "VNF_COEFFICIENT_LINE_AMPLITUDE_PCA_FIT_MODEL",
     "VNF_LINE_ADJOINT_PCA_ASSET",
     "VNF_LINE_ADJOINT_PCA_FIT_MODEL",
+    "NIV_VNF_LINE_AMPLITUDE_PCA_ASSET",
     "VNF_COEFFICIENT_PCA_PREP_ASSET",
     "VNF_COEFFICIENT_PCA_PREP_FIT_MODEL",
     "SkyDecompPalaceAijcVNFLineAmplitudePCA",
+    "SkyDecompPalaceAijcVNFNivContinuumLSFSpline2D",
+    "SkyDecompPalaceAijcVNFNivContinuumLineAmplitudePCA",
     "SkyDecompTelluricCorrectedLinesLineAmplitudePCA",
     "SkyDecompTelluricCorrectedLinesPalaceAijc",
     "SkyDecompTelluricCorrectedLinesPalaceAijcVN",

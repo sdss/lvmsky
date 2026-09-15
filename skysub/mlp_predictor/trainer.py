@@ -1,17 +1,66 @@
-"""Ensemble trainer + inference for the compressed dual-encoder group-head MLP.
+"""Ensemble trainer and inference for the dual-encoder group-head MLP.
 
-Trimmed 2026-08-27 to the deployed split-zodi pipeline.  Removed knobs that
-were disabled in the shipped ``mlp_ensemble_split_zodi_current.pt`` config:
+Every knob in ``default_dual_group_config`` is read by ``Trainer``; the class
+asserts this on construction and warns about any config key it does not
+consume.
 
-- ``block_cov_loss_groups`` / ``relative_mse_groups`` (loss variants not used)
-- ``high_airmass_boost`` / ``moon_down_ecliptic_boost`` (never enabled)
-- ``blend_optim`` modes other than ``'direct'`` (dead)
-- ``moon_alt_conditional_alpha`` (dead)
-- ``coef_err_row_ceiling_factor`` (dead)
-- ``use_coef_err_weights=False`` fallback (deployed always True)
-- ``drop_vanrhijn_from_context``, ``head_extra_dims`` (dead)
-- ``moon_zodi_mode='shared_branch'`` and its ``moon_zodi_branch_dims`` etc.
-- ``flux_mse_eps_frac`` (deployed = 0; the epsilon math is a no-op)
+Training
+--------
+* Targets are per-group compressed *scores*, not raw coefficients: each group
+  is transformed (``sqrt`` for the continuum families, ``asinh`` for the 358
+  mesospheric coefficients), centred and scaled.  ``compress_coefs_to_scores``
+  and ``expand_scores_to_coefs`` are the two directions.
+* The loss is a per-group mean, weighted by ``group_loss_weight`` = the config
+  weight over ``sqrt(n_group)`` so a 358-coefficient group does not swamp a
+  3-coefficient one.  Row weights are uniform.
+* ``moon`` and ``zodi`` are scored in FLUX space rather than coefficient
+  space: their predicted scores are inverted through the compressor and their
+  own basis matrices to per-pixel flux, and the MSE is taken there.  This
+  replaces (not augments) the coefficient-space ``smooth_l1`` for those two
+  groups, and it is load-bearing -- removing it costs the moon 18 percentage
+  points of its gain over copying the near arm, and also degrades the
+  continuum and mesospheric groups, which have no flux term of their own,
+  through the shared trunk.
+* Remaining groups use ``smooth_l1`` weighted per element by
+  ``1/sigma^2`` from the decomposition's own ``COEF_ERR``, with a per-group
+  relative floor (``coef_err_sigma_floor_rel``) so near-zero uncertainties
+  cannot dominate.
+* The blend alphas train with their own learning-rate multiplier
+  (``alpha_lr_mult``); at the shared rate they do not move measurably.
+
+Ensembling and calibration
+--------------------------
+``run_ensemble`` trains one member per seed on a night-disjoint,
+moon-phase-stratified split, then fits a per-group scalar mean-bias
+correction (a Jensen-style lift, since the compressor transforms are convex)
+on the training and validation rows.
+
+Constraint-derived amplitudes
+-----------------------------
+Half the corpus has one of its two continuum amplitudes set by a
+DECOMPOSITION CONSTRAINT rather than by the data, so on those rows the target
+is a known function of geometry and is derived here rather than learned:
+
+* ``apply_zodi_ceiling_rule`` -- bright moon, where the Leinert anchor binds
+  on 87.5% of rows.  Clamps every valid row to the anchor ceiling (a hard
+  upper bound) and snaps gated rows onto it.
+* ``apply_moon_down_amplitude_rule`` -- dark time, where the moon-share
+  bracket has collapsed onto ``amp_prior_floor``.  Restores the amplitude
+  from the near arm's measured moon/zodi ratio, and ``moon_down_amp_free``
+  makes the flux loss amplitude-blind on those rows so only the shape trains.
+* ``degenerate_continuum_flag`` -- marks the ~1.7% of rows whose SKY-ARM
+  decompositions collapsed the whole continuum into the zodi spline.  Not a
+  fix; those rows cannot be predicted from degenerate inputs.
+
+Both rules rescale a coefficient block only, so the predicted SHAPE survives;
+both are no-ops on artifacts that lack them, so older ensembles stay
+bit-identical; both are idempotent and linear, so an ensemble mean of
+rule-satisfying members satisfies them too.  The zodi rule runs FIRST because
+the moon rule reads the predicted zodi amplitude.  Each prints its own
+calibration and a train-set comparison at fit time -- that self-reporting is
+what caught the ratio transfer being a no-op on filtered data.
+
+See notebook chapter 3.9 for the measurements behind every threshold.
 """
 
 from __future__ import annotations
@@ -35,6 +84,7 @@ from .compressor import (
     expand_scores_to_coefs,
 )
 from .data import _infer_base_dir_for_reconstruction, airglow_geometry_scale
+from . import noise
 from .metrics import metric_row
 from .ml_utils import (
     RobustScaler,
@@ -60,6 +110,571 @@ DEFAULT_COEF_ERR_SIGMA_FLOOR_BY_GROUP = {
 }
 
 
+# --- Moon-down moon amplitude: derived, not learned ------------------------
+# When the moon is below the horizon the decomposition does not MEASURE a moon
+# amplitude.  `_physics_only_model` predicts a moon fraction of ~3e-5 there, so
+# the moon-share bracket collapses onto `SkyDecompBase.amp_prior_floor` (0.02)
+# and the QP simply sits on that ceiling: measured on gaia-stars-mask with the
+# exact per-row design rebuilt from the stored LSF surface, 87.5% of moon-down
+# sci rows have the share pinned at the floor, i.e.
+#     A_moon = R * A_zodi,   R = eps/(1-eps) in true basis-integral units.
+# Fitting R as the median ratio over moon-down training rows reproduces the
+# true moon amplitude to MAD 0.00051 dex with p10-p95 inside +/-0.0017 dex
+# (7189 rows).  The target therefore carries NO information of its own, and
+# the network was previously spending a head on it: `amplitude_error_vs_ctx`
+# reports moon-down MAD 0.0455 against moon-up 0.0098, and the moon-down
+# number is mostly the zodi amplitude error (0.0344) arriving through this
+# same constraint.
+#
+# The 7.4% of moon-down rows the rule misses are ones where the QP wanted
+# essentially no moon at all (share interior, far below the ceiling).  The
+# rule over-predicts those, but the whole component is 1.04% of the fitted
+# continuum on moon-down rows (p90 1.75%) against 54% when the moon is up, so
+# the absolute cost is bounded by ~1% of the continuum.
+#
+# The SHAPE is not learnable either, though it is left in the loss because it
+# is weakly better than chance: 93.9% of the 14 adjacent Moon_bs knot pairs
+# sit exactly on a beta ratio bound (a CORNER of the feasible polytope, which
+# is a discontinuous function of the data and unrepresentable by a smooth
+# network), and the SCI and NEAR fits of the SAME exposure disagree at L1
+# 0.311 against a shuffled-pairing null of 0.612 -- only 2x better than
+# chance, where moon-up rows reach 0.050 against 0.441.
+#
+# So: the loss is made amplitude-BLIND on these rows (the prediction is
+# rescaled to the true integral before the pixel term, and the log-amplitude
+# term is dropped) so only the shape trains, and the amplitude is restored
+# analytically at predict time by `apply_moon_down_amplitude_rule`.
+MOON_DOWN_ALT_DEG = 0.0
+MOON_DOWN_AMP_FREE_GROUPS = ('moon',)
+_MOON_FRAC_PO_FEATURE = 'moon_frac_po'
+
+# The gate is NOT `moon_alt <= 0`.  The rule is valid exactly where the
+# moon-share bracket has collapsed onto `SkyDecompBase.amp_prior_floor`, and
+# that happens iff `amp_prior_tol * moon_frac_po <= amp_prior_floor`, i.e.
+#     moon_frac_po <= 0.02 / 3 = 0.006667.
+# Testing that condition directly beats every altitude cut on BOTH coverage
+# and exactness at once, which is the signature of using the real criterion
+# rather than a proxy:
+#
+#   gate                     cover   exact<0.01   |d|>0.05
+#   moon_alt <= 0            49.7%       92.6%       7.4%
+#   moon_alt <= -2           48.4%       94.9%       5.1%
+#   moon_alt <= -4           47.0%       96.1%       3.9%
+#   moon_alt <= -6           45.7%       96.1%       3.9%
+#   moon_alt <= -12          41.4%       95.7%       4.2%
+#   moon_frac_po <= 0.00667  47.8%       96.2%       3.7%
+#
+# WHY a fixed altitude cut cannot win: scattered moonlight with the moon just
+# below the horizon is real and the model carries it as
+# `horizon_scale = exp(-8.2182 * tanh(depth / 5 deg))` -- only -0.70 dex at
+# -1 deg, -2.72 at -5, and not saturated at -3.57 until about -15.  But that
+# depth term multiplies the phase and separation terms, so a thin crescent 2
+# deg down contributes nothing while a full moon 5 deg down still contributes.
+# `moon_frac_po` already carries all three; altitude alone carries one.  The
+# deployed gate therefore corresponds to no single altitude: the gated rows
+# reach up to -0.69 deg, while the rows it EXCLUDES that `moon_alt <= 0` kept
+# run from -0.0 down to -5.32 deg (median -1.43).  Those excluded rows are
+# pinned only 0.4% of the time and were most of the old tail.
+#
+# The residual 3.7% that still miss inside the gate are a different
+# population, not a horizon effect: median moon_alt -62 deg with
+# A_moon/A_zodi ~ 1.4e-6 against R = 0.024, i.e. rows where the QP wanted no
+# moon at all.  No altitude threshold can reach them.
+MOON_DOWN_FRAC_MAX = 0.02 / 3.0
+
+
+def _moon_down_mask_from_ctx(ctx_sci_phys, ctx_names,
+                             alt_deg=MOON_DOWN_ALT_DEG,
+                             frac_max=MOON_DOWN_FRAC_MAX, verbose=False):
+    """Rows where the moon-share bracket has collapsed onto its floor.
+
+    Prefers ``moon_frac_po <= frac_max``, which IS that condition; falls back
+    to ``moon_alt <= alt_deg`` only when the physics-only feature is absent
+    (a triplet built without the v2 model cache).  Both come from the CTX
+    block rather than the cache, so the gate needs no extra input at predict
+    time and is guaranteed to be the one training used.  Returns ``None`` when
+    neither column exists, which makes every caller a no-op rather than a
+    crash.
+    """
+    names = [str(x) for x in ctx_names]
+    ctx = np.asarray(ctx_sci_phys, dtype=np.float64)
+    if _MOON_FRAC_PO_FEATURE in names and frac_max is not None:
+        col = ctx[:, names.index(_MOON_FRAC_PO_FEATURE)]
+        # `moon_frac_po == 0` is the augment's invalid flag, so a row with no
+        # physics-only prediction is excluded rather than swept in as "no
+        # moon" -- which a naive `<= frac_max` test would do.
+        return np.isfinite(col) & (col > 0.0) & (col <= float(frac_max))
+    if 'moon_alt' not in names:
+        return None
+    if verbose:
+        print(f'  [moon-down] {_MOON_FRAC_PO_FEATURE} absent; falling back to '
+              f'moon_alt <= {float(alt_deg):g}, which is the weaker gate '
+              f'(92.6% of its rows pinned against 96.2%).')
+    col = ctx[:, names.index('moon_alt')]
+    return np.isfinite(col) & (col <= float(alt_deg))
+
+
+def _fit_moon_down_amp_rule(coef_sci, group_indices, flux_basis_matrices,
+                            moon_down, train_idx, ctx_names,
+                            alt_deg=MOON_DOWN_ALT_DEG,
+                            frac_max=MOON_DOWN_FRAC_MAX,
+                            coef_near=None, ratio_transfer=True, verbose=True):
+    """Calibrate ``A_moon = R * A_zodi`` on moon-down TRAINING rows.
+
+    ``R`` is a ratio of basis integrals, so it absorbs whatever normalisation
+    the supplied ``flux_basis_matrices`` carry (the trainer's are on a strided
+    wavelength grid, and the static build differs from the per-row refined
+    design by a constant ~1.18 on the moon block).  Calibrating it here rather
+    than hard-coding eps/(1-eps) is what keeps that offset from leaking in.
+    Returns ``None`` when anything needed is missing.
+    """
+    if moon_down is None:
+        return None
+    A_m = flux_basis_matrices.get('moon') if flux_basis_matrices else None
+    A_z = flux_basis_matrices.get('zodi') if flux_basis_matrices else None
+    if A_m is None or A_z is None:
+        if verbose:
+            print('  [moon-down rule] no moon/zodi basis supplied; rule disabled.')
+        return None
+    m_idx = np.asarray(group_indices['moon'], dtype=int)
+    z_idx = np.asarray(group_indices['zodi'], dtype=int)
+    v_m = np.asarray(A_m, dtype=np.float64).sum(axis=1)
+    v_z = np.asarray(A_z, dtype=np.float64).sum(axis=1)
+    if v_m.size != m_idx.size or v_z.size != z_idx.size:
+        if verbose:
+            print(f'  [moon-down rule] basis rows {v_m.size}/{v_z.size} do not '
+                  f'match coefficient counts {m_idx.size}/{z_idx.size}; disabled.')
+        return None
+    c = np.asarray(coef_sci, dtype=np.float64)
+    a_m = c[:, m_idx] @ v_m
+    a_z = c[:, z_idx] @ v_z
+    fit_rows = np.zeros(c.shape[0], dtype=bool)
+    fit_rows[np.asarray(train_idx, dtype=int)] = True
+    fit_rows &= moon_down & (a_m > 0.0) & (a_z > 0.0)
+    if int(fit_rows.sum()) < 50:
+        if verbose:
+            print(f'  [moon-down rule] only {int(fit_rows.sum())} usable '
+                  f'moon-down training rows; rule disabled.')
+        return None
+    ratio = a_m[fit_rows] / a_z[fit_rows]
+    R = float(np.median(ratio))
+    resid = np.log10(R * a_z[fit_rows] / a_m[fit_rows])
+    # Median moon-down SHAPE, used only when the network predicts an
+    # identically zero moon block and there is nothing to rescale.
+    _cm = c[fit_rows][:, m_idx]
+    _shape = np.median(_cm / _cm.sum(axis=1, keepdims=True), axis=0)
+    if verbose:
+        print(f'  [moon-down rule] R = {R:.6g} from {int(fit_rows.sum())} '
+              f'moon-down train rows; '
+              f'residual log10(R*A_zodi/A_moon) MAD '
+              f'{float(np.median(np.abs(resid - np.median(resid)))):.5f} dex, '
+              f'|d|>0.01 on {100.0 * float(np.mean(np.abs(resid) > 0.01)):.1f}% '
+              f'of them.')
+    # The moon share on these rows is BIMODAL, not constant.  On 96.25% of
+    # gated rows the QP sits on the 0.02 ceiling (t = A_moon/(R A_zodi) >=
+    # 0.99); on 3.25% it wants no moon at all (t < 1e-4), with only 0.49% in
+    # between.  A flat R therefore over-predicts the second mode by the whole
+    # component -- 2.40% of the sci continuum, which is the entire error on
+    # those rows.
+    #
+    # The NEAR ARM knows which mode a row is in: of the zero-moon sci rows
+    # 96.0% have the near arm also at t < 0.5, against 0.72% of the pinned
+    # ones.  So transfer the measured per-row ratio instead of assuming R:
+    #     A_moon(sci) = clip(A_moon/A_zodi |near, 0, R) * A_zodi(sci)
+    # which reproduces BOTH modes with no threshold and no mode assignment.
+    # Measured on 6914 gated corpus rows, moon flux error as a fraction of the
+    # sci continuum:
+    #
+    #   predictor                  median      p99   >0.5%   >0.2%
+    #   flat R * A_zodi           0.00086%   2.4038%  3.47%   3.66%
+    #   near ratio * A_zodi       0.00060%   0.0107%  0.56%   0.84%
+    #   arm-mean ratio            0.00059%   0.3959%  0.81%   1.72%
+    #   copy near verbatim        0.10913%   0.9695%  9.07%  31.07%
+    #
+    # so 240 badly-wrong rows become 39.  It also beats flat R on the PINNED
+    # rows (0.00060% against 0.00086%), because the measured ratio absorbs
+    # per-row variation a global median cannot.  Near alone beats the arm mean
+    # -- the far arm's own mode can differ -- and copying the near arm's
+    # amplitude verbatim is much worse in the bulk, so it is specifically the
+    # RATIO that transfers.
+    # The clamp at R is free: the share ceiling bounds the ratio, and
+    # r_near/R exceeds 1.01 on 0.014% of rows (one outlier at 50x).
+    _ratio_stats = None
+    if ratio_transfer and coef_near is not None:
+        cn = np.asarray(coef_near, dtype=np.float64)
+        a_m_n = cn[:, m_idx] @ v_m
+        a_z_n = cn[:, z_idx] @ v_z
+        _use = fit_rows & np.isfinite(a_m_n) & np.isfinite(a_z_n) & (a_z_n > 0.0)
+        if _use.sum() >= 50:
+            _r = np.clip(a_m_n[_use] / a_z_n[_use], 0.0, R)
+            _e_flat = np.abs(R * a_z[_use] - a_m[_use])
+            _e_tran = np.abs(_r * a_z[_use] - a_m[_use])
+            _scale = np.maximum(a_m[_use] + a_z[_use], 1e-30)
+            _ratio_stats = {
+                'n': int(_use.sum()),
+                'frac_gt_flat': float(np.mean(_e_tran > _e_flat)),
+                'bad_flat': float(np.mean(_e_flat / _scale > 0.005)),
+                'bad_tran': float(np.mean(_e_tran / _scale > 0.005)),
+            }
+            if verbose:
+                print(f'  [moon-down rule] near-arm ratio transfer ON: on '
+                      f'{_ratio_stats["n"]} train rows it is worse than flat R '
+                      f'on {100.0 * _ratio_stats["frac_gt_flat"]:.2f}% of them, '
+                      f'and the fraction wrong by >0.5% of moon+zodi falls '
+                      f'{100.0 * _ratio_stats["bad_flat"]:.2f}% -> '
+                      f'{100.0 * _ratio_stats["bad_tran"]:.2f}%')
+        elif verbose:
+            print('  [moon-down rule] too few usable near-arm rows for the '
+                  'ratio transfer; falling back to flat R.')
+    return {
+        'R': R,
+        'ratio_transfer': bool(ratio_transfer),
+        'ratio_stats': _ratio_stats,
+        'alt_deg': float(alt_deg),
+        'frac_max': (None if frac_max is None else float(frac_max)),
+        'moon_cols': m_idx.astype(int),
+        'zodi_cols': z_idx.astype(int),
+        'v_moon': v_m.astype(np.float64),
+        'v_zodi': v_z.astype(np.float64),
+        'shape_fallback': np.asarray(_shape, dtype=np.float64),
+        'n_fit_rows': int(fit_rows.sum()),
+        'resid_mad_dex': float(np.median(np.abs(resid - np.median(resid)))),
+    }
+
+
+def apply_moon_down_amplitude_rule(coef, ctx_sci_phys, artifacts,
+                                   coef_near_phys=None):
+    """Set the moon amplitude from the near arm's moon/zodi ratio.
+
+    Rescales the 15 moon coefficients, so the network's SHAPE is kept and only
+    the amplitude is replaced.  A no-op when the artifacts carry no rule, which
+    keeps ensembles trained before this existed bit-identical.
+
+    Safe to apply more than once: after one application the constraint holds
+    exactly, and because ``A`` is linear in the coefficients the ensemble mean
+    of rule-satisfying members satisfies the rule too.
+    """
+    rule = artifacts.get('moon_down_amp_rule')
+    if not rule:
+        return coef
+    mask = _moon_down_mask_from_ctx(ctx_sci_phys, artifacts['ctx_names'],
+                                    rule['alt_deg'],
+                                    rule.get('frac_max', MOON_DOWN_FRAC_MAX))
+    if mask is None or not mask.any():
+        return coef
+    out = np.asarray(coef, dtype=np.float64).copy()
+    m_idx = np.asarray(rule['moon_cols'], dtype=int)
+    z_idx = np.asarray(rule['zodi_cols'], dtype=int)
+    v_m = np.asarray(rule['v_moon'], dtype=np.float64)
+    v_z = np.asarray(rule['v_zodi'], dtype=np.float64)
+    a_moon = out[:, m_idx] @ v_m
+    a_zodi = out[:, z_idx] @ v_z
+    R = float(rule['R'])
+    # Per-row ratio from the NEAR arm where available, else the flat R.  This
+    # is what reproduces the zero-moon mode; see _fit_moon_down_amp_rule.
+    ratio = np.full(out.shape[0], R, dtype=np.float64)
+    if rule.get('ratio_transfer') and coef_near_phys is not None:
+        cn = np.asarray(coef_near_phys, dtype=np.float64)
+        if cn.shape[0] == out.shape[0]:
+            a_m_n = cn[:, m_idx] @ v_m
+            a_z_n = cn[:, z_idx] @ v_z
+            _good = (np.isfinite(a_m_n) & np.isfinite(a_z_n) & (a_z_n > 0.0)
+                     & (a_m_n >= 0.0))
+            ratio = np.where(
+                _good,
+                np.clip(a_m_n / np.where(a_z_n > 0.0, a_z_n, 1.0), 0.0, R), R)
+    want = ratio * np.clip(a_zodi, 0.0, None)
+    # Rescale where there is a shape to rescale; substitute the median
+    # moon-down shape where the predicted moon block is identically zero.
+    live = mask & (a_moon > 0.0)
+    dead = mask & ~(a_moon > 0.0)
+    if live.any():
+        scale = np.ones(out.shape[0], dtype=np.float64)
+        scale[live] = want[live] / a_moon[live]
+        out[np.ix_(np.flatnonzero(live), m_idx)] *= scale[live][:, None]
+    if dead.any():
+        shp = np.asarray(rule['shape_fallback'], dtype=np.float64)
+        denom = float(shp @ np.asarray(rule['v_moon'], dtype=np.float64))
+        if denom > 0.0:
+            out[np.ix_(np.flatnonzero(dead), m_idx)] = (
+                shp[None, :] * (want[dead] / denom)[:, None])
+    return out.astype(np.asarray(coef).dtype)
+
+
+DEGENERATE_CONTINUUM_FRAC = 0.5
+
+
+def degenerate_continuum_flag(coef_near_phys, coef_far_phys, artifacts,
+                              frac=DEGENERATE_CONTINUUM_FRAC):
+    """Flag rows whose SKY-ARM decompositions collapsed into the zodi spline.
+
+    On ~1.7% of corpus rows the QP puts the ENTIRE continuum into ``Zodi_bs``
+    and zeroes both the moon and the diffuse block.  These are not a physical
+    "no moon" state, they are failed fits: median reduced chi2 2.09 against
+    0.139 on healthy dark rows, a factor of 15, and 67.2% of them also trip
+    the diffuse-zeroed gate.  The science row's continuum split is then
+    moon 0.0001% / zodi 100.0% / diffuse 0.0% against a healthy
+    1.0 / 43.1 / 55.8.
+
+    Nothing downstream of the decomposition can recover such a row -- the ML
+    is predicting from degenerate inputs -- so the useful action is to MARK
+    it.  This detector needs only the two sky arms, which exist at prediction
+    time, so it works in production where the science decomposition does not
+    exist and the training filters do not run.
+
+    Measured on 14 457 corpus rows against the science-side truth:
+
+    | detector | flagged | precision | recall |
+    |---|---|---|---|
+    | near arm alone | 288 | 83.3% | 96.0% |
+    | **both arms** | **270** | **87.8%** | **94.8%** |
+    | both arms diffuse ~ 0 | 65 | 84.6% | 22.0% |
+
+    It cannot misfire with the moon up: on 7543 moon-up rows it never fires,
+    and the 1st percentile of their moon/zodi ratio is 6x the threshold.
+
+    Returns a boolean array, or ``None`` when the artifacts carry no
+    moon-down rule to take the basis and ``R`` from.
+    """
+    rule = artifacts.get('moon_down_amp_rule')
+    if not rule:
+        return None
+    m_idx = np.asarray(rule['moon_cols'], dtype=int)
+    z_idx = np.asarray(rule['zodi_cols'], dtype=int)
+    v_m = np.asarray(rule['v_moon'], dtype=np.float64)
+    v_z = np.asarray(rule['v_zodi'], dtype=np.float64)
+    thresh = float(frac) * float(rule['R'])
+    out = None
+    for arm in (coef_near_phys, coef_far_phys):
+        if arm is None:
+            continue
+        c = np.asarray(arm, dtype=np.float64)
+        a_m = c[:, m_idx] @ v_m
+        a_z = c[:, z_idx] @ v_z
+        # A non-positive zodi is itself pathological, but it is not THIS
+        # pathology, so it is not flagged here.
+        bad = np.isfinite(a_m) & np.isfinite(a_z) & (a_z > 0.0) & (
+            a_m / np.where(a_z > 0.0, a_z, 1.0) < thresh)
+        out = bad if out is None else (out & bad)
+    return out
+
+
+
+# --- Bright-moon zodi amplitude: derived, not learned ----------------------
+# The mirror image of the moon-down rule above, on the other half of the
+# corpus.  The decomposition brackets the fitted zodi total to
+# [Z_pred/kappa_z, kappa_z * Z_pred] around a Leinert prediction, and with the
+# moon up the QP presses that CEILING: measured on gaia-stars-mask with the
+# exact per-row design and the physics-only Z_pred, 87.5% of moon-up sci rows
+# sit exactly on it.  So the target there is `kappa_z * calibration * Z_pred`,
+# a deterministic function of geometry.
+#
+# The ceiling is CORRECT and must not be widened.  Releasing kappa_z on 294
+# lunation-stratified spectra moves the freed zodi up 0.193 dex while the moon
+# falls 0.107 and the diffuse block falls 0.435, with the total continuum
+# conserved to 0.5% and rms improving only 0.6% -- pure re-partitioning among
+# degenerate families.  And the excess tracks the MOON, not the ecliptic:
+# partial rho(excess, FLI | log B500) = +0.733 against partial
+# rho(excess, log B500 | FLI) = -0.322, which has the wrong sign for
+# zodiacal light.  It is moon-into-zodi leakage the bracket exists to stop.
+#
+# Two separate uses of the same prediction, both measured on every10 (1445
+# rows) against the fitted zodi:
+#
+#  * CLAMP, everywhere.  `S * Z_pred` is a hard upper bound: over the 14 457
+#    valid corpus rows the fitted zodi never exceeds it by more than 0.0024
+#    dex and only 0.01% exceed it at all, moon-up or moon-down.  So clipping
+#    any prediction back to it can only move it toward the truth.
+#  * SNAP, on gated rows, to remove the network's residual error where the QP
+#    pinned the target (its moon-up zodi MAD is 0.01051 dex).
+#
+# GATE, chosen on the full corpus.  Fraction of gated rows within 0.01 dex of
+# the ceiling, and the p95/p99 of |log10(S Z/A_zodi)| over them:
+#
+#   gate                cover   exact      p95      p99
+#   moon_alt > 0        50.3%   83.9%   0.3104   0.6022
+#   moon_frac_po > 0.4  45.9%   90.8%   0.1117   0.3221
+#   moon_frac_po > 0.5  43.8%   94.2%   0.0246   0.2153
+#   moon_frac_po > 0.6  41.5%   97.2%   0.0005   0.1358
+#   moon_frac_po > 0.7  38.1%   98.6%   0.0002   0.1059
+#
+# BEWARE the every10 subsample here: it put gate 0.5 at 95.3% exact with p95
+# 0.0010, five percentiles better than the corpus, and picking the gate off it
+# would have chosen 0.5.  Use the full corpus for this.
+#
+# The snap is GUARDED: it fires only where the network already predicts at
+# least `snap_frac` of the ceiling, so the few percent of gated rows that are
+# genuinely interior keep the network's own answer.  Simulating the network as
+# truth x 10^(noise) with noise sd 0.0156 dex and scoring over EVERY valid row
+# (not just gated ones, so a narrower gate pays for what it leaves behind):
+#
+#   variant                  MAD      p99      max   missed-pinned
+#   clamp only           0.00661   0.0384   0.0750        --
+#   gate 0.6, beta 0.80  0.00190   0.0387   0.1283      0.00%
+#   gate 0.6, beta 0.85  0.00188   0.0379   0.1103      0.00%
+#   gate 0.6, beta 0.90  0.00190   0.0375   0.0791      0.07%
+#   no gate,  beta 0.80  0.00097   0.0813   0.1548      0.00%
+#
+# So the deployed pair buys a 3.5x better MAD and a slightly better p99 for
+# 0.05 dex on the single worst row, and dropping the gate trades a better MAD
+# for a 2x worse p99.  A missed pinned row is benign -- it keeps
+# network-plus-clamp -- which is why beta errs high.  Re-checked against
+# Student-t(3) noise at the same sd (beta 0.90 max 0.68 against 1.22 at 0.80)
+# and against twice the noise (beta 0.90 misses 2.9% of pinned rows and still
+# beats clamp-only 2.3x on MAD).
+#
+# That guard is also why, unlike the moon-down case, the loss is left ALONE
+# here by default.  The moon-down moon target is noise in shape and a constant
+# in amplitude, so there was nothing to learn; the bright-moon zodi amplitude
+# is a deterministic function the network partly learns -- and it now receives
+# `zodi_po_log10` directly -- and its learned value is exactly what lets the
+# guard separate pinned rows from interior ones.  Making it amplitude-blind
+# would destroy the signal the guard runs on.  `zodi_ceiling_amp_free` exists
+# to A/B that, and defaults to False.
+#
+# Needs `data.ZODI_CEILING_FEATURE_NAMES` in the ctx block, which come from
+# moon/zodi model cache v2.  v1 stored only the LEARNED-parameter prediction,
+# which is ~1.5x larger and made this whole effect invisible.
+ZODI_CEILING_GATE_FRAC = 0.6
+ZODI_CEILING_SNAP_FRAC = 0.9
+ZODI_CEILING_AMP_FREE_GROUPS = ('zodi',)
+_ZODI_PO_FEATURE = 'zodi_po_log10'
+
+
+def _zodi_ceiling_inputs_from_ctx(ctx_sci_phys, ctx_names):
+    """``(log10 Z_pred, moon_frac_po, valid)`` from the ctx block, or None.
+
+    ``moon_frac_po == 0`` is the invalid flag written by the augment: a real
+    physics-only moon fraction never reaches zero, while the log has no
+    impossible value to spare.
+    """
+    names = [str(x) for x in ctx_names]
+    if _ZODI_PO_FEATURE not in names or _MOON_FRAC_PO_FEATURE not in names:
+        return None
+    ctx = np.asarray(ctx_sci_phys, dtype=np.float64)
+    log_z = ctx[:, names.index(_ZODI_PO_FEATURE)]
+    frac = ctx[:, names.index(_MOON_FRAC_PO_FEATURE)]
+    valid = np.isfinite(log_z) & np.isfinite(frac) & (frac > 0.0)
+    return log_z, frac, valid
+
+
+def _fit_zodi_ceiling_rule(coef_sci, group_indices, flux_basis_matrices,
+                           ctx_sci_phys, ctx_names, train_idx,
+                           gate_frac=ZODI_CEILING_GATE_FRAC,
+                           snap_frac=ZODI_CEILING_SNAP_FRAC, verbose=True):
+    """Calibrate ``A_zodi = S * Z_pred`` on gated moon-up TRAINING rows.
+
+    ``S`` comes out at ``kappa_z * calibration`` times whatever normalisation
+    the supplied basis carries -- 3.22444 against the nominal 3.200 on this
+    corpus, the 0.76% difference being the same basis-integral offset the
+    moon-down rule absorbs.  Fitting it is what keeps that offset out.
+
+    ``S`` IS BASIS-DEPENDENT, so do not sanity-check it against 3.2244.  The
+    trainer's ``flux_basis_matrices`` live on the stride-5 wavelength grid, so
+    the deployed value is ~1/5 of that: 0.6450 in the 2026-09-09 run against
+    3.22444 measured on the full grid (ratio 5.0002, the 0.02% being the
+    subsampling).  What is worth checking is that ``S`` is stable run to run
+    and that the upper-bound line below stays at ~0%, since the clamp is only
+    valid while it does.
+    """
+    got = _zodi_ceiling_inputs_from_ctx(ctx_sci_phys, ctx_names)
+    if got is None:
+        if verbose:
+            print(f'  [zodi-ceiling] ctx has no {_ZODI_PO_FEATURE}/'
+                  f'{_MOON_FRAC_PO_FEATURE}; rule disabled.  Enable the '
+                  f'moon-model augment with add_zodi_ceiling=True and a v2 '
+                  f'model cache.')
+        return None
+    log_z, frac, valid = got
+    A_z = flux_basis_matrices.get('zodi') if flux_basis_matrices else None
+    if A_z is None:
+        if verbose:
+            print('  [zodi-ceiling] no zodi basis supplied; rule disabled.')
+        return None
+    z_idx = np.asarray(group_indices['zodi'], dtype=int)
+    v_z = np.asarray(A_z, dtype=np.float64).sum(axis=1)
+    if v_z.size != z_idx.size:
+        if verbose:
+            print(f'  [zodi-ceiling] basis rows {v_z.size} != n_coef '
+                  f'{z_idx.size}; rule disabled.')
+        return None
+    a_z = np.asarray(coef_sci, dtype=np.float64)[:, z_idx] @ v_z
+    fit_rows = np.zeros(a_z.size, dtype=bool)
+    fit_rows[np.asarray(train_idx, dtype=int)] = True
+    fit_rows &= valid & (frac > float(gate_frac)) & (a_z > 0.0)
+    if int(fit_rows.sum()) < 50:
+        if verbose:
+            print(f'  [zodi-ceiling] only {int(fit_rows.sum())} usable gated '
+                  f'training rows; rule disabled.')
+        return None
+    z_pred = 10.0 ** log_z
+    S = float(np.median(a_z[fit_rows] / z_pred[fit_rows]))
+    resid = np.log10(S * z_pred[fit_rows] / a_z[fit_rows])
+    # How hard an upper bound is it, over EVERY valid row, not just gated ones?
+    _all = valid & (a_z > 0.0)
+    _excess = np.log10(a_z[_all] / (S * z_pred[_all]))
+    if verbose:
+        print(f'  [zodi-ceiling] S = {S:.6g} from {int(fit_rows.sum())} gated '
+              f'train rows (moon_frac_po > {float(gate_frac):g}); on them '
+              f'|log10(S*Z/A_zodi)| < 0.01 for '
+              f'{100.0 * float(np.mean(np.abs(resid) < 0.01)):.1f}%, p95 '
+              f'{float(np.percentile(np.abs(resid), 95)):.4f} dex')
+        print(f'  [zodi-ceiling] upper-bound check over all {int(_all.sum())} '
+              f'valid rows: max excess {float(_excess.max()):+.4f} dex, '
+              f'{100.0 * float(np.mean(_excess > 0.002)):.2f}% above it by '
+              f'>0.002 dex (should be ~0; the clamp relies on this)')
+    return {
+        'S': S,
+        'gate_frac': float(gate_frac),
+        'snap_frac': float(snap_frac),
+        'zodi_cols': z_idx.astype(int),
+        'v_zodi': v_z.astype(np.float64),
+        'n_fit_rows': int(fit_rows.sum()),
+        'resid_p95_dex': float(np.percentile(np.abs(resid), 95)),
+        'max_excess_dex': float(_excess.max()),
+    }
+
+
+def apply_zodi_ceiling_rule(coef, ctx_sci_phys, artifacts):
+    """Clamp the zodi amplitude to the anchor ceiling, and snap it where pinned.
+
+    Two effects, both scaling the 5 Zodi_bs coefficients so the spline SHAPE is
+    untouched:
+
+    * every valid row is clipped to ``S * Z_pred``, which is a hard upper bound
+      on the fitted zodi by construction;
+    * gated rows whose prediction is already within ``snap_frac`` of that
+      ceiling are set to it exactly, because they are the ones the QP pinned.
+      A gated row the network puts well below the ceiling keeps its own
+      answer: that is how genuinely interior rows survive the rule.
+
+    A no-op when the artifacts carry no rule, so ensembles trained before this
+    existed stay bit-identical.  Idempotent, and linear in the coefficients, so
+    an ensemble mean of rule-satisfying members satisfies it too.
+    """
+    rule = artifacts.get('zodi_ceiling_rule')
+    if not rule:
+        return coef
+    got = _zodi_ceiling_inputs_from_ctx(ctx_sci_phys, artifacts['ctx_names'])
+    if got is None:
+        return coef
+    log_z, frac, valid = got
+    z_idx = np.asarray(rule['zodi_cols'], dtype=int)
+    out = np.asarray(coef, dtype=np.float64).copy()
+    a_z = out[:, z_idx] @ np.asarray(rule['v_zodi'], dtype=np.float64)
+    ceiling = float(rule['S']) * 10.0 ** log_z
+    live = valid & (a_z > 0.0) & np.isfinite(ceiling) & (ceiling > 0.0)
+    over = live & (a_z > ceiling)
+    snap = live & (frac > float(rule['gate_frac'])) & (
+        a_z >= float(rule['snap_frac']) * ceiling)
+    hit = over | snap
+    if hit.any():
+        scale = np.ones(out.shape[0], dtype=np.float64)
+        scale[hit] = ceiling[hit] / a_z[hit]
+        out[np.ix_(np.flatnonzero(hit), z_idx)] *= scale[hit][:, None]
+    return out.astype(np.asarray(coef).dtype)
+
+
 def train_compressed_group_mlp(
     filtered, compressors, group_indices, geom_kwargs,
     split_indices=None,
@@ -78,20 +693,50 @@ def train_compressed_group_mlp(
     mesospheric_group_weight=1.0,
     ionospheric_group_weight=1.0,
     blend_init_alpha=0.7,
+    # 2026-09-01: learning-rate multiplier for the blend-alpha parameters
+    # (``blend_alpha_direct`` + the ctx-alpha predictors).  At the default 1.0
+    # alpha barely moves from its init within the early-stopping budget -- the
+    # loss surface in alpha is nearly flat because the additive head absorbs any
+    # systematic part of a mis-set blend, and the ctx path is damped further by
+    # the sigmoid (sigma' = 0.25 at alpha=0.5, 0.128 at 0.85).  Measured travel
+    # over a run: scalar groups +0.08..+0.24, ctx groups +0.01..+0.05, always
+    # toward the near arm and still climbing at early stop.  Raising this lets
+    # alpha reach its own optimum so the init stops being a hyperparameter.
+    alpha_lr_mult=1.0,
     alpha_ctx_features=("moon_up_smooth", "ecl_beta_deg", "airmass"),
     zodi_ctx_restriction=(),
     continuum_ctx_restriction=(),
     moon_zodi_ctx_restriction=(),
     # 2026-08-25c per-pixel flux MSE for moon and/or zodi (deployed default).
     flux_mse_groups=(),
+    flux_amp_lambda=0.0,
+    flux_amp_floor_frac=0.05,
+    flux_pixel_weight=None,
     flux_basis_matrices=None,
     flux_geom_sc_sci=None,
+    # 2026-09-11: native-grid per-coefficient template integrals, used to make
+    # the empirical mean-bias calibration correct the FLUX-weighted amplitude.
+    calib_amplitude_weights=None,
     # 2026-08-21 tight-mask bright-moon row boost (Phase A'').
-    bright_moon_close_boost=1.0,
-    bright_moon_close_fli_min=0.85,
-    bright_moon_close_sep_max_deg=45.0,
     # Heteroscedastic-Gaussian loss weighting from decomposition COEF_ERR.
     coef_err_sigma_floor_rel=None,
+    # 2026-09-09 moon-down handling; see MOON_DOWN_ALT_DEG above.
+    moon_down_amp_free=True,
+    moon_down_amp_rule=True,
+    moon_down_alt_deg=MOON_DOWN_ALT_DEG,
+    moon_down_frac_max=MOON_DOWN_FRAC_MAX,
+    moon_down_ratio_transfer=True,
+    # 2026-09-09 bright-moon zodi ceiling; see ZODI_CEILING_GATE_FRAC above.
+    zodi_ceiling_rule=True,
+    zodi_ceiling_amp_free=False,
+    zodi_ceiling_gate_frac=ZODI_CEILING_GATE_FRAC,
+    zodi_ceiling_snap_frac=ZODI_CEILING_SNAP_FRAC,
+    # Ablation hook: boolean over ALL rows; False removes a row from TRAIN and
+    # VAL while leaving TEST untouched, so a data-ablation A/B keeps an
+    # identical evaluation set.  Compressors are deliberately NOT refit -- they
+    # come in already fitted, so the only thing that changes is which rows the
+    # network's gradient sees.
+    train_row_mask=None,
 ):
     """Train one seed of the compressed dual-encoder group-head MLP."""
     set_reproducibility(seed)
@@ -109,6 +754,17 @@ def train_compressed_group_mlp(
     train_idx = np.asarray(train_idx, dtype=int)
     val_idx = np.asarray(val_idx, dtype=int)
     test_idx = np.asarray(test_idx, dtype=int)
+    if train_row_mask is not None:
+        _m = np.asarray(train_row_mask, dtype=bool)
+        _n_tr0, _n_va0 = train_idx.size, val_idx.size
+        train_idx = train_idx[_m[train_idx]]
+        val_idx = val_idx[_m[val_idx]]
+        if train_idx.size < 100:
+            raise ValueError(
+                f"train_row_mask leaves only {train_idx.size} training rows")
+        print(f'  [train-row-mask] train {_n_tr0} -> {train_idx.size} '
+              f'(-{_n_tr0 - train_idx.size}), val {_n_va0} -> {val_idx.size}; '
+              f'test untouched at {test_idx.size}')
 
     coef_near = np.asarray(filtered['coef_near'], dtype=np.float64)
     coef_far = np.asarray(filtered['coef_far'], dtype=np.float64)
@@ -235,38 +891,14 @@ def train_compressed_group_mlp(
     ctx_far_n = np.clip(ctx_scaler.transform(ctx_far), -25.0, 25.0).astype(np.float32)
     ctx_sci_n = np.clip(ctx_scaler.transform(ctx_sci), -25.0, 25.0).astype(np.float32)
 
-    # Row weights: bright-moon-close boost only.  See §12 for the rationale
-    # behind rejecting the high_airmass and moon_down_ecliptic boosts.
-    _ctx_names_local = list(filtered['ctx_names'])
+    # Row weights are uniform.  Every per-row reweighting scheme tried was
+    # rejected on measurement: high_airmass and moon_down_ecliptic boosts never
+    # helped, and the bright-moon-close boost (fli>=0.90, sep<=30 deg, alt>0,
+    # x1.5) was carried at 1.0 (= off) because it leaked into the blue atlas
+    # band (+23% RMS|frac|) for a mid-band gain the flux-space loss now
+    # provides directly.  Kept as a named constant rather than a knob so the
+    # loss has one less silent degree of freedom.
     _row_weights_np = np.ones(ctx_sci.shape[0], dtype=np.float32)
-    _has_ma = 'moon_alt' in _ctx_names_local
-    _has_ms = 'moon_sep' in _ctx_names_local
-    _has_pc = ('moon_phase_sin' in _ctx_names_local
-               and 'moon_phase_cos' in _ctx_names_local)
-    if _has_ma and _has_ms and _has_pc and float(bright_moon_close_boost) > 1.0:
-        _ma = ctx_sci[:, _ctx_names_local.index('moon_alt')]
-        _ms = ctx_sci[:, _ctx_names_local.index('moon_sep')]
-        _pc = ctx_sci[:, _ctx_names_local.index('moon_phase_cos')]
-        _fli = np.clip(0.5 * (1.0 - _pc), 0.0, 1.0)
-        _mask_bmc = ((_ma > 0.0)
-                     & (_fli >= float(bright_moon_close_fli_min))
-                     & (_ms <= float(bright_moon_close_sep_max_deg)))
-        _factor = float(bright_moon_close_boost)
-        _n_all = int(_mask_bmc.sum())
-        if _n_all > 0:
-            _row_weights_np = np.where(_mask_bmc, _row_weights_np * _factor,
-                                       _row_weights_np).astype(np.float32)
-            print(f'Row weights: bright_moon (fli>={float(bright_moon_close_fli_min):.2f}, '
-                  f'sep<={float(bright_moon_close_sep_max_deg):.0f}, alt>0) '
-                  f'x{_factor:.2f}  n_all={_n_all}, '
-                  f'n_train={int(_mask_bmc[train_idx].sum())}, '
-                  f'n_val={int(_mask_bmc[val_idx].sum())}')
-    _train_mean_w = float(np.mean(_row_weights_np[train_idx]))
-    if _train_mean_w > 1e-9 and abs(_train_mean_w - 1.0) > 1e-6:
-        _row_weights_np = (_row_weights_np / _train_mean_w).astype(np.float32)
-        print(f'Row weights: normalized to train-mean=1 '
-              f'(pre-norm train-mean={_train_mean_w:.3f}, '
-              f'post-norm max={float(np.max(_row_weights_np[train_idx])):.3f}).')
 
     # ------------------------------------------------------------------
     # Per-pixel flux MSE precomputation for moon / zodi (deployed default).
@@ -311,7 +943,18 @@ def train_compressed_group_mlp(
             _sc_sci_g_np = np.asarray(flux_geom_sc_sci[:, _gidx_fm], dtype=np.float32)
             _c_true_train = coef_sci[train_idx][:, _gidx_fm].astype(np.float64)
             _flux_true_train = _c_true_train @ _A_g.astype(np.float64)
-            _row_flux_norm_train = np.mean(_flux_true_train ** 2, axis=1)
+            # Weighted, so the scale-match below stays exact when the photon
+            # weights are on.  They are row-normalised to mean 1, so this is a
+            # small correction, not a change of units.
+            if flux_pixel_weight is None:
+                _row_flux_norm_train = np.mean(_flux_true_train ** 2, axis=1)
+            else:
+                # Index THEN widen: the other order builds a float64 copy of
+                # every row (194 MB here) before throwing most of it away, once
+                # per group per seed.
+                _row_flux_norm_train = np.mean(
+                    np.asarray(flux_pixel_weight)[train_idx].astype(np.float64)
+                    * _flux_true_train ** 2, axis=1)
             _fin_row = np.isfinite(_row_flux_norm_train) & (_row_flux_norm_train > 0.0)
             _median_flux_norm = (float(np.median(_row_flux_norm_train[_fin_row]))
                                  if _fin_row.any() else 1.0)
@@ -323,6 +966,19 @@ def train_compressed_group_mlp(
                             if _tr_diag_fm.size else 1.0)
             _scale_match_fm = (_med_diag_fm / max(_median_flux_norm, 1e-30)
                                if _med_diag_fm > 0 else 1.0)
+            # Floor for the log-amplitude term (step 2).  The term is
+            # log((A_pred + eps)/(A_true + eps))**2 on the WAVELENGTH-INTEGRATED
+            # flux, so eps decides where it stops caring: rows whose true
+            # amplitude is well below eps contribute ~0.  Set from the median
+            # train amplitude of this group so it is scale-free, and computed
+            # with the geometry scale applied, exactly as the loss does.
+            _amp_true_train = ((_c_true_train
+                                * _sc_sci_g_np[train_idx].astype(np.float64))
+                               @ _A_g.astype(np.float64)).sum(axis=1)
+            _amp_pos = _amp_true_train[np.isfinite(_amp_true_train)
+                                       & (_amp_true_train > 0.0)]
+            _amp_med = float(np.median(_amp_pos)) if _amp_pos.size else 1.0
+            _amp_eps_fm = float(flux_amp_floor_frac) * _amp_med
             _flux_mse_state_by_group[_g_fm] = {
                 'A': _A_g,
                 'basis_T': _comp_fm['basis'].T.astype(np.float32),
@@ -333,12 +989,17 @@ def train_compressed_group_mlp(
                 'g_scale_sci': _sc_sci_g_np,
                 'scale_match': float(_scale_match_fm),
                 'median_flux_norm': float(_median_flux_norm),
+                'amp_eps': _amp_eps_fm,
+                'amp_median': _amp_med,
             }
             print(f'  [flux-mse] {_g_fm}: n_coef={_gidx_fm.size}, '
                   f'n_wave_ds={_A_g.shape[1]}, '
                   f'median mean(flux^2)={_median_flux_norm:.3g}, '
                   f'scale-match={_scale_match_fm:.4g} '
-                  f'(median diag={_med_diag_fm:.4g}).')
+                  f'(median diag={_med_diag_fm:.4g}); '
+                  f'amp median={_amp_med:.4g}, amp eps={_amp_eps_fm:.4g} '
+                  f'({100*float(flux_amp_floor_frac):g}% of median), '
+                  f'amp lambda={flux_amp_lambda!r}.')
 
     # Device selection.
     if torch.cuda.is_available():
@@ -362,7 +1023,15 @@ def train_compressed_group_mlp(
             'score_center': torch.from_numpy(_st_fm['score_center']).to(device),
             'g_scale_sci':  torch.from_numpy(_st_fm['g_scale_sci']).to(device),
             'scale_match':  float(_st_fm['scale_match']),
+            'amp_eps':      float(_st_fm['amp_eps']),
         }
+    # Per-pixel photon weights are a property of the ROW and WAVELENGTH, not of
+    # the coefficient group, so they are staged once and shared by every group
+    # rather than duplicated into each group's state dict.
+    _flux_w_pix_t = (None if flux_pixel_weight is None
+                     else torch.from_numpy(
+                         np.ascontiguousarray(flux_pixel_weight,
+                                              dtype=np.float32)).to(device))
     _row_idx_all_np = np.arange(int(coef_sci.shape[0]), dtype=np.int64)
 
     def _stage_on_device(_idx):
@@ -403,16 +1072,112 @@ def train_compressed_group_mlp(
         moon_zodi_ctx_restriction=moon_zodi_ctx_restriction,
     ).to(device)
 
-    # Blend params (per-group alpha) get weight_decay=0 and are clamped
-    # to [eps, 1-eps] after each optimizer step.
+    # Blend params (per-group alpha) get weight_decay=0, an optional LR boost,
+    # and -- for the direct-parametrised ones -- clamping to [eps, 1-eps] after
+    # each optimizer step.  The ctx-alpha predictors join this group: they are
+    # blend parameters too, and leaving them under weight decay was never the
+    # intent.  (At alpha_lr_mult=1.0 that regrouping is numerically a no-op:
+    # decoupled decay would have shrunk them by lr*wd per step, i.e. <0.03% over
+    # a full run.)
     blend_pnames = {f'blend_alpha_direct.{_k}' for _k in model.blend_alpha_direct}
-    blend_params = [_p for _n, _p in model.named_parameters() if _n in blend_pnames]
-    other_params = [_p for _n, _p in model.named_parameters() if _n not in blend_pnames]
+    blend_params, other_params = [], []
+    for _n, _p in model.named_parameters():
+        if _n in blend_pnames or _n.startswith('alpha_predictors.'):
+            blend_params.append(_p)
+        else:
+            other_params.append(_p)
+    _alpha_lr = float(lr) * float(alpha_lr_mult)
     opt = torch.optim.AdamW(
-        [{'params': other_params, 'weight_decay': float(weight_decay)},
-         {'params': blend_params, 'weight_decay': 0.0}],
+        [{'params': other_params, 'weight_decay': float(weight_decay), 'lr': float(lr)},
+         {'params': blend_params, 'weight_decay': 0.0, 'lr': _alpha_lr}],
         lr=float(lr))
-    print(f"Blend optim: direct (n_blend_params={sum(p.numel() for p in blend_params)})")
+    print(f"Blend optim: direct (n_blend_params={sum(p.numel() for p in blend_params)}, "
+          f"alpha_lr={_alpha_lr:.2e} = {float(alpha_lr_mult):g} x lr)")
+
+    # lambda may be a scalar (every flux group) or a per-group dict.  Per-group
+    # matters: measured
+    # 2026-09-04: a global lambda helps the MOON (median relative integrated
+    # amplitude error 0.0774 -> 0.0613 at lambda 1-5) and monotonically wrecks
+    # the ZODI (gain over copy-near +38.3% -> +21.8%, tail +25%, amp share
+    # 0.877 -> 0.765 at lambda 20).  The zodi amplitude is already pinned by
+    # the decomposition's absolute Leinert anchor -- 93% of moon-up rows sit
+    # exactly on the kappa_z ceiling, so it is a deterministic function of
+    # geometry -- and penalising it harder only trades colour for amplitude
+    # the network already had.  Hence per-group.
+    if isinstance(flux_amp_lambda, dict):
+        _amp_lambda_by_group = {str(k): float(v)
+                                for k, v in flux_amp_lambda.items()}
+    else:
+        _amp_lambda_by_group = {str(g): float(flux_amp_lambda)
+                                for g in _flux_mse_torch_by_group}
+    if any(v > 0.0 for v in _amp_lambda_by_group.values()):
+        print('  [flux-amp] lambda by group: '
+              + ', '.join(f'{g}={_amp_lambda_by_group.get(g, 0.0):g}'
+                          for g in _flux_mse_torch_by_group))
+
+    # Moon-down rows: the moon amplitude is a constraint, not a measurement.
+    _moon_down = _moon_down_mask_from_ctx(ctx_sci, filtered['ctx_names'],
+                                          moon_down_alt_deg, moon_down_frac_max,
+                                          verbose=True)
+    if _moon_down is None:
+        print('  [moon-down] ctx has neither moon_frac_po nor moon_alt; '
+              'moon-down handling is disabled for this run.')
+    else:
+        _gate_desc = (
+            f'moon_frac_po <= {float(moon_down_frac_max):g}'
+            if (_MOON_FRAC_PO_FEATURE in [str(x) for x in filtered['ctx_names']]
+                and moon_down_frac_max is not None)
+            else f'moon_alt <= {float(moon_down_alt_deg):g}')
+        print(f'  [moon-down] {int(_moon_down.sum())}/{_moon_down.size} rows '
+              f'gated by {_gate_desc} '
+              f'({100.0 * float(_moon_down.mean()):.1f}%); '
+              f'amp_free={bool(moon_down_amp_free)}, '
+              f'amp_rule={bool(moon_down_amp_rule)}.')
+    _moon_down_rule = None
+    if moon_down_amp_rule and _moon_down is not None:
+        _moon_down_rule = _fit_moon_down_amp_rule(
+            coef_sci, group_indices, flux_basis_matrices, _moon_down,
+            train_idx, filtered['ctx_names'], alt_deg=moon_down_alt_deg,
+            frac_max=moon_down_frac_max, coef_near=coef_near,
+            ratio_transfer=bool(moon_down_ratio_transfer))
+    # Bright-moon zodi: the anchor ceiling, calibrated on gated train rows.
+    _zodi_ceiling = None
+    if zodi_ceiling_rule:
+        _zodi_ceiling = _fit_zodi_ceiling_rule(
+            coef_sci, group_indices, flux_basis_matrices, ctx_sci,
+            filtered['ctx_names'], train_idx,
+            gate_frac=zodi_ceiling_gate_frac,
+            snap_frac=zodi_ceiling_snap_frac)
+    _zodi_gated = None
+    if _zodi_ceiling is not None:
+        _got_zc = _zodi_ceiling_inputs_from_ctx(ctx_sci, filtered['ctx_names'])
+        _lz_zc, _fr_zc, _ok_zc = _got_zc
+        _zodi_gated = _ok_zc & (_fr_zc > float(zodi_ceiling_gate_frac))
+        print(f'  [zodi-ceiling] gate selects {int(_zodi_gated.sum())}/'
+              f'{_zodi_gated.size} rows '
+              f'({100.0 * float(_zodi_gated.mean()):.1f}%); '
+              f'amp_free={bool(zodi_ceiling_amp_free)}, '
+              f'snap_frac={float(zodi_ceiling_snap_frac):g}')
+
+    # Per-group row masks marking rows whose AMPLITUDE must not enter the loss.
+    _amp_free_t = {}
+    if zodi_ceiling_amp_free and _zodi_gated is not None:
+        for _g_zc in ZODI_CEILING_AMP_FREE_GROUPS:
+            if _g_zc in _flux_mse_torch_by_group:
+                _amp_free_t[_g_zc] = torch.from_numpy(
+                    _zodi_gated.astype(np.bool_)).to(device)
+            else:
+                print(f'  [zodi-ceiling] {_g_zc} is not in flux_mse_groups, so '
+                      f'amplitude masking is not available for it; skipped.')
+    if moon_down_amp_free and _moon_down is not None:
+        for _g_af in MOON_DOWN_AMP_FREE_GROUPS:
+            if _g_af in _flux_mse_torch_by_group:
+                _amp_free_t[_g_af] = torch.from_numpy(
+                    _moon_down.astype(np.bool_)).to(device)
+            else:
+                print(f'  [moon-down] {_g_af} is not in flux_mse_groups, so its '
+                      f'loss is coefficient-space only and cannot be made '
+                      f'amplitude-blind; amplitude masking skipped for it.')
 
     def compressed_loss(pred_dict, yb, w_row, w_pe, row_idx_b):
         loss = torch.tensor(0.0, device=yb.device)
@@ -420,8 +1185,8 @@ def train_compressed_group_mlp(
             lo, hi = score_slices[g]
             target = yb[:, lo:hi].contiguous()
             if g in _flux_mse_torch_by_group:
-                # Per-pixel flux MSE for moon and/or zodi.  Inverse compressor
-                # in torch: undo RobustScaler, PCA, sqrt, geometry.
+                # Per-pixel flux MSE for the groups that have a basis.  Inverse
+                # compressor in torch: undo RobustScaler, PCA, sqrt, geometry.
                 _st_fm = _flux_mse_torch_by_group[g]
                 _raw_target = target * _st_fm['score_scale'] + _st_fm['score_center']
                 _raw_pred   = y_head * _st_fm['score_scale'] + _st_fm['score_center']
@@ -434,7 +1199,58 @@ def train_compressed_group_mlp(
                 _g_row = _st_fm['g_scale_sci'][row_idx_b, :]
                 _flux_true = (_em_true * _g_row) @ _st_fm['A']
                 _flux_pred = (_em_pred * _g_row) @ _st_fm['A']
-                _per_row = ((_flux_pred - _flux_true) ** 2).mean(dim=1) * float(_st_fm['scale_match'])
+                # Amplitude-blind rows (moon-down for the moon group): rescale
+                # the PREDICTION to the true integral so the pixel term below
+                # measures shape only.  The factor is left attached to the
+                # graph on purpose -- the rescaled prediction then has exactly
+                # the true integral, so the gradient along the amplitude
+                # direction is identically zero rather than merely small.
+                _af = _amp_free_t.get(g)
+                _af_b = None
+                if _af is not None:
+                    _af_b = _af[row_idx_b]
+                    if bool(_af_b.any()):
+                        _a_t_af = _flux_true.sum(dim=1)
+                        _a_p_af = _flux_pred.sum(dim=1)
+                        _ok_af = _af_b & (_a_p_af > 0) & (_a_t_af > 0)
+                        _s_af = torch.where(
+                            _ok_af, _a_t_af / _a_p_af.clamp(min=1e-30),
+                            torch.ones_like(_a_p_af))
+                        _flux_pred = _flux_pred * _s_af[:, None]
+                _d_flux_sq = (_flux_pred - _flux_true) ** 2
+                if _flux_w_pix_t is None:
+                    _per_row = _d_flux_sq.mean(dim=1)
+                else:
+                    # Inverse-variance weighting from the photon-noise model
+                    # (mlp_predictor.noise): sigma_flux = sqrt(flux * sens), so
+                    # w = 1/(flux*sens).  Without this the term weighted 3600 A
+                    # -- where the throughput is 4.3x worse than at 5000 A --
+                    # exactly like the middle of the b channel.
+                    _per_row = (_d_flux_sq
+                                * _flux_w_pix_t[row_idx_b, :]).mean(dim=1)
+                _per_row = _per_row * float(_st_fm['scale_match'])
+                _amp_lambda = _amp_lambda_by_group.get(g, 0.0)
+                if _amp_lambda > 0.0:
+                    # Log-amplitude term.  The flux MSE above is ABSOLUTE, so
+                    # it is dominated by the brightest rows and is nearly blind
+                    # to a 20% brightness miss on a faint one -- yet 83% of the
+                    # moon tail's MSE and 89% of the zodi tail's is removed by a
+                    # single per-row rescale, i.e. the error is brightness, not
+                    # colour, across a 16x amplitude range.  This term is scale
+                    # free: it penalises the same fractional miss equally at
+                    # every brightness.  Additive, not a replacement -- dropping
+                    # the per-pixel term entirely (ablation A3) was catastrophic.
+                    _a_true = _flux_true.sum(dim=1).clamp(min=0.0)
+                    _a_pred = _flux_pred.sum(dim=1).clamp(min=0.0)
+                    _eps_a = float(_st_fm['amp_eps'])
+                    _d_log = torch.log((_a_pred + _eps_a) / (_a_true + _eps_a))
+                    _amp_pen = _amp_lambda * _d_log ** 2
+                    if _af_b is not None:
+                        # These rows have already been rescaled to the true
+                        # integral, so _d_log is ~0 for them anyway; zeroing it
+                        # keeps that from depending on the rescale's numerics.
+                        _amp_pen = _amp_pen * (~_af_b).to(_amp_pen.dtype)
+                    _per_row = _per_row + _amp_pen
             else:
                 w_pe_g = w_pe[:, lo:hi].contiguous()
                 _per_elem = F.smooth_l1_loss(y_head, target, reduction='none') * w_pe_g
@@ -531,6 +1347,18 @@ def train_compressed_group_mlp(
     # dominated the estimator.  Stored as a uniform per-coefficient array so
     # `inverse_group_compressor` continues to accept the same shape.
     jensen_corrections = {}
+    # Which functional each scalar lift was fitted on, and the two means behind
+    # it, so the summary table reports the numbers the lift actually came from
+    # rather than recomputing an unweighted mean that no longer matches.
+    _calib_lift_basis = {}
+    _calib_lift_means = {}
+    _calib_amp_w = (np.asarray(calib_amplitude_weights, dtype=np.float64)
+                    if calib_amplitude_weights is not None else None)
+    if _calib_amp_w is not None and _calib_amp_w.size != int(coef_sci.shape[1]):
+        raise ValueError(
+            f'calib_amplitude_weights has {_calib_amp_w.size} entries but there '
+            f'are {int(coef_sci.shape[1])} coefficients; it must be aligned to '
+            f'coef_names or the lift would weight the wrong coefficients.')
     _calib_idx = np.concatenate([train_idx, val_idx]).astype(int)
     model.eval()
     with torch.no_grad():
@@ -637,14 +1465,62 @@ def train_compressed_group_mlp(
                   f'{_lift_pc_clipped.max():.3f}] median={float(np.median(_lift_pc_clipped)):.3f} '
                   f'(clip range {_pc_clip})')
             continue
-        _mean_true = float(np.mean(_calib_true_phys[:, _gidx]))
-        _mean_pred = float(np.mean(_calib_pred_phys_naive[:, _gidx]))
+        # 2026-09-11: the scalar lift is fitted on the FLUX-WEIGHTED amplitude
+        # A_g = c_g . w_g, not on the unweighted mean coefficient.
+        #
+        # Why this had to change.  What the delivered sky spectrum depends on is
+        # the linear functional A_g, with w_g the per-coefficient template
+        # integral; mean(c_g) is a different functional, and for a group whose
+        # basis functions have very different integrals the two disagree in
+        # SIGN.  Measured on gaia-stars-mask-cont (956 filtered every10 rows,
+        # 10-seed ensemble): across the 357 OH sticks w spans 1.4e9x and
+        # rho(w, mean true coef) = -0.488 -- the template integral is
+        # ANTI-correlated with coefficient size, so the unweighted mean is
+        # dominated by exactly the sticks that carry the least flux.  The lift
+        # that came out was x0.98566 (scaling OH down) where the flux needed
+        # x1.0209 (up), which took the OH band-integrated bias from -0.38%
+        # before calibration to -1.81% after: the correction had the wrong sign
+        # for the functional that matters, and OH carries 72-78% of the
+        # band-integrated flux error tail.
+        #
+        # The same failure was already diagnosed for `continuum` on 2026-09-04
+        # (see `_precompute_flux_basis_and_geometry`) and patched there by
+        # wiring up its flux-space loss term; this fixes the calibration itself,
+        # which is the step that actually sets the mean bias.
+        #
+        # Corroboration that the functional is the whole story: the two groups
+        # that already used PER-COEFFICIENT lifts came out unbiased in amplitude
+        # (moon -0.00225 dex, zodi -0.00000) while both scalar-lift groups did
+        # not (continuum +0.00169, mesospheric -0.00793), ordered exactly by how
+        # far their template integrals spread (109x, 3.4x, 11.7x, 1.4e9x).
+        #
+        # Coefficients with no static basis get w = 0 and so drop out of the
+        # FIT (O2_b01, whose template is the per-row VECTOR_O2).  The resulting
+        # scalar still multiplies them, exactly as before -- a uniform per-group
+        # lift is all `inverse_group_compressor` accepts, and O2_b01's flux is
+        # not separable here to do better.
+        _w_g = None
+        if _calib_amp_w is not None:
+            _w_try = np.asarray(_calib_amp_w, dtype=np.float64)[_gidx]
+            if np.any(np.isfinite(_w_try) & (_w_try > 0.0)):
+                _w_g = np.where(np.isfinite(_w_try), np.clip(_w_try, 0.0, None), 0.0)
+        if _w_g is None:
+            _mean_true = float(np.mean(_calib_true_phys[:, _gidx]))
+            _mean_pred = float(np.mean(_calib_pred_phys_naive[:, _gidx]))
+            _lift_basis = 'mean coefficient (no basis weights)'
+        else:
+            _mean_true = float(np.mean(_calib_true_phys[:, _gidx] @ _w_g))
+            _mean_pred = float(np.mean(_calib_pred_phys_naive[:, _gidx] @ _w_g))
+            _lift_basis = 'flux amplitude'
+        _calib_lift_basis[_gname] = _lift_basis
+        _calib_lift_means[_gname] = (_mean_true, _mean_pred)
         _rel_mag = abs(_mean_pred) / max(abs(_mean_true), 1e-30)
         if (not np.isfinite(_mean_true) or not np.isfinite(_mean_pred)
                 or _mean_true * _mean_pred <= 0.0
                 or _rel_mag < 0.05):
-            print(f'Calibration: {_gname} skipped (degenerate or near-zero mean; '
-                  f'true={_mean_true:.4g}, pred_naive={_mean_pred:.4g}).')
+            print(f'Calibration: {_gname} skipped (degenerate or near-zero '
+                  f'{_lift_basis}; true={_mean_true:.4g}, '
+                  f'pred_naive={_mean_pred:.4g}).')
             continue
         _raw_lift = _mean_true / _mean_pred
         _lift = float(np.clip(_raw_lift, _CALIB_LIFT_CLIP[0], _CALIB_LIFT_CLIP[1]))
@@ -655,11 +1531,16 @@ def train_compressed_group_mlp(
     if jensen_corrections:
         print('Empirical per-group mean-bias calibration (train+val rows, uniform per-group scalar):')
         print(f"  {'group':<14s} {'n_g':>4s} {'mean_true':>10s} {'mean_pred_naive':>16s} "
-              f"{'lift':>7s} {'delta_%':>8s}")
+              f"{'lift':>7s} {'delta_%':>8s}  fitted on")
         for _gname, _corr in jensen_corrections.items():
             _gidx = np.asarray(compressors[_gname]['coef_indices'], dtype=int)
-            _mean_true = float(np.mean(_calib_true_phys[:, _gidx]))
-            _mean_pred = float(np.mean(_calib_pred_phys_naive[:, _gidx]))
+            # Prefer the means the lift was actually computed from; the per-coef
+            # groups never recorded any, so fall back to the unweighted mean for
+            # display only.
+            _mean_true, _mean_pred = _calib_lift_means.get(
+                _gname, (float(np.mean(_calib_true_phys[:, _gidx])),
+                         float(np.mean(_calib_pred_phys_naive[:, _gidx]))))
+            _basis_txt = _calib_lift_basis.get(_gname, 'per-coefficient')
             # 2026-08-24e: regime lift dict summary uses the moon_horizon per-coef vector.
             if isinstance(_corr, dict) and ('moon_horizon' in _corr or 'phase_q2_moon_horizon' in _corr):
                 _lift_vec = np.asarray((_corr['moon_horizon'] if 'moon_horizon' in _corr else _corr['phase_q2_moon_horizon']), dtype=np.float64)
@@ -667,12 +1548,14 @@ def train_compressed_group_mlp(
                 _n_show = int(_lift_vec.size)
                 _delta_pct = 100.0 * (_lift - 1.0)
                 print(f'  {_gname:<14s} {_n_show:>4d} {_mean_true:>10.4g} '
-                      f'{_mean_pred:>16.4g} {_lift:>7.4f} {_delta_pct:>+7.2f}% (regime, median)')
+                      f'{_mean_pred:>16.4g} {_lift:>7.4f} {_delta_pct:>+7.2f}% '
+                      f' {_basis_txt} (regime, median)')
                 continue
             _lift = float(_corr[0])
             _delta_pct = 100.0 * (_lift - 1.0)
             print(f'  {_gname:<14s} {len(_corr):>4d} {_mean_true:>10.4g} '
-                  f'{_mean_pred:>16.4g} {_lift:>7.4f} {_delta_pct:>+7.2f}%')
+                  f'{_mean_pred:>16.4g} {_lift:>7.4f} {_delta_pct:>+7.2f}%'
+                  f'  {_basis_txt}')
 
     # Per-group upper cap = 3.0 x max(coef_sci_train, axis=0) per coefficient.
     # Defensive guard applied at inference in expand_scores_to_coefs (§11 item 11).
@@ -702,11 +1585,14 @@ def train_compressed_group_mlp(
         'history': history,
         'blend_history': blend_history,
         'blend_init_alpha': float(blend_init_alpha),
+        'alpha_lr_mult': float(alpha_lr_mult),
         'best_val_loss': float(best_val),
         'best_epoch': int(best_epoch),
         'train_idx': train_idx, 'val_idx': val_idx, 'test_idx': test_idx,
         'coef_names': [str(x) for x in filtered['coef_names']],
         'ctx_names': [str(x) for x in filtered['ctx_names']],
+        'moon_down_amp_rule': _moon_down_rule,
+        'zodi_ceiling_rule': _zodi_ceiling,
         'config': {
             'n_epochs': int(n_epochs), 'batch_size': int(batch_size),
             'lr': float(lr), 'encoder_dims': tuple(int(v) for v in encoder_dims),
@@ -728,11 +1614,26 @@ def train_compressed_group_mlp(
             'mesospheric_group_weight': float(mesospheric_group_weight),
             'ionospheric_group_weight': float(ionospheric_group_weight),
             'blend_init_alpha': float(blend_init_alpha),
-            'bright_moon_close_boost': float(bright_moon_close_boost),
-            'bright_moon_close_fli_min': float(bright_moon_close_fli_min),
-            'bright_moon_close_sep_max_deg': float(bright_moon_close_sep_max_deg),
+            'alpha_lr_mult': float(alpha_lr_mult),
             'flux_mse_groups': tuple(flux_mse_groups),
+            'flux_amp_lambda': (dict(flux_amp_lambda)
+                                if isinstance(flux_amp_lambda, dict)
+                                else float(flux_amp_lambda)),
+            'flux_amp_floor_frac': float(flux_amp_floor_frac),
+            'flux_pixel_weighted': bool(flux_pixel_weight is not None),
             'coef_err_sigma_floor_rel': _resolved_floor_by_group,
+            'moon_down_amp_free': bool(moon_down_amp_free),
+            'moon_down_amp_rule': bool(moon_down_amp_rule),
+            'moon_down_alt_deg': float(moon_down_alt_deg),
+            'moon_down_ratio_transfer': bool(moon_down_ratio_transfer),
+            'train_row_mask_n_dropped': (None if train_row_mask is None
+                                        else int((~np.asarray(train_row_mask, bool)).sum())),
+            'moon_down_frac_max': (None if moon_down_frac_max is None
+                                   else float(moon_down_frac_max)),
+            'zodi_ceiling_rule': bool(zodi_ceiling_rule),
+            'zodi_ceiling_amp_free': bool(zodi_ceiling_amp_free),
+            'zodi_ceiling_gate_frac': float(zodi_ceiling_gate_frac),
+            'zodi_ceiling_snap_frac': float(zodi_ceiling_snap_frac),
         },
     }
 
@@ -810,7 +1711,20 @@ def predict_sci_coefficients_default(artifacts, coef_near_phys, coef_far_phys,
         compressors, group_indices, geom_kwargs, n_coef, score_slices,
         jensen_corrections=artifacts.get('jensen_corrections'),
         coef_upper_bound=artifacts.get('coef_upper_bound'))
-    return coef_predicted.astype(np.float32)
+    # Constraint-determined amplitudes, DERIVED rather than learned.  Both are
+    # no-ops for artifacts with no rule attached, so ensembles trained before
+    # they existed stay bit-identical, and both are applied per member rather
+    # than after the ensemble mean because A is linear in the coefficients, so
+    # the mean of rule-satisfying members satisfies the rules exactly too.
+    #
+    # ORDER MATTERS: the zodi ceiling runs FIRST because the moon-down rule
+    # reads the predicted zodi amplitude, and should read the corrected one.
+    coef_predicted = apply_zodi_ceiling_rule(
+        coef_predicted, ctx_sci_phys, artifacts)
+    coef_predicted = apply_moon_down_amplitude_rule(
+        coef_predicted, ctx_sci_phys, artifacts,
+        coef_near_phys=coef_near_phys)
+    return np.asarray(coef_predicted).astype(np.float32)
 
 
 # --- Deployed ensemble config (matches the shipped mlp_ensemble_split_zodi_current.pt) ---
@@ -827,6 +1741,8 @@ default_dual_group_config: dict[str, Any] = {
     "continuum_head_extra_dims": (64,),
     "continuum_branch_dims": (128, 64),
     "moon_zodi_coupling_dims": (64, 32),
+    "blend_init_alpha": 0.7,
+    "alpha_lr_mult": 1.0,
     "weight_decay": 1.0e-4,
     "patience": 12,
     "moon_group_weight": 2.0,
@@ -835,9 +1751,22 @@ default_dual_group_config: dict[str, Any] = {
     "mesospheric_group_weight": 1.0,
     "ionospheric_group_weight": 1.0,
     "flux_mse_groups": ("moon", "zodi"),
-    "bright_moon_close_boost": 1.5,
-    "bright_moon_close_fli_min": 0.90,
-    "bright_moon_close_sep_max_deg": 30.0,
+    "flux_amp_lambda": 0.0,
+    "moon_down_amp_free": True,
+    "moon_down_amp_rule": True,
+    "moon_down_alt_deg": MOON_DOWN_ALT_DEG,
+    "moon_down_frac_max": MOON_DOWN_FRAC_MAX,
+    "moon_down_ratio_transfer": True,
+    "zodi_ceiling_rule": True,
+    "zodi_ceiling_amp_free": False,
+    "zodi_ceiling_gate_frac": ZODI_CEILING_GATE_FRAC,
+    "zodi_ceiling_snap_frac": ZODI_CEILING_SNAP_FRAC,
+    "flux_amp_floor_frac": 0.05,
+    # Per-pixel inverse-variance weighting of the flux-space term, from the
+    # photon-noise model in mlp_predictor.noise (sigma = sqrt(flux * sens)).
+    # Requires input_fits_flux; without it the term stays unweighted.
+    "flux_pixel_weighting": True,
+    "flux_pixel_weight_floor_frac": 0.05,
     "coef_err_sigma_floor_rel": dict(DEFAULT_COEF_ERR_SIGMA_FLOOR_BY_GROUP),
     "ensemble_seeds": (42, 43, 44, 45, 46, 47, 48, 49, 50, 51),
     "zodi_ctx_restriction": (
@@ -870,7 +1799,7 @@ default_dual_group_config: dict[str, Any] = {
     "alpha_ctx_features": ("moon_up_smooth", "ecl_beta_deg", "airmass"),
 }
 
-_WAVE_STRIDE_FLUX_LOSS = 5
+_WAVE_STRIDE_FLUX_LOSS = 1
 
 
 def _precompute_flux_basis_and_geometry(
@@ -883,9 +1812,23 @@ def _precompute_flux_basis_and_geometry(
     n_zodi_knots,
     palace_oh_suffix=None,
     palace_diffuse_suffix=None,
+    input_fits_flux=None,
+    pixel_weight_floor_frac=0.05,
+    flux_exptime_s=900.0,
     verbose=True,
 ):
-    """Materialise moon + zodi flux basis matrices (stride 5) and per-row geometry."""
+    """Native-grid flux bases, geometry, pixel weights, and calibration weights.
+
+    The fourth return value, ``calib_amplitude_weights``, is a length-n_coef
+    vector of NATIVE-GRID template integrals, one per coefficient, aligned to
+    ``filtered_triplet['coef_names']`` BY NAME.  The empirical mean-bias
+    calibration below uses it to correct the flux-weighted amplitude rather
+    than the unweighted mean coefficient -- see the comment on
+    ``_CALIB_AMPLITUDE_WEIGHTED`` in the training function.
+
+    The loss and calibration both use every approved native pixel. No
+    resampling, binning, stride, or wavelength removal is applied.
+    """
 
     with fits.open(str(input_fits_for_basis)) as hdul:
         wave_ref = np.asarray(hdul["WAVE"].data, dtype=np.float64)
@@ -896,6 +1839,39 @@ def _precompute_flux_basis_and_geometry(
         palace_diffuse_suffix=palace_diffuse_suffix,
         split_zodi=split_zodi, n_zodi_spline_knots=n_zodi_knots,
     )
+    # Per-coefficient NATIVE-grid template integral, keyed BY NAME.
+    # `design_names` and `_assemble_design_matrix()` are built from the same
+    # block order inside `_build_static_basis`, so zipping them is the class's
+    # own invariant rather than an assumption made here; the length check makes
+    # a future reordering a loud failure instead of a silent mis-pairing.
+    _design_names = [str(_n) for _n in getattr(model, "design_names", ())]
+    _design_matrix = np.asarray(getattr(model, "design_matrix", np.empty((0, 0))),
+                                dtype=np.float64)
+    calib_amplitude_weights = None
+    if _design_names and _design_matrix.shape[0] == len(_design_names):
+        _w_by_name = dict(zip(_design_names,
+                              _design_matrix.sum(axis=1).astype(np.float64)))
+        _coef_names_calib = [str(_n) for _n in filtered_triplet["coef_names"]]
+        _absent = [_n for _n in _coef_names_calib if _n not in _w_by_name]
+        if _absent:
+            print(f"  [calib-weights] {len(_absent)} coefficient(s) have no basis "
+                  f"row in design_names ({_absent[:4]}); amplitude-weighted "
+                  f"calibration disabled, falling back to the mean coefficient.")
+        else:
+            calib_amplitude_weights = np.array(
+                [_w_by_name[_n] for _n in _coef_names_calib], dtype=np.float64)
+            if verbose:
+                _nz = int(np.sum(calib_amplitude_weights > 0))
+                print(f"  [calib-weights] native-grid template integrals for "
+                      f"{calib_amplitude_weights.size} coefficients "
+                      f"({_nz} non-zero; a zero means no static basis, e.g. "
+                      f"O2_b01 whose template is the per-row VECTOR_O2).")
+    elif verbose:
+        print(f"  [calib-weights] model exposes no aligned design_names / "
+              f"design_matrix pair (names={len(_design_names)}, "
+              f"rows={_design_matrix.shape[0]}); amplitude-weighted "
+              f"calibration disabled.")
+
     stride = slice(None, None, int(_WAVE_STRIDE_FLUX_LOSS))
     flux_basis_matrices = {
         "moon": np.asarray(model.matrix_moon[:, stride], dtype=np.float32),
@@ -904,9 +1880,109 @@ def _precompute_flux_basis_and_geometry(
         flux_basis_matrices["zodi"] = np.asarray(
             model.matrix_zodi[:, stride], dtype=np.float32
         )
+    # The diffuse continuum (HO2 + FeO + O2Ac) has its own basis in exactly the
+    # same layout, and until 2026-09-04 it simply was not wired up here -- so
+    # `continuum` in flux_mse_groups silently did nothing.  It matters: with no
+    # flux-space term the group is fit purely in compressed coefficient space,
+    # and the trainer's empirical calibration corrects its MEAN COEFFICIENT,
+    # which is not its flux-weighted bias because the three basis functions have
+    # very different flux integrals.  Measured on new-oh-2: continuum flux bias
+    # -3.8%, against moon and zodi inside +/-0.5%.
+    _diffuse = getattr(model, "matrix_diffuse", None)
+    if _diffuse is not None and np.asarray(_diffuse).shape[0] > 0:
+        # Row order is ["HO2", "FeO", "O2Ac"] from _build_diffuse(); the loss
+        # indexes the group by position, so a reordering upstream would silently
+        # pair each coefficient with the wrong basis row.  The count check in
+        # the loss cannot see that, so assert the order here.
+        _dnames = [str(n) for n in getattr(model, "diffuse_names", ())]
+        _cnames = [str(n) for n in filtered_triplet["coef_names"]]
+        _seen = [n for n in _cnames if n in set(_dnames)]
+        if _dnames and _seen != _dnames:
+            raise RuntimeError(
+                f"diffuse basis row order {_dnames} does not match the order the "
+                f"same names appear in coef_names ({_seen}); the continuum flux "
+                f"term would pair coefficients with the wrong basis rows.")
+        flux_basis_matrices["continuum"] = np.asarray(
+            _diffuse[:, stride], dtype=np.float32
+        )
     flux_geom_sc_sci = airglow_geometry_scale(
         filtered_triplet["ctx_sci"], **compress_geom_kwargs
     ).astype(np.float32)
+
+    # Per-pixel photon weights, on the same native grid as the basis above.  The
+    # noise is set by the TOTAL observed science flux, so this reads FLUX_SCI
+    # from the full corpus stack -- not `input_fits_for_basis`, which is only
+    # the every10 subsample and does not contain the training rows at all.
+    flux_pixel_weight = None
+    if input_fits_flux:
+        row_index = np.asarray(filtered_triplet["row_index"], dtype=np.int64)
+        with fits.open(str(input_fits_flux), memmap=True) as hdul:
+            wave_flux = np.asarray(hdul["WAVE"].data, dtype=np.float64)
+            wave_flux = wave_flux if wave_flux.ndim == 1 else wave_flux[0]
+            if (wave_flux.shape != wave_ref.shape
+                    or not np.allclose(wave_flux, wave_ref, rtol=0.0, atol=1e-6)):
+                raise RuntimeError(
+                    f"{input_fits_flux} is on a different wavelength grid from "
+                    f"{input_fits_for_basis}; the pixel weights would not line "
+                    f"up with the flux basis")
+            # Read in row BLOCKS off the memmap, not via `.section[:, stride]`.
+            # A strided slice on the SECOND axis makes `.section` fall back to
+            # per-element reads: measured 220.5 s against 0.1 s for the blocked
+            # form on this 14469 x 12401 float32 array, a 3000x difference, and
+            # it was the whole of the delay before training started.  (The two
+            # give bitwise-identical values; an `array_equal` check that says
+            # otherwise is only seeing NaN != NaN.)
+            _hd = hdul["FLUX_SCI"]
+            _n_row_all = int(_hd.shape[0])
+            _n_ds = len(range(0, int(_hd.shape[1]), int(_WAVE_STRIDE_FLUX_LOSS)))
+            _obs_all = np.empty((_n_row_all, _n_ds), dtype=np.float32)
+            for _i0 in range(0, _n_row_all, 512):
+                _obs_all[_i0:_i0 + 512] = _hd.data[_i0:_i0 + 512, stride]
+            obs = _obs_all[row_index].astype(np.float64)
+            # Fibre count per row: the science arm is a MEDIAN STACK of a
+            # median 536 fibres against ~50 in the sky arms, ranging 4 to 1615,
+            # so it sets the effective exposure and cannot be folded into a
+            # constant.  Absent, the variance is per-fibre and only the
+            # WAVELENGTH weighting survives -- which is all the row-normalised
+            # weights use anyway, so it degrades gracefully.
+            _nfib = None
+            if "META" in [h.name for h in hdul]:
+                _mt = hdul["META"].data
+                for _c in ("fibers_sci_used", "fibers_sci"):
+                    if _c in (_mt.columns.names or []):
+                        _nfib = np.asarray(_mt[_c], dtype=np.float64)[row_index]
+                        break
+        # ABSOLUTE Poisson variance (2026-09-09).  The old relative curve had
+        # its per-arm scale divided out upstream and the replacement was
+        # eyeballed off a throughput plot; measured against the absolute
+        # percentile table it was wrong by 1.60x in r and 2.25x in z, which is
+        # a systematic mis-weighting ACROSS the band, exactly what this term
+        # exists to set.
+        sens = noise.load_absolute_sensitivity(wave_ref, verbose=verbose)[stride]
+        # Native dispersion: every 0.5 A pixel is retained, with no resampling,
+        # binning, smoothing, or wavelength removal.
+        _dwave = float(np.median(np.diff(wave_ref)))
+        _var = noise.photon_variance_absolute(
+            obs, sens, exptime=float(flux_exptime_s), dwave=_dwave,
+            n_fibres=_nfib)
+        flux_pixel_weight = noise.weights_from_variance(
+            _var, floor_frac=float(pixel_weight_floor_frac))
+        if verbose:
+            _sg = np.sqrt(np.maximum(_var, 0.0))
+            _fr = np.where(np.isfinite(obs) & (obs > 0) & (_sg > 0),
+                           _sg / np.abs(obs), np.nan)
+            print(f"  [flux-mse] absolute photon sigma/flux: p10/p50/p90 = "
+                  f"{100*np.nanpercentile(_fr,10):.3f}% / "
+                  f"{100*np.nanpercentile(_fr,50):.3f}% / "
+                  f"{100*np.nanpercentile(_fr,90):.3f}%"
+                  + ("" if _nfib is None else
+                     f"; fibres/row median {np.nanmedian(_nfib):.0f}"))
+        if verbose:
+            _fin = flux_pixel_weight[np.isfinite(flux_pixel_weight)]
+            print(f"  [flux-mse] photon pixel weights {flux_pixel_weight.shape}: "
+                  f"1-99% = [{np.percentile(_fin, 1):.3g}, "
+                  f"{np.percentile(_fin, 99):.3g}], variance floored at "
+                  f"{pixel_weight_floor_frac:g} x the row median")
     if verbose:
         print(
             f"[flux-mse prep] wave grid: n_full={wave_ref.size}, "
@@ -923,7 +1999,8 @@ def _precompute_flux_basis_and_geometry(
             f"[flux-mse prep] geom sc_sci: shape={flux_geom_sc_sci.shape}, "
             f"median={float(np.median(flux_geom_sc_sci)):.3g}"
         )
-    return flux_basis_matrices, flux_geom_sc_sci
+    return (flux_basis_matrices, flux_geom_sc_sci, flux_pixel_weight,
+            calib_amplitude_weights)
 
 
 @dataclass
@@ -950,10 +2027,66 @@ class Trainer:
         )
     """
 
+    #: Every config key the Trainer actually reads.  ``_shared_train_kwargs``
+    #: reads all of these except ``ensemble_seeds`` / ``name``, which
+    #: ``run_ensemble`` handles.  Keep in sync when adding a knob -- the
+    #: ``test_consumed_cfg_keys_match_source`` check greps the class body for
+    #: ``c["..."]`` / ``c.get("...")`` and compares against this set.
+    _CONSUMED_CFG_KEYS = frozenset({
+        "name", "ensemble_seeds",
+        "n_epochs", "batch_size", "lr", "weight_decay", "patience",
+        "encoder_dims", "ctx_dims", "trunk_dims", "head_dim",
+        "zodi_head_extra_dims", "continuum_head_extra_dims",
+        "continuum_branch_dims", "moon_zodi_coupling_dims",
+        "moon_zodi_ctx_restriction", "zodi_ctx_restriction",
+        "continuum_ctx_restriction", "alpha_ctx_features",
+        "blend_init_alpha", "alpha_lr_mult",
+        "moon_group_weight", "zodi_group_weight", "continuum_group_weight",
+        "mesospheric_group_weight", "ionospheric_group_weight",
+        "coef_err_sigma_floor_rel", "flux_mse_groups",
+        "flux_amp_lambda", "flux_amp_floor_frac",
+        "flux_pixel_weighting", "flux_pixel_weight_floor_frac",
+    })
+
+    # Keys the trainer reads but does not REQUIRE.  Unlike _CONSUMED_CFG_KEYS a
+    # missing entry here is not an error: the trainer's own default IS the
+    # intended behaviour, so an older cfg inherits it rather than being
+    # rejected.  Present-but-unread keys are still reported below, which is
+    # the failure mode _CONSUMED_CFG_KEYS exists to catch.
+    _OPTIONAL_CFG_KEYS = frozenset({
+        "moon_down_amp_free", "moon_down_amp_rule", "moon_down_alt_deg",
+        "moon_down_frac_max", "moon_down_ratio_transfer",
+        "zodi_ceiling_rule", "zodi_ceiling_amp_free",
+        "zodi_ceiling_gate_frac", "zodi_ceiling_snap_frac",
+    })
+
     def __init__(self, cfg=None):
         self.cfg = dict(cfg) if cfg is not None else dict(default_dual_group_config)
+        # Warn loudly about knobs the Trainer will not read.  The 2026-08-27d
+        # dead-code sweep removed a batch of them from the trainer signature
+        # but callers (notebook cell 9) still carry the pre-sweep list, so an
+        # edit to one of those entries silently does nothing -- exactly how a
+        # blend_init_alpha=0.5 A/B ran at the 0.7 default on 2026-09-01.
+        _ignored = sorted(set(self.cfg) - self._CONSUMED_CFG_KEYS
+                          - self._OPTIONAL_CFG_KEYS)
+        if _ignored:
+            print(
+                f"[Trainer] WARNING: {len(_ignored)} config key(s) are NOT read by "
+                f"the trainer and will have no effect on this run:\n"
+                f"           {', '.join(_ignored)}\n"
+                f"           Remove them, or check the spelling if you meant to "
+                f"change behaviour."
+            )
+        _missing = sorted(self._CONSUMED_CFG_KEYS
+                          - {"name", "ensemble_seeds"} - set(self.cfg))
+        if _missing:
+            raise KeyError(
+                f"Trainer cfg is missing required key(s): {', '.join(_missing)}. "
+                f"Start from mlp_predictor.trainer.default_dual_group_config.")
 
-    def _shared_train_kwargs(self, *, flux_basis_matrices, flux_geom_sc_sci):
+    def _shared_train_kwargs(self, *, flux_basis_matrices, flux_geom_sc_sci,
+                             flux_pixel_weight=None,
+                             calib_amplitude_weights=None):
         c = self.cfg
         return dict(
             n_epochs=int(c["n_epochs"]),
@@ -968,6 +2101,8 @@ class Trainer:
             continuum_branch_dims=tuple(int(v) for v in c["continuum_branch_dims"]),
             moon_zodi_ctx_restriction=c["moon_zodi_ctx_restriction"],
             moon_zodi_coupling_dims=tuple(int(v) for v in c["moon_zodi_coupling_dims"]),
+            blend_init_alpha=float(c["blend_init_alpha"]),
+            alpha_lr_mult=float(c["alpha_lr_mult"]),
             weight_decay=float(c["weight_decay"]),
             patience=int(c["patience"]),
             moon_group_weight=float(c["moon_group_weight"]),
@@ -975,16 +2110,33 @@ class Trainer:
             continuum_group_weight=float(c["continuum_group_weight"]),
             mesospheric_group_weight=float(c["mesospheric_group_weight"]),
             ionospheric_group_weight=float(c["ionospheric_group_weight"]),
-            bright_moon_close_boost=float(c["bright_moon_close_boost"]),
-            bright_moon_close_fli_min=float(c["bright_moon_close_fli_min"]),
-            bright_moon_close_sep_max_deg=float(c["bright_moon_close_sep_max_deg"]),
             coef_err_sigma_floor_rel=c["coef_err_sigma_floor_rel"],
             zodi_ctx_restriction=c["zodi_ctx_restriction"],
             continuum_ctx_restriction=c["continuum_ctx_restriction"],
             alpha_ctx_features=c["alpha_ctx_features"],
             flux_mse_groups=tuple(c.get("flux_mse_groups", ())),
+            flux_amp_lambda=(dict(c["flux_amp_lambda"])
+                             if isinstance(c["flux_amp_lambda"], dict)
+                             else float(c["flux_amp_lambda"])),
+            flux_amp_floor_frac=float(c["flux_amp_floor_frac"]),
             flux_basis_matrices=flux_basis_matrices,
             flux_geom_sc_sci=flux_geom_sc_sci,
+            flux_pixel_weight=flux_pixel_weight,
+            calib_amplitude_weights=calib_amplitude_weights,
+            moon_down_amp_free=bool(c.get("moon_down_amp_free", True)),
+            moon_down_amp_rule=bool(c.get("moon_down_amp_rule", True)),
+            moon_down_alt_deg=float(c.get("moon_down_alt_deg",
+                                          MOON_DOWN_ALT_DEG)),
+            moon_down_frac_max=float(c.get("moon_down_frac_max",
+                                           MOON_DOWN_FRAC_MAX)),
+            moon_down_ratio_transfer=bool(
+                c.get("moon_down_ratio_transfer", True)),
+            zodi_ceiling_rule=bool(c.get("zodi_ceiling_rule", True)),
+            zodi_ceiling_amp_free=bool(c.get("zodi_ceiling_amp_free", False)),
+            zodi_ceiling_gate_frac=float(c.get("zodi_ceiling_gate_frac",
+                                               ZODI_CEILING_GATE_FRAC)),
+            zodi_ceiling_snap_frac=float(c.get("zodi_ceiling_snap_frac",
+                                               ZODI_CEILING_SNAP_FRAC)),
         )
 
     def run_ensemble(
@@ -995,11 +2147,13 @@ class Trainer:
         geom_kwargs,
         *,
         input_fits_for_basis,
+        input_fits_flux=None,
         n_moon_knots,
         split_zodi,
         n_zodi_knots,
         palace_oh_suffix=None,
         palace_diffuse_suffix=None,
+        train_row_mask=None,
         verbose=True,
     ):
         """Fit the full seed ensemble, assemble artifacts, report per-seed metrics."""
@@ -1014,8 +2168,19 @@ class Trainer:
 
         flux_basis_matrices = None
         flux_geom_sc_sci = None
+        flux_pixel_weight = None
+        calib_amplitude_weights = None
         if self.cfg.get("flux_mse_groups"):
-            flux_basis_matrices, flux_geom_sc_sci = _precompute_flux_basis_and_geometry(
+            # Pixel weighting needs the full-corpus stack.  When the caller does
+            # not supply it the loss falls back to the unweighted mean, so an
+            # older caller keeps working instead of silently mis-weighting.
+            _want_w = bool(self.cfg.get("flux_pixel_weighting", True))
+            if _want_w and not input_fits_flux:
+                print("  [flux-mse] flux_pixel_weighting is on but "
+                      "input_fits_flux was not given; pixels stay UNWEIGHTED "
+                      "(pass cfg.data.input_fits_flux to enable it).")
+            (flux_basis_matrices, flux_geom_sc_sci, flux_pixel_weight,
+             calib_amplitude_weights) = _precompute_flux_basis_and_geometry(
                 filtered_triplet=filtered_triplet,
                 compress_geom_kwargs=geom_kwargs,
                 input_fits_for_basis=input_fits_for_basis,
@@ -1024,12 +2189,17 @@ class Trainer:
                 n_zodi_knots=n_zodi_knots,
                 palace_oh_suffix=palace_oh_suffix,
                 palace_diffuse_suffix=palace_diffuse_suffix,
+                input_fits_flux=(input_fits_flux if _want_w else None),
+                pixel_weight_floor_frac=float(
+                    self.cfg.get("flux_pixel_weight_floor_frac", 0.05)),
                 verbose=verbose,
             )
 
         shared = self._shared_train_kwargs(
             flux_basis_matrices=flux_basis_matrices,
             flux_geom_sc_sci=flux_geom_sc_sci,
+            flux_pixel_weight=flux_pixel_weight,
+            calib_amplitude_weights=calib_amplitude_weights,
         )
         split_for_members = (
             filtered_triplet["compress_train_idx"],
@@ -1044,6 +2214,7 @@ class Trainer:
                 filtered_triplet, compressors, group_indices, geom_kwargs,
                 split_indices=split_for_members,
                 seed=int(seed),
+                train_row_mask=train_row_mask,
                 **shared,
             )
             members.append(member)

@@ -32,9 +32,11 @@ data/
 │   ├── palace_aijc_vnf_coefficient_pca_prep_v1.npz
 │   └── palace_aijc_vnf_coefficient_line_amplitude_pca_v1.npz
 └── palace/PMD/
+    ├── palace_line_telluric_r4m_v1.fits
     ├── pmd_popmodel_OH_telluric_upper_parity_lsf_adam_25000_v1.dat
     ├── pmd_popmodel_OH_h_family_default_ef_v1.dat
     ├── pmd_popmodel_OH_joint_v2_updated.dat
+    ├── pmd_refcont_canonhyb_v1.dat
     ├── pmd_refcont_joint_native_adam_invsky_p2_10000iter.dat
     ├── pmd_intdata_atom.dat
     ├── pmd_intmodel_Orc.dat
@@ -117,8 +119,19 @@ DOI `10.5281/zenodo.14064022`; the model description is Noll et al. (2025),
 *Geoscientific Model Development*, 18, 4353-4398. PALACE data are published
 under CC BY 4.0 and code under GPLv3.
 
-The new method needs five selected PALACE-compatible ASCII tables. This bundle
-also retains the preceding OH tables for explicit backward-compatible runs:
+The new method uses the line-specific binary coefficient asset below plus five
+selected PALACE-compatible ASCII tables. This bundle also retains the preceding
+OH tables for explicit backward-compatible runs:
+
+- `palace_line_telluric_r4m_v1.fits`: the 11,552-row line catalogue used by
+  the integrated decomposition, in exact model order. For every OH, atomic,
+  oxygen-recombination, and O2 transition it stores the official PALACE v1.0
+  line-specific `T_ref` and `fH2O` values and the equivalent dry and H2O
+  reference optical depths. Noll et al. (2025) state that these line-specific
+  values were derived from LBLRTM transmission spectra at maximum resolving
+  power `4e6`; the source `palace_lines.fits` is byte-identical to Zenodo
+  record `10.5281/zenodo.14064023`. Runtime line attenuation is evaluated
+  directly from these rows and never interpolated from `palace_cont.fits`;
 
 - `pmd_popmodel_OH_telluric_upper_parity_lsf_adam_25000_v1.dat`: current runtime
   OH table. It changes only `Aij` for 11,393 mapped PALACE rows using the frozen
@@ -136,9 +149,25 @@ also retains the preceding OH tables for explicit backward-compatible runs:
 - `pmd_popmodel_OH_joint_v2_updated.dat`: preceding frozen repository OH
   population table, retained for backward-compatible explicit selection and
   recording the table used by the Moon/Zodi model training;
-- `pmd_refcont_joint_native_adam_invsky_p2_10000iter.dat`: experimental
-  native-LVM HO2, FeO, and O2Ac continuum export; its header records the
-  unchanged grid, optimizer, source hash, and diagnostic status;
+- `pmd_refcont_canonhyb_v1.dat`: **the default diffuse continuum table since
+  2026-09-10.** Canonical PALACE v1.0 `fcHO2` and `fcFeO` interpolated onto the
+  native LVM grid, with `fcO2Ac` taken verbatim from the native-LVM refit
+  below. The canonical HO2/FeO vectors restore PALACE's species
+  identification -- FeO peaks at 5966 A, matching the 595 nm FeO(VIS)
+  component of Noll et al. (2024), and HO2 is correctly the blue tail of the
+  1.51 um feature with only 4.8% of its emission below 9800 A. The refit
+  O2Ac is kept because canonical O2Ac peaks at 3220 A, outside the LVM band,
+  so only its tail is in range and it runs about twice too high through
+  4200-5900 A. Measured on ten far-arm dark off-ecliptic rows, the fully
+  canonical table costs a factor 1.43 in blue chi2 and biases the median
+  residual to -0.26 sigma; this hybrid recovers that to -0.02 and has the
+  best full-band chi2 of the three variants;
+- `pmd_refcont_joint_native_adam_invsky_p2_10000iter.dat`: the previous
+  default -- experimental native-LVM HO2, FeO, and O2Ac continuum export;
+  its header records the unchanged grid, optimizer, source hash, and
+  diagnostic status. Retained for backward-compatible explicit selection.
+  Its HO2 vector was refit to a 595 nm-peaked shape, duplicating FeO rather
+  than PALACE's near-IR species;
 - `pmd_intdata_atom.dat`: canonical atomic-line/multiplet reference data;
 - `pmd_intmodel_Orc.dat`: canonical oxygen-recombination line model;
 - `pmd_popmodel_O2.dat`: canonical O2 population-model table used by the O2
@@ -294,9 +323,33 @@ final = SkyDecompTelluricCorrectedLinesVNFPCALineAmplitudePCA(
 ```
 
 Both results retain every fitted coefficient and the compact per-spectrum B/R/Z
-LSF spline state. `results_to_fits` writes them through the existing `COEFF`,
+LSF spline state. `results_to_fits` writes them through the existing `COEF`,
 `LSF_COEF`, `LSF_KNOTS`, and `LSF_META` extensions without changing older output
 schemas.
+
+## Niv-continuum VNF PCA30
+
+`palace_aijc_vnf_niv_continuum_line_amplitude_pca_v1.npz` is the production
+PCA30 basis for the merged method. It was trained from 1,000 successful
+PALACE-Aijc VNF fits using the frozen `niv-v1` split Moon/Zodiacal and diffuse
+continuum contract, each spectrum's telluric transmission and continuous LSF,
+and the native 12,401-pixel grid. The recorded robust RMS cut retained 983
+spectra. Thirty signed components explain 0.99972595 of the centered fitted
+line-amplitude variance.
+
+```python
+from skysub.sky_decomp.residual_pca import (
+    SkyDecompPalaceAijcVNFNivContinuumLineAmplitudePCA,
+)
+
+decomposer = SkyDecompPalaceAijcVNFNivContinuumLineAmplitudePCA(
+    wave,
+    telluric_calculator=telluric_calculator,
+    pwv_mm=pwv_mm,
+    source_airmass=source_airmass,
+    drp_transmission=drp_transmission,
+)
+```
 
 ## Direct line-adjoint PCA
 
@@ -359,9 +412,22 @@ python skysub/decompose_parallel.py input.fits \
 
 Both bundled command-line modes select
 `pmd_popmodel_OH_telluric_upper_parity_lsf_adam_25000_v1.dat` and
-`pmd_refcont_joint_native_adam_invsky_p2_10000iter.dat` by default. Explicit
-`--palace-oh-suffix` and `--palace-diffuse-suffix` values still override those
-defaults.
+`pmd_refcont_canonhyb_v1.dat` by default. Explicit `--palace-oh-suffix` and
+`--palace-diffuse-suffix` values still override those defaults; pass
+`--palace-oh-suffix _h_family_default_ef_v1` to restore the pre-telluric OH
+table, or pass
+`--palace-diffuse-suffix _joint_native_adam_invsky_p2_10000iter` to restore
+the pre-2026-09-10 diffuse table.
+
+The split-zodi mode also applies a **diffuse species-ratio bracket** by
+default (`--diffuse-ratio-bound-dex 0.2`, `--diffuse-ratio-nominal
+0.0396,0.7026,0.2578`): the three diffuse species are individually
+unidentifiable in the LVM band, and the three arms of one exposure disagree
+about `log10(FeO/HO2)` by 0.633 dex at the median when the ratios are free.
+Pass `--diffuse-ratio-bound-dex 0` to disable it. The nominal is FLUX shares
+measured on the corpus being fitted, not PALACE's own reference shares --
+see `decompose_parallel.SPLIT_ZODI_DIFFUSE_RATIO_NOMINAL` for why, and
+re-measure it if the basis or corpus changes.
 
 For a remote clone, the packaged root can be selected explicitly from the Git
 root. Omitting the suffix flags intentionally follows the versions declared by

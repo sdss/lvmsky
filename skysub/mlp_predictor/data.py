@@ -50,11 +50,6 @@ from sky_decomp.lsf_surface_iterative import (
     load_lsf_surface_state,
 )
 
-# Reused across `airglow_van_rhijn_matrix` and per-arm geometry augmentation.
-LMC_EXCLUSION = {"ra_center_deg": 80.9, "dec_center_deg": -69.75, "radius_deg": 8.0}
-SMC_EXCLUSION = {"ra_center_deg": 13.2, "dec_center_deg": -72.83, "radius_deg": 5.0}
-
-
 # ==========================================================================
 # Extracted from notebook cell id=f4b17802
 # ==========================================================================
@@ -1940,7 +1935,9 @@ def _safe_float(x):
 
 def _infer_base_dir_for_reconstruction():
     _cwd = Path.cwd().resolve()
-    candidates = [_cwd / 'sky_decomp' / 'data',
+    candidates = [Path(__file__).resolve().parents[1] / 'sky_decomp' / 'data',
+                  _cwd / 'skysub' / 'sky_decomp' / 'data',
+                  _cwd / 'sky_decomp' / 'data',
                   _cwd.parent / 'skysub' / 'sky_decomp' / 'data',
                   _cwd, _cwd.parent]
     if 'PALACE_DIR' in globals():
@@ -2119,8 +2116,10 @@ def _angular_separation_deg_vec(ra_deg, dec_deg, ra_c_deg, dec_c_deg):
                + np.cos(dec) * np.cos(dec_c) * np.cos(ra - ra_c))
     return np.rad2deg(np.arccos(np.clip(cos_sep, -1.0, 1.0)))
 
-LMC_EXCLUSION = {'name': 'LMC', 'ra_deg': 81, 'dec_deg': -69.7, 'radius_deg': 10.0}
-SMC_EXCLUSION = {'name': 'SMC', 'ra_deg': 14, 'dec_deg': -73, 'radius_deg': 10}
+# Science-field exclusions, consumed by `apply_triplet_filters` via
+# `region['ra_deg'] / ['dec_deg'] / ['radius_deg']`.  THE ONLY DEFINITION --
+LMC_EXCLUSION = {'name': 'LMC', 'ra_deg': 81, 'dec_deg': -69.7, 'radius_deg': 8.0}
+SMC_EXCLUSION = {'name': 'SMC', 'ra_deg': 14, 'dec_deg': -73, 'radius_deg': 4.0}
 
 def _kappa_sigma_row_mask(x, kappa=5.0, n_iter=3):
     x = np.asarray(x, dtype=np.float64)
@@ -2171,6 +2170,607 @@ def _kappa_mad_row_mask(x, kappa=4.0, n_iter=3):
     return keep
 
 
+def canonical_row_labels(source_meta_fits, source_row_index,
+                         corpus_meta_fits=None):
+    """Universal row identity for diagnostic labels and plot tooltips.
+
+    A triplet's ``row_index`` is the row of the FITS file it was BUILT FROM.
+    For the every10 products that is the every10 file, whose row N is a
+    DIFFERENT SPECTRUM from row N of the full-corpus tables -- so an every10
+    label looked up in a decomposition FITS silently returns the wrong object.
+    Measured on both corpora: every10 row 493 is corpus row 4930.  That
+    mismatch caused a real misdiagnosis (four rows analysed as dark-time
+    floor-pinned objects were in fact bright-moon rows three positions away),
+    so diagnostics should label rows with this function rather than with a
+    bare ``row_index``.
+
+    Returns per-row arrays plus a preformatted ``label``:
+
+    ``expnum``
+        Unique within every META table in both corpora, and the SAME value for
+        the same spectrum across selections.  The universal key: look a row up
+        by this in any table and you get the right object.
+    ``input_index``
+        Row of the upstream pre-selection input (0..17259).  Stable across
+        selections, but NOT an index into any corpus table -- the gaia
+        selection keeps 14469 of 17260 rows, so it is not the corpus row there.
+    ``corpus_row``
+        Row in the full-corpus tables, resolved by matching ``input_index``.
+        -1 where ``corpus_meta_fits`` is not supplied or a row has no match.
+    ``source_row``
+        Row in the file the triplet was built from (the input ``row_index``).
+    """
+    src = np.asarray(source_row_index, dtype=np.int64)
+    meta = fits.getdata(str(source_meta_fits), 'META')
+    names = set(meta.dtype.names or ())
+    expnum = (np.asarray(meta['expnum'], dtype=np.int64)[src]
+              if 'expnum' in names else np.full(src.size, -1, dtype=np.int64))
+    inp = (np.asarray(meta['input_index'], dtype=np.int64)[src]
+           if 'input_index' in names else np.full(src.size, -1, dtype=np.int64))
+
+    corpus_row = np.full(src.size, -1, dtype=np.int64)
+    if corpus_meta_fits is not None and 'input_index' in names:
+        cmeta = fits.getdata(str(corpus_meta_fits), 'META')
+        if 'input_index' in set(cmeta.dtype.names or ()):
+            c_inp = np.asarray(cmeta['input_index'], dtype=np.int64)
+            order = np.argsort(c_inp)
+            pos = np.searchsorted(c_inp[order], inp)
+            pos = np.clip(pos, 0, order.size - 1)
+            cand = order[pos]
+            corpus_row = np.where(c_inp[cand] == inp, cand, -1)
+
+    label = np.array([
+        (f'expnum {int(e)}' if e >= 0 else f'row {int(r)}')
+        + (f' | corpus row {int(c)}' if c >= 0 else '')
+        + f' | src row {int(r)}'
+        for e, c, r in zip(expnum, corpus_row, src)], dtype=object)
+    return dict(expnum=expnum, input_index=inp, corpus_row=corpus_row,
+                source_row=src, label=label)
+
+
+def _loglog_slopes(component, log_wave, min_pixels=200):
+    """Row-wise log-log slope of ``component`` against wavelength.
+
+    Fits ``log f = a + b log(lambda)`` per row over finite, strictly positive
+    samples only (the QP leaves exact zeros wherever a family is switched off,
+    and those carry no colour information).  Returns NaN for rows with fewer
+    than ``min_pixels`` usable samples or a degenerate lever arm.
+    """
+    flux = np.asarray(component, dtype=np.float64)
+    x = np.asarray(log_wave, dtype=np.float64)[None, :]
+    good = np.isfinite(flux) & (flux > 0.0)
+    y = np.log(np.where(good, flux, 1.0))
+    n = good.sum(axis=1).astype(np.float64)
+    sx = np.where(good, x, 0.0).sum(axis=1)
+    sy = np.where(good, y, 0.0).sum(axis=1)
+    sxx = np.where(good, x * x, 0.0).sum(axis=1)
+    sxy = np.where(good, x * y, 0.0).sum(axis=1)
+    den = n * sxx - sx * sx
+    ok = (n >= float(min_pixels)) & (den > 0.0)
+    slope = np.full(flux.shape[0], np.nan, dtype=np.float64)
+    np.divide(n * sxy - sx * sy, den, out=slope, where=ok)
+    slope[~ok] = np.nan
+    return slope
+
+
+def split_zodi_reversal_diagnostics(
+    decomp_fits_paths,
+    row_index,
+    wave,
+    chunk_rows=256,
+    min_component_frac=0.05,
+):
+    """Per-arm moon/zodi colours and role-reversal flags for the given rows.
+
+    A *reversal* is a row where the fitted moon continuum is REDDER than the
+    fitted zodi continuum -- ``moon_slope > zodi_slope`` -- i.e. the two
+    families have swapped roles.  Physics puts the moon near -3.7 (scattered
+    sunlight, Rayleigh-dominated) and the zodi near -0.3 (Leinert reddening),
+    so the ordering is unambiguous when both families carry flux.
+
+    Reversed rows are actively harmful to the ML stage rather than merely
+    noisy: the moon coefficients of a reversed row describe zodiacal light and
+    vice versa, so the network is asked to learn a moon-geometry mapping from
+    zodi-shaped targets.  That is the same corruption the moon/zodi coupling
+    head was quietly absorbing.
+
+    Rows where one family is essentially switched off carry no ordering
+    information and are NOT flagged: the test only applies where the moon's
+    share of the moon+zodi continuum lies inside
+    ``[min_component_frac, 1 - min_component_frac]``.  Dark-time rows sit at a
+    moon share of ~0.02 under the current decomposition priors and are exempt
+    by construction.
+
+    Reads the refined ``COMP_MOON`` / ``COMP_ZODI`` component spectra written
+    by ``decompose_parallel``, so no basis is rebuilt and no reconstruction
+    convention has to be reproduced here.
+
+    Returns ``{arm: {'moon_slope', 'zodi_slope', 'moon_frac', 'reversed',
+    'testable'}}`` with one entry per requested row.
+    """
+    idx = np.asarray(row_index, dtype=np.int64)
+    log_wave = np.log(np.asarray(wave, dtype=np.float64))
+    out = {}
+    for arm, path in dict(decomp_fits_paths).items():
+        moon_slope = np.full(idx.size, np.nan)
+        zodi_slope = np.full(idx.size, np.nan)
+        moon_frac = np.full(idx.size, np.nan)
+        try:
+            with fits.open(path, memmap=True) as hdul:
+                if 'COMP_MOON' not in hdul or 'COMP_ZODI' not in hdul:
+                    print(f"  reversal check: {arm} has no COMP_MOON/COMP_ZODI HDU; skipping arm.")
+                    continue
+                for start in range(0, idx.size, int(chunk_rows)):
+                    sel = idx[start:start + int(chunk_rows)]
+                    moon = np.asarray(hdul['COMP_MOON'].data[sel], dtype=np.float64)
+                    zodi = np.asarray(hdul['COMP_ZODI'].data[sel], dtype=np.float64)
+                    sl = slice(start, start + sel.size)
+                    moon_slope[sl] = _loglog_slopes(moon, log_wave)
+                    zodi_slope[sl] = _loglog_slopes(zodi, log_wave)
+                    m_tot = np.nansum(np.where(moon > 0, moon, 0.0), axis=1)
+                    z_tot = np.nansum(np.where(zodi > 0, zodi, 0.0), axis=1)
+                    total = m_tot + z_tot
+                    moon_frac[sl] = np.where(total > 0, m_tot / np.maximum(total, 1e-300), np.nan)
+        except FileNotFoundError:
+            print(f"  reversal check: {arm} decomposition not found at {path}; skipping arm.")
+            continue
+        frac_lo = float(min_component_frac)
+        testable = (
+            np.isfinite(moon_slope) & np.isfinite(zodi_slope) & np.isfinite(moon_frac)
+            & (moon_frac >= frac_lo) & (moon_frac <= 1.0 - frac_lo)
+        )
+        out[arm] = {
+            'moon_slope': moon_slope,
+            'zodi_slope': zodi_slope,
+            'moon_frac': moon_frac,
+            'separation': zodi_slope - moon_slope,
+            'testable': testable,
+        }
+    return out
+
+
+def split_zodi_decomp_paths(data_root, stem, suffix, every10=True):
+    """Per-arm decomposition FITS paths, keyed the way the reversal helpers want."""
+    base = f'{data_root}/{stem}' + ('_every10' if every10 else '')
+    return {'near': f'{base}_decomp_sky1{suffix}.fits',
+            'far':  f'{base}_decomp_sky2{suffix}.fits',
+            'sci':  f'{base}_decomp_sci{suffix}.fits'}
+
+
+def split_zodi_reversal_keep_mask(
+    decomp_fits_paths,
+    row_index,
+    wave,
+    min_component_frac=0.05,
+    min_separation=0.0,
+    label='sample',
+    verbose=True,
+):
+    """Keep-mask (True = usable) dropping moon/zodi role-reversed rows.
+
+    For the every10-derived DIAGNOSTIC samples.  These deliberately skip the
+    training-time target filters (hard coefficient bounds, kappa-sigma) so the
+    model's hardest genuine cases stay in the evaluation set -- but a reversal
+    is not a hard case, it is a MISLABELLED one: the row's moon coefficients
+    describe zodiacal light.  Scoring a prediction against swapped labels
+    measures nothing, and such rows show up as spurious outliers in the moon
+    panel while never having been trained on.  So this belongs with the chi2
+    decomposition-failure gate, not with the target-outlier filters.
+
+    Returns a boolean mask over ``row_index``; rows whose reversal state cannot
+    be determined (one family switched off) are kept.
+    """
+    idx = np.asarray(row_index, dtype=np.int64)
+    try:
+        stats = split_zodi_reversal_diagnostics(
+            decomp_fits_paths, idx, wave,
+            min_component_frac=float(min_component_frac))
+    except Exception as exc:  # missing COMP_* HDU, absent file, ...
+        if verbose:
+            print(f'  {label} reversal gate SKIPPED '
+                  f'({type(exc).__name__}: {exc})')
+        return np.ones(idx.size, dtype=bool)
+    if not stats:
+        if verbose:
+            print(f'  {label} reversal gate SKIPPED (no arm had COMP_MOON/COMP_ZODI)')
+        return np.ones(idx.size, dtype=bool)
+    reversed_any = np.zeros(idx.size, dtype=bool)
+    testable_any = np.zeros(idx.size, dtype=bool)
+    for st in stats.values():
+        reversed_any |= st['testable'] & (st['separation'] < float(min_separation))
+        testable_any |= st['testable']
+    keep = ~reversed_any
+    if verbose:
+        print(f'  {label} moon/zodi reversal gate: dropped '
+              f'{int(reversed_any.sum())}/{idx.size} row(s) with swapped '
+              f'moon/zodi colours in any arm '
+              f'({int(testable_any.sum())} testable, '
+              f'{int((~testable_any).sum())} with one family switched off)')
+    return keep
+
+
+SCI_COLOUR_BLUE_BAND = (4150.0, 4400.0)
+SCI_COLOUR_RED_BAND = (6050.0, 6250.0)
+SCI_COLOUR_EXCESS_MAX = 0.05
+
+
+def sci_continuum_colour_excess(
+    input_fits_path,
+    row_index,
+    blue_band=SCI_COLOUR_BLUE_BAND,
+    red_band=SCI_COLOUR_RED_BAND,
+):
+    """Per-row red/blue continuum colour of the science fibre minus the sky arms'.
+
+    ``dC = log10(R/B)_sci - mean(log10(R/B)_near, log10(R/B)_far)`` on median
+    fluxes in two line-free continuum windows.  It is a pure colour ratio, so a
+    throughput or exposure-time difference between the three telescopes cancels
+    and only a difference in continuum SHAPE survives.
+
+    Why this and not the fitted coefficients: when the science fibre carries
+    continuum the sky model cannot represent, the QP has to put it somewhere,
+    and the 15-knot Moon_bs spline is the only flexible continuum in the basis
+    (the zodi total is pinned by the Leinert anchor and the three diffuse
+    species have fixed shapes).  So the moon coefficients absorb it and the
+    row's moon target stops being a description of scattered moonlight.
+    Traced from every10 row 493 / corpus row 4930 (expnum 41932): sci/near
+    observed flux ratio 1.005 over 3600-4500 A against 1.35 over 4500-5500 and
+    1.46 over 5500-7000, and the fitted sci moon spline responds by sitting
+    exactly on the beta = 0.7 adjacent-knot bound -- 0.7000000004,
+    0.7000000010, then 1.4285714256 = 1/0.7 from Moon_bs03 (4664 A) to
+    Moon_bs04 (5159 A) -- which is what puts a physically impossible kink at
+    ~5000 A into the moon.  Integrated moon sci/near on that row: 1.329.
+
+    Measured on gaia-stars (14 232 usable rows), against the sci-minus-near
+    moon spline colour distortion, and with the far-minus-near sky-arm pair as
+    the control:
+
+        rho(dC, moon colour distortion)  = +0.405   control +0.034
+        same, moon-up rows only          = +0.416
+        rho(dC, signed ML moon amplitude error), moon-up = -0.331  control +0.069
+
+    The sign is the expected one: a redder science continuum inflates the
+    fitted moon, so the network -- which sees only the two sky arms, neither of
+    which knows anything about the science field -- under-predicts it.
+
+    Do NOT substitute a shape test on the fitted moon spline for this.  A bump
+    in the moon spline is NOT diagnostic: on moon-up rows with real moon flux
+    in all three arms, a mid-optical bump above 1.05 fires on 54.2% of science
+    rows and 55.3% / 57.2% of the near / far rows, and above 1.50 on 13.8%
+    against 13.4% / 13.9%.  The bump is generic to this decomposition in every
+    arm.  Only the science-minus-sky-arm DIFFERENCE carries information, and it
+    is much weaker than dC (rho 0.194 against 0.405).
+
+    Returns a dict with ``excess`` (dC), the three per-arm colours, and
+    ``usable`` (False where any band median is non-positive or non-finite).
+    """
+    idx = np.asarray(row_index, dtype=np.int64)
+    with fits.open(input_fits_path, memmap=True) as hdul:
+        wave = np.asarray(hdul['WAVE'].data, dtype=np.float64)
+        wave = wave if wave.ndim == 1 else wave[0]
+
+        def _band(lo, hi):
+            i0, i1 = np.searchsorted(wave, [float(lo), float(hi)])
+            if int(i1) <= int(i0):
+                raise ValueError(
+                    f'Continuum band {lo}-{hi} A is empty on this wavelength grid')
+            return slice(int(i0), int(i1))
+
+        blue = _band(*blue_band)
+        red = _band(*red_band)
+        out = {}
+        for arm, ext in (('sci', 'FLUX_SCI'),
+                         ('near', 'FLUX_SKY_NEAR'),
+                         ('far', 'FLUX_SKY_FAR')):
+            section = hdul[ext].section
+            b = np.nanmedian(section[:, blue], axis=1)[idx]
+            r = np.nanmedian(section[:, red], axis=1)[idx]
+            good = np.isfinite(b) & np.isfinite(r) & (b > 0) & (r > 0)
+            colour = np.full(idx.size, np.nan, dtype=np.float64)
+            np.divide(r, b, out=colour, where=good)
+            with np.errstate(invalid='ignore', divide='ignore'):
+                colour = np.where(good, np.log10(colour), np.nan)
+            out[f'colour_{arm}'] = colour
+    excess = out['colour_sci'] - 0.5 * (out['colour_near'] + out['colour_far'])
+    out['excess'] = excess
+    out['usable'] = np.isfinite(excess)
+    return out
+
+
+def sci_continuum_colour_keep_mask(
+    input_fits_path,
+    row_index,
+    max_excess=SCI_COLOUR_EXCESS_MAX,
+    blue_band=SCI_COLOUR_BLUE_BAND,
+    red_band=SCI_COLOUR_RED_BAND,
+    label='sample',
+    verbose=True,
+):
+    """Keep-mask (True = usable) dropping rows whose science continuum colour
+    disagrees with both sky arms by more than ``max_excess`` dex.
+
+    Belongs with the chi2 and moon/zodi-reversal gates rather than with the
+    target-outlier filters: like a reversal, this is a MISLABELLED row, not a
+    hard one.  Its moon coefficients are partly describing something in the
+    science field, so scoring a prediction against them measures nothing, and
+    the row shows up as a moon-panel outlier that no amount of training could
+    have fixed.  Apply it to the every10 diagnostic samples for the same
+    reason it is applied to the training corpus.
+
+    Default threshold 0.05 dex is set by the sky-arm control: two genuine sky
+    fibres, pointing 7-80 deg apart, differ in this colour by a signed
+    far-minus-near p90 of +0.037 dex, so 0.05 sits just outside the spread the
+    measurement itself produces on rows where nothing is wrong.  It costs 7.1%
+    of the gaia-stars corpus and 7.1% of its every10 sample.
+
+    Rows whose colour cannot be measured (a non-positive band median) are KEPT,
+    matching the reversal gate's convention that an undeterminable row is not
+    an excluded one.
+    """
+    idx = np.asarray(row_index, dtype=np.int64)
+    try:
+        stats = sci_continuum_colour_excess(
+            input_fits_path, idx, blue_band=blue_band, red_band=red_band)
+    except Exception as exc:  # absent file, missing FLUX_* HDU, empty band, ...
+        if verbose:
+            print(f'  {label} science-continuum colour gate SKIPPED '
+                  f'({type(exc).__name__}: {exc})')
+        return np.ones(idx.size, dtype=bool)
+    excess = stats['excess']
+    usable = stats['usable']
+    drop = usable & (excess > float(max_excess))
+    keep = ~drop
+    if verbose:
+        _u = excess[usable]
+        print(f'  {label} science-continuum colour gate '
+              f'(dC > {float(max_excess):.3f} dex, red {red_band[0]:.0f}-'
+              f'{red_band[1]:.0f} A over blue {blue_band[0]:.0f}-'
+              f'{blue_band[1]:.0f} A): dropped {int(drop.sum())}/{idx.size} '
+              f'row(s); dC median {np.median(_u):+.4f}, p90 '
+              f'{np.percentile(_u, 90):+.4f} over {int(usable.sum())} '
+              f'measurable, {int((~usable).sum())} unmeasurable kept')
+    return keep
+
+
+MOON_MODEL_FEATURE_NAMES = ['moon_model_log_ratio']
+_MOON_MODEL_FLOOR = 1.0e-6
+
+# v2 cache features, added 2026-09-09 alongside the transfer ratio because they
+# come out of the same cache load and validation.  Both are PER ARM.
+#
+#   zodi_po_log10  log10 of the PHYSICS-ONLY zodi integral -- the quantity the
+#                  decomposition's absolute Leinert bracket is stated against.
+#                  On the 43% of rows where the anchor binds, the fitted zodi
+#                  IS a fixed multiple of this, so the feature carries the
+#                  target itself rather than a correlate of it.
+#   moon_frac_po   the physics-only moon fraction int(moon)/int(moon+zodi),
+#                  i.e. exactly the quantity the moon-share bracket is stated
+#                  in.  Used as the gate for the zodi ceiling rule: measured on
+#                  every10, `moon_frac_po > 0.5` selects 43.0% of rows of which
+#                  95.3% are pinned at the ceiling (p95 error 0.0010 dex),
+#                  against 84.9% / p90 0.16 for a plain `moon_alt > 0` gate.
+#
+# A row the physics-only model could not evaluate gets 0.0 in BOTH, never NaN.
+# `moon_frac_po == 0.0` is therefore an unambiguous invalid flag: a real
+# fraction is never exactly zero (it bottoms out around 3e-5 with the moon
+# well below the horizon), and consumers must test it rather than the log,
+# which has no impossible value to spare.
+ZODI_CEILING_FEATURE_NAMES = ['zodi_po_log10', 'moon_frac_po']
+
+
+def _augment_triplet_with_moon_model(triplet, corpus_prefix, force=False,
+                                     verbose=True, build_if_missing=True,
+                                     n_workers=None, add_zodi_ceiling=True):
+    """Append the frozen model's moon TRANSFER RATIO, gated to moon-up rows.
+
+    One feature, identical in all three ctx vectors:
+
+        moon_model_log_ratio = log10(moon_model_sci / moon_model_near),
+                               and exactly 0.0 wherever the moon is down.
+
+    Reads the cache from ``mlp_predictor.moon_model_cache``, BUILDING it on
+    first use if this corpus does not have one yet (``build_if_missing``, on by
+    default) -- the same contract as the wavelength cache.  2.4 MB per corpus;
+    ~26 min on 8 cores for a full corpus, ~3 min for an every10 subsample, then
+    free.  It can also be built ahead of time with
+    ``python -m mlp_predictor.moon_model_cache <prefix> --n-workers 8``.
+
+    WHY THE RATIO AND NOT THE PER-ARM AMPLITUDE.  The per-arm form was tried
+    first and made the moon WORSE: 2 x 10 seeds, identical rows/split/seeds,
+    moon amplitude MAD 0.02396 -> 0.02450 (+2.3%), continuum +3.4%,
+    mean_eRMSE 7.858 -> 7.872.  The likely reason is the dynamic range:
+    ``log10(moon_total)`` spans 7.4 decades corpus-wide with a 5.3-decade step
+    at the horizon, and on the moon-down half (49.7% of rows) it is the model's
+    below-horizon CONTINUATION -- not a prediction of anything, since the
+    decomposition zeroes the moon there.  So half the column was meaningless
+    over several decades and the RobustScaler compressed the useful moon-up
+    range against it.  The ratio is the quantity actually measured to carry
+    signal and spans only 0.20 dex (p1 -0.066, p99 +0.136 on moon-up rows).
+
+    WHAT THE RATIO IS WORTH.  On the gaia-stars test split (held out by night,
+    moon-up, n = 583) it predicts the science moon amplitude to MAD 0.0119 dex
+    against 0.0139 for the trained network and 0.0228 for copying the near arm,
+    with rho(log r_model, log true ratio) = +0.794.  The crude
+    ``moon_signal_proxy`` already in the ctx gets +0.067 against the same
+    target, so this is new INFORMATION, not a rearrangement -- the distinction
+    from the six refuted attempts in ``ablations.RETIRED``.
+
+    The value is the SAME in ctx_near / ctx_far / ctx_sci because a transfer
+    ratio is a property of the exposure, not of an arm.  That is deliberate: it
+    means the feature carries no arm-identifying information, so it cannot act
+    as a back door for the arm context that was measured harmful.
+
+    Rows the model could not evaluate (23 of 14 469 on gaia-stars, all a SKY
+    pointing below the horizon) get 0.0, the same as moon-down -- never NaN,
+    which would propagate through the encoder and poison the batch.
+    """
+    from . import moon_model_cache as _mmc
+
+    names = [str(n) for n in triplet['ctx_names']]
+    feat = MOON_MODEL_FEATURE_NAMES[0]
+    _added = [feat] + (list(ZODI_CEILING_FEATURE_NAMES)
+                       if add_zodi_ceiling else [])
+    if feat in names and not force:
+        return triplet
+    if any(f in names for f in _added):
+        keep = [i for i, n in enumerate(names) if n not in _added]
+        for key in ('ctx_near', 'ctx_far', 'ctx_sci'):
+            triplet[key] = np.asarray(triplet[key])[:, keep]
+        names = [names[i] for i in keep]
+    # Absent cache -> build it, the same way the wavelength cache grows on
+    # first use.  A cache that EXISTS but fails validation is deliberately not
+    # rebuilt silently; see moon_model_cache.load_or_build.
+    cache = (_mmc.load_or_build(corpus_prefix, n_workers=n_workers,
+                                verbose=verbose)
+             if build_if_missing else _mmc.load(corpus_prefix))
+    row_index = np.asarray(triplet['row_index'], dtype=np.int64)
+    n_cache = int(cache['n_rows'])
+    if row_index.size and (row_index.min() < 0 or row_index.max() >= n_cache):
+        raise RuntimeError(
+            f"triplet row_index spans [{row_index.min()}, {row_index.max()}] "
+            f"but the moon-model cache at {_mmc.cache_path(corpus_prefix)} has "
+            f"{n_cache} rows; the cache belongs to a different file")
+    # Verify the cache describes THIS file, not merely one with enough rows.
+    # `row_index` bounds alone let an every10 triplet (rows 0..1446) accept the
+    # corpus cache, silently pairing each row with a different exposure.
+    if 'sci_ra' in cache and 'sci_ra' in triplet:
+        want_ra = np.asarray(triplet['sci_ra'], dtype=np.float64)
+        want_dec = np.asarray(triplet['sci_dec'], dtype=np.float64)
+        have_ra = np.asarray(cache['sci_ra'], dtype=np.float64)[row_index]
+        have_dec = np.asarray(cache['sci_dec'], dtype=np.float64)[row_index]
+        bad = ~(np.isclose(want_ra, have_ra, rtol=0.0, atol=1e-6)
+                & np.isclose(want_dec, have_dec, rtol=0.0, atol=1e-6))
+        if np.any(bad):
+            raise RuntimeError(
+                f"the moon-model cache at {_mmc.cache_path(corpus_prefix)} does "
+                f"not describe this triplet: {int(bad.sum())}/{bad.size} rows "
+                f"have a different science pointing (first at row_index "
+                f"{int(row_index[np.flatnonzero(bad)[0]])}: cache "
+                f"({have_ra[np.flatnonzero(bad)[0]]:.5f}, "
+                f"{have_dec[np.flatnonzero(bad)[0]]:.5f}) vs triplet "
+                f"({want_ra[np.flatnonzero(bad)[0]]:.5f}, "
+                f"{want_dec[np.flatnonzero(bad)[0]]:.5f})). Point it at the "
+                f"prefix this triplet was built from.")
+    ratio = _mmc.transfer_ratio(cache)[row_index]
+    moon_up = np.asarray(cache['sci_moon_alt_deg'],
+                         dtype=np.float64)[row_index] > 0.0
+    col = np.where(moon_up & np.isfinite(ratio), ratio, 0.0).astype(np.float32)
+    n_gated = int((~(moon_up & np.isfinite(ratio))).sum())
+    _extra = {}
+    if add_zodi_ceiling:
+        _arm_of = {'ctx_near': 'near', 'ctx_far': 'far', 'ctx_sci': 'sci'}
+        for _key, _arm in _arm_of.items():
+            _zp = np.asarray(cache[f'{_arm}_zodi_total_po'],
+                             dtype=np.float64)[row_index]
+            _fp = np.asarray(cache[f'{_arm}_moon_frac_po'],
+                             dtype=np.float64)[row_index]
+            _good = np.isfinite(_zp) & (_zp > 0.0) & np.isfinite(_fp) & (_fp > 0.0)
+            _extra[_key] = np.column_stack([
+                np.where(_good, np.log10(np.where(_zp > 0.0, _zp, 1.0)), 0.0),
+                np.where(_good, _fp, 0.0)]).astype(np.float32)
+    for key in ('ctx_near', 'ctx_far', 'ctx_sci'):
+        _cols = [np.asarray(triplet[key], dtype=np.float32), col[:, None]]
+        if key in _extra:
+            _cols.append(_extra[key])
+        triplet[key] = np.hstack(_cols)
+    triplet['ctx_names'] = names + [feat] + (
+        list(ZODI_CEILING_FEATURE_NAMES) if add_zodi_ceiling else [])
+    if verbose:
+        _live = col[col != 0.0]
+        print(f"  moon-model augment: added {feat} (n_ctx now "
+              f"{len(triplet['ctx_names'])}); {n_gated}/{col.size} rows gated "
+              f"to 0 (moon down or unmodellable); active rows p1/p50/p99 = "
+              + (" / ".join(f"{np.percentile(_live, q):+.4f}" for q in (1, 50, 99))
+                 if _live.size else "n/a"))
+        if add_zodi_ceiling:
+            _fsci = _extra['ctx_sci'][:, 1]
+            print(f"    + {', '.join(ZODI_CEILING_FEATURE_NAMES)} per arm; "
+                  f"{int((_fsci <= 0.0).sum())}/{_fsci.size} rows have no "
+                  f"physics-only prediction (flagged by moon_frac_po == 0); "
+                  f"moon_frac_po(sci) > 0.5 on "
+                  f"{100.0 * float(np.mean(_fsci > 0.5)):.1f}% of rows")
+    return triplet
+
+
+DIFFUSE_COMPONENT_NAMES = ('HO2', 'FeO', 'O2Ac')
+DIFFUSE_ZEROED_FRAC = 1.0e-3
+
+
+def diffuse_zeroed_mask(coef_by_arm, coef_names, frac=DIFFUSE_ZEROED_FRAC,
+                        reference='sci'):
+    """Per-arm mask of rows where the whole diffuse block collapsed to zero.
+
+    A row is ``zeroed`` in an arm when ALL THREE of HO2, FeO and O2Ac fall
+    below ``frac`` times their own corpus median (taken from ``reference``, so
+    every arm is judged on the same scale).
+
+    This is a decomposition artefact, not sky.  Measured on gaia-stars-mask
+    (14 447 rows): the science arm has 188 such rows and they are genuinely
+    ZERO, not merely faint -- 1.279% of rows sit below 1e-6 x the median
+    against 1.299% below 1e-2 x, so the distribution is bimodal with nothing in
+    between.  All three components go together: among sci-zeroed rows HO2 is
+    non-zero on 0.5%, FeO on 0.0%, O2Ac on 0.5%.  The QP is choosing to fit no
+    diffuse continuum at all and letting the Zodi_bs spline carry it, which is
+    the zodi/diffuse degeneracy taken to its limit -- 10.1% of these rows are
+    moon-up against 50.1% of the corpus, i.e. they are dark time, where the two
+    smooth continua are least separable.
+
+    Deliberately NOT the integrated amplitude ``c . B.sum(axis=1)``: that needs
+    the basis matrix, and the two definitions agree on 99.99% of rows.  The
+    threshold is not delicate either -- frac from 1e-4 to 0.05 selects 186 to
+    190 rows.
+
+    Returns ``{arm: bool array}``, True where that arm's diffuse block is
+    zeroed.
+    """
+    names = [str(n) for n in coef_names]
+    try:
+        idx = [names.index(n) for n in DIFFUSE_COMPONENT_NAMES]
+    except ValueError as exc:
+        raise RuntimeError(
+            f"diffuse components {DIFFUSE_COMPONENT_NAMES} not all present in "
+            f"coef_names; cannot apply the diffuse-zeroed gate") from exc
+    ref = np.asarray(coef_by_arm[reference], dtype=np.float64)[:, idx]
+    med = np.median(ref, axis=0)
+    med = np.where(np.isfinite(med) & (med > 0), med, np.inf)
+    out = {}
+    for arm, coef in coef_by_arm.items():
+        c = np.asarray(coef, dtype=np.float64)[:, idx]
+        out[arm] = np.all(c < float(frac) * med[None, :], axis=1)
+    return out
+
+
+def diffuse_zeroed_keep_mask(coef_by_arm, coef_names, frac=DIFFUSE_ZEROED_FRAC,
+                             arms=('near', 'far', 'sci'), label='sample',
+                             verbose=True):
+    """Keep-mask (True = usable) dropping rows whose diffuse block collapsed.
+
+    Grouped with the moon/zodi reversal and science-continuum colour gates
+    rather than with the target-outlier filters, for the same reason: this is a
+    MISLABELLED row, not a hard one.  Scoring a prediction against a diffuse
+    amplitude of ~2e-6 -- where the near arm has ~322 -- measures nothing, and
+    it produces spectacular relative errors: those rows alone put the continuum
+    p95 log-error at 8 dex.
+
+    Defaults to dropping when ANY arm is zeroed: a zeroed SCI arm is an
+    unusable target, and a zeroed SKY arm is a corrupted input the encoder
+    reads.  Pass ``arms=('sci',)`` for targets only.
+    """
+    z = diffuse_zeroed_mask(coef_by_arm, coef_names, frac=frac)
+    drop = np.zeros(len(next(iter(z.values()))), dtype=bool)
+    for arm in arms:
+        if arm in z:
+            drop |= z[arm]
+    keep = ~drop
+    if verbose:
+        per = '  '.join(f'{a}={int(z[a].sum())}' for a in z)
+        print(f'  {label} diffuse-zeroed gate (all of '
+              f'{"/".join(DIFFUSE_COMPONENT_NAMES)} below {frac:g} x their '
+              f'corpus median): dropped {int(drop.sum())}/{keep.size} '
+              f'row(s) [{per}]')
+    return keep
+
+
 def apply_triplet_filters(
     triplet_data,
     thin_every_n=1,
@@ -2178,12 +2778,51 @@ def apply_triplet_filters(
     chi2_min=0.0,
     chi2_max=10.0,
     hard_coef_bounds=None,
-    kappa=6.0,
+    # 2026-09-11: kappa 6 -> 8, oh_kappa 4 -> 6.  Measured on gaia-stars-mask-cont
+    # every10, both gates were removing valid extreme data rather than broken
+    # decompositions.  Judged on the DECOMPOSITION'S OWN fit -- absolute
+    # single-fibre photon chi2 from BESTFIT_LSF vs FLUX_SCI, plus the median
+    # FRACTIONAL residual, because photon chi2 grows with brightness even at
+    # fixed fractional accuracy.  Of the rows passing every other gate:
+    #
+    #   the OTHER gates   chi2 96.1 vs 3.65 kept (26x, p90 3610) -- real failures
+    #   kappa-sigma (37)  chi2 1.26x, fractional residual 1.02x -- indistinguishable
+    #   OH-MAD (34)       chi2 2.37x, fractional residual 1.45x, airmass 1.63 (p86)
+    #
+    # The kappa gate was also mis-specified: it uses a non-robust mean/std and
+    # median std/MAD over its 30 columns is 13.46 against the Gaussian 1.483.
+    # The heavy tails sit in the moon knots (std/MAD 29-104, skew ~2 -- bimodal,
+    # ~0 moon-down and large moon-up), which inflates their sigma and disarms the
+    # gate there, leaving the near-Gaussian atomic columns (std/MAD 2.14) with
+    # the tightest effective threshold -- so it had become an accidental
+    # atomic-line gate.  That is the same failure this file already documents for
+    # the OH block below, still present in the moon columns.  Raising kappa is a
+    # mitigation, not a fix; the fix is a robust per-column scale.
+    #
+    # The OH-MAD rows are high-airmass pointings (alt 37.8 deg p14, van Rhijn
+    # 1.60 p86) sitting 1.15x past a threshold built to catch runaways at
+    # 1e6-1e15x the median.  Their fits are genuinely 1.45x worse fractionally,
+    # plausibly from LSF and telluric treatment at high airmass -- real data the
+    # current decomposition fits less well, not bad data.
+    #
+    # Keep these values in step with the notebook filter cell, which passes them
+    # explicitly; a default that disagrees with the deployed call is worse than
+    # no default.  Revert both to 6.0 / 4.0 if the retrain A/B loses.
+    kappa=8.0,
     kappa_iter=3,
-    oh_kappa=4.0,
+    oh_kappa=6.0,
     oh_kappa_iter=3,
     exclude_field_regions=None,
     airmass_max=3.0,
+    reversal_decomp_fits=None,
+    reversal_wave=None,
+    reversal_min_component_frac=0.05,
+    reversal_min_separation=0.0,
+    colour_excess_input_fits=None,
+    colour_excess_max=SCI_COLOUR_EXCESS_MAX,
+    diffuse_zeroed_frac=DIFFUSE_ZEROED_FRAC,
+    diffuse_zeroed_arms=('near', 'far', 'sci'),
+    show_plots=True,
 ):
     if hard_coef_bounds is None:
         hard_coef_bounds = {'feo': (0.0, 1.0), 'atom_k': (0.0, 1.0)}
@@ -2327,7 +2966,8 @@ def apply_triplet_filters(
             labels={'x': 'max(reduced chi2 near/far/sci)', 'y': 'count'},
         )
         fig_chi2_triplet.update_layout(template='plotly_white', bargap=0.03)
-        fig_chi2_triplet.show()
+        if show_plots:
+            fig_chi2_triplet.show()
     else:
         print('Triplet chi2 columns not present; chi2 filtering skipped.')
 
@@ -2381,12 +3021,182 @@ def apply_triplet_filters(
                 f"({100.0 * oh_mask.mean():.1f}%)"
             )
 
-    coef_concat = np.hstack([coef_near, coef_far, coef_sci]).astype(np.float32)
+    # Moon/zodi role-reversal filter.  A reversed row hands the ML a
+    # moon-labelled zodi spectrum, so it corrupts the geometry mapping the
+    # network exists to learn rather than just adding noise -- one bad arm
+    # disqualifies the observation, matching the chi2 filter's convention.
+    reversal_stats = None
+    if reversal_decomp_fits:
+        if reversal_wave is None:
+            print("Moon/zodi reversal filter: reversal_wave not given; skipping. "
+                  "Pass the native wavelength grid (e.g. from "
+                  "cfg.data.input_fits_for_basis).")
+        else:
+            reversal_stats = split_zodi_reversal_diagnostics(
+                reversal_decomp_fits,
+                np.asarray(triplet_data['row_index'], dtype=np.int64),
+                reversal_wave,
+                min_component_frac=float(reversal_min_component_frac),
+            )
+            rev_any = np.zeros(n0, dtype=bool)
+            testable_any = np.zeros(n0, dtype=bool)
+            moon_absent_all = np.ones(n0, dtype=bool)
+            for arm, st in reversal_stats.items():
+                # Which side is missing, for the untestable rows: a moon-absent
+                # row (dark time, moon pinned near a 0.02 share) has no moon to
+                # mislabel, whereas a zodi-absent row hides an undetermined
+                # zodi colour.  They are not the same blind spot.
+                moon_absent_all &= (
+                    np.isfinite(st['moon_frac'])
+                    & (st['moon_frac'] < float(reversal_min_component_frac))
+                )
+                arm_rev = st['testable'] & (st['separation'] < float(reversal_min_separation))
+                st['reversed'] = arm_rev
+                rev_any |= arm_rev
+                testable_any |= st['testable']
+                n_test = int(st['testable'].sum())
+                if n_test == 0:
+                    print(f"  {arm:>4s}: no rows with both families present")
+                    continue
+                t = st['testable']
+                print(
+                    f"  {arm:>4s}: reversed {int(arm_rev.sum())}/{n_test} testable "
+                    f"({100.0 * arm_rev.sum() / n_test:.2f}%), "
+                    f"median moon slope {np.nanmedian(st['moon_slope'][t]):+.2f}, "
+                    f"zodi {np.nanmedian(st['zodi_slope'][t]):+.2f}, "
+                    f"margin p10 {np.nanpercentile(st['separation'][t], 10):+.2f}"
+                )
+            rev_mask = ~rev_any
+            keep &= rev_mask
+            print(
+                f"Moon/zodi reversal filter (moon_slope > zodi_slope in ANY arm, "
+                f"tested where {reversal_min_component_frac:.2f} <= moon share <= "
+                f"{1.0 - reversal_min_component_frac:.2f}): "
+                f"kept {int(rev_mask.sum())}/{len(rev_mask)} "
+                f"({100.0 * rev_mask.mean():.1f}%); "
+                f"{int(rev_any.sum())} rows reversed, "
+                f"{int((~testable_any).sum())} rows had no arm with both families present"
+                f" (of those, {int((~testable_any & moon_absent_all).sum())} moon-absent"
+                f" in every arm -- nothing to mislabel -- and"
+                f" {int((~testable_any & ~moon_absent_all).sum())} with a"
+                f" negligible zodi somewhere)"
+            )
+    else:
+        print("Moon/zodi reversal filter: reversal_decomp_fits not given; skipping.")
+
+    # Final outlier gate.  It runs on the SMALL, DENSE coefficient groups only
+    # and deliberately EXCLUDES the mesospheric (OH + O2_b01) block, for two
+    # reasons.
+    #
+    # (1) OH already has a purpose-built robust filter upstream -- the
+    #     per-row-mean MAD gate at `oh_kappa` -- so including it here is a
+    #     second pass over already-filtered columns.
+    # (2) This gate uses a NON-robust mean/std, and the OH block carries
+    #     decomposition failures at 1e13-1e15 that inflate their own column's
+    #     sigma until the gate on that column is effectively disarmed.  How
+    #     badly this happens is a property of the corpus, not of any row: on
+    #     two corpora whose OH bulk distributions are statistically identical
+    #     (median MAD 0.051 vs 0.056) the median std/MAD ratio differed by a
+    #     factor of 2.5e9, and retention differed by 18 percentage points
+    #     (89.4% vs 71.1%).  A row-quality filter must not depend on which
+    #     corpus the row arrived in.
+    #
+    # Restricting to the 30 non-mesospheric coefficients x 3 arms fixes both.
+    # Measured: retention 89.4% -> 96.2% and 71.1% -> 90.5% on the two corpora
+    # (spread 18.3pp -> 5.7pp), while the chi2 ratio between rejected and kept
+    # rows -- i.e. whether the gate actually finds bad fits -- IMPROVES on the
+    # first corpus (3.42/4.01/4.17 -> 4.40/6.92/4.47 for near/far/sci) and
+    # sharpens markedly on the second corpus's science arm (4.75x -> 13.7x).
+    #
+    # Do NOT switch this to _kappa_mad_row_mask: with 1164 columns ANDed a MAD
+    # threshold is far too tight and the result is degenerate (measured: 2 rows
+    # kept on one corpus, all rows on the other, the latter because that
+    # function silently returns the previous mask when a pass would reject
+    # everything).
+    _gate_group_map = _build_group_indices(coef_names_local)
+    _gate_cols = np.sort(np.concatenate(
+        [np.asarray(idx, dtype=int) for g, idx in _gate_group_map.items()
+         if g != 'mesospheric']))
+    coef_concat = np.hstack([coef_near[:, _gate_cols],
+                             coef_far[:, _gate_cols],
+                             coef_sci[:, _gate_cols]]).astype(np.float32)
     kappa_mask = _kappa_sigma_row_mask(coef_concat, kappa=float(kappa), n_iter=int(kappa_iter))
     keep &= kappa_mask
     print(
-        f"Kappa-sigma filter (kappa={kappa:.1f}): kept {kappa_mask.sum()}/{len(kappa_mask)} ({100.0 * kappa_mask.mean():.1f}%)"
+        f"Kappa-sigma filter (kappa={kappa:.1f}, {coef_concat.shape[1]} cols = "
+        f"{len(_gate_cols)} non-mesospheric coefs x 3 arms; the OH block is "
+        f"covered by the oh_kappa MAD gate above): "
+        f"kept {kappa_mask.sum()}/{len(kappa_mask)} ({100.0 * kappa_mask.mean():.1f}%)"
     )
+
+    # Science-continuum colour gate.  Drops rows where the science fibre's
+    # red/blue continuum ratio disagrees with BOTH sky arms, which is the
+    # condition under which coef_sci stops being a description of sky: the
+    # Moon_bs spline is the basis's only flexible continuum, so whatever the
+    # science field adds is absorbed there and the row's moon target is
+    # contaminated.  See sci_continuum_colour_excess for the measurements
+    # (rho = +0.405 against the moon colour distortion, sky-arm control
+    # +0.034) and for why a shape test on the fitted spline is NOT a
+    # substitute.
+    #
+    # Runs LAST of the real filters purely so its printed cost is the MARGINAL
+    # one.  Every gate in this function is an independent per-row mask ANDed
+    # into `keep` -- including the kappa-sigma gate, whose mean/std are
+    # computed over all n0 rows, not over the survivors -- so the returned
+    # sample does not depend on the order at all.  Reported cost does: run
+    # against the full corpus this gate flags 995/14 447 rows (6.9%), but only
+    # 256 of those are rows the other filters were not already removing, and
+    # that second number is the one that matters.
+    #
+    # It is NOT redundant with chi2, and tightening chi2 is not a substitute.
+    # chi2 asks whether the model fitted the data; this asks whether it fitted
+    # the right thing, and the failure mode here is a GOOD fit to the wrong
+    # target.  Measured: 394 flagged rows have chi2_sci <= 1 -- median 0.120,
+    # BETTER than the clean median of 0.170 -- while their median moon colour
+    # distortion is +0.269 dex against -0.0003 for clean good-fit rows.  Among
+    # rows that already pass chi2_sci <= 10, dC still predicts the moon
+    # distortion at rho = +0.273 while chi2_sci itself gives +0.005, i.e. no
+    # information.  chi2 does track severity at the top end (median distortion
+    # +0.269 / +0.647 / +0.827 for chi2_sci <=1 / 1-10 / >10, and the existing
+    # chi2 <= 10 cut already removes 43% of flagged rows), but tightening it
+    # from 10 to 1 buys 179 more flagged rows at the price of 989 clean ones.
+    # Row 493 / corpus row 4930, the row this gate was built from, has
+    # chi2_sci = 0.731: no chi2 threshold reaches it.
+    # Diffuse-zeroed gate.  Sits with the reversal and colour gates above --
+    # all three drop MISLABELLED rows rather than hard ones.  See
+    # diffuse_zeroed_keep_mask for the measurements.
+    if diffuse_zeroed_frac:
+        _dz_keep = diffuse_zeroed_keep_mask(
+            {'near': coef_near, 'far': coef_far, 'sci': coef_sci},
+            coef_names_local, frac=float(diffuse_zeroed_frac),
+            arms=tuple(diffuse_zeroed_arms), label='corpus', verbose=True)
+        _dz_marginal = int((keep & ~_dz_keep).sum())
+        keep &= _dz_keep
+        print(f"Diffuse-zeroed filter: flagged {int((~_dz_keep).sum())}/"
+              f"{len(_dz_keep)} rows ({100.0 * (~_dz_keep).mean():.2f}%), of "
+              f"which {_dz_marginal} were not already removed by the filters "
+              f"above (marginal cost); {int(keep.sum())} rows remain")
+    else:
+        print("Diffuse-zeroed filter: diffuse_zeroed_frac is 0/None; skipping.")
+
+    if colour_excess_input_fits:
+        colour_mask = sci_continuum_colour_keep_mask(
+            colour_excess_input_fits,
+            np.asarray(triplet_data['row_index'], dtype=np.int64),
+            max_excess=float(colour_excess_max),
+            label='corpus',
+            verbose=True,
+        )
+        _colour_marginal = int((keep & ~colour_mask).sum())
+        keep &= colour_mask
+        print(f"Science-continuum colour filter: flagged "
+              f"{int((~colour_mask).sum())}/{len(colour_mask)} rows "
+              f"({100.0 * (~colour_mask).mean():.1f}%), of which "
+              f"{_colour_marginal} were not already removed by the filters "
+              f"above (marginal cost); {int(keep.sum())} rows remain")
+    else:
+        print("Science-continuum colour filter: colour_excess_input_fits not "
+              "given; skipping.")
 
     # Thinning is applied LAST so the filter-fraction prints above reflect
     # counts against the full pre-thinning dataset.  It selects every N-th row
@@ -2425,6 +3235,21 @@ def apply_triplet_filters(
             out[k] = np.asarray(triplet_data[k])[keep]
     if 'sci_radec_source' in triplet_data:
         out['sci_radec_source'] = triplet_data['sci_radec_source']
+    if reversal_stats:
+        # Per-arm fitted colours, so the split can be audited without
+        # re-reading the decomposition.  ``reversal`` is subset to the
+        # surviving rows to line up with coef_*/ctx_*; ``reversal_all`` keeps
+        # FULL-LENGTH arrays over the original rows, because the rows the
+        # filter removed are the ones worth inspecting and they are by
+        # definition absent from the subset.  ``mask`` selects survivors.
+        out['reversal'] = {
+            arm: {k: np.asarray(v)[keep] for k, v in st.items()}
+            for arm, st in reversal_stats.items()
+        }
+        out['reversal_all'] = {
+            arm: {k: np.asarray(v) for k, v in st.items()}
+            for arm, st in reversal_stats.items()
+        }
 
     print(
         f"Filtered triplet shapes: near={out['coef_near'].shape}, far={out['coef_far'].shape}, "
@@ -2523,7 +3348,8 @@ def apply_triplet_filters(
         legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='left', x=0.0),
         margin=dict(l=60, r=20, t=90, b=50),
     )
-    fig_ctx_hist.show()
+    if show_plots:
+        fig_ctx_hist.show()
 
     return out
 

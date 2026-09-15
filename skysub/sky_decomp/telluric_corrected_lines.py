@@ -2,21 +2,28 @@
 
 from __future__ import annotations
 
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
 import numpy as np
+from astropy.table import Table
 
 from .fit import grp2vector, sticks2vector
 from .lsf_spline2d import SkyDecompLSFSpline2D
 from .moon_zodi_model import (
     DEFAULT_DATA_ROOT,
     DEFAULT_PALACE_OH_SUFFIX,
+    validate_decomposition_asset_contract,
     validate_decomposition_data_root,
 )
+from .niv_continuum import apply_niv_continuum_contract
 
 
 TELLURIC_CORRECTED_LINES_FIT_MODEL = "telluric-corrected-lines-lsf-spline2d"
+LINE_TELLURIC_ASSET = "palace/PMD/palace_line_telluric_r4m_v1.fits"
+LINE_TELLURIC_CONTRACT = "line_telluric_contract"
+PALACE_REFERENCE_PWV_MM = 2.5
 
 
 def _positive_scalar(value: float, name: str) -> float:
@@ -24,6 +31,54 @@ def _positive_scalar(value: float, name: str) -> float:
     if not np.isfinite(value) or value <= 0.0:
         raise ValueError(f"{name} must be finite and positive")
     return value
+
+
+def calculate_line_transmission(
+    tau_non_h2o_ref: np.ndarray,
+    tau_h2o_ref: np.ndarray,
+    pwv_mm: float,
+    airmass: float,
+) -> np.ndarray:
+    """Evaluate PALACE molecular absorption from its R=4e6 line coefficients."""
+    tau_non_h2o_ref = np.asarray(tau_non_h2o_ref, dtype=float)
+    tau_h2o_ref = np.asarray(tau_h2o_ref, dtype=float)
+    pwv_mm = _positive_scalar(pwv_mm, "pwv_mm")
+    airmass = _positive_scalar(airmass, "airmass")
+    if tau_non_h2o_ref.shape != tau_h2o_ref.shape:
+        raise ValueError("the two line optical-depth vectors must have the same shape")
+    if np.any(~np.isfinite(tau_non_h2o_ref)) or np.any(~np.isfinite(tau_h2o_ref)):
+        raise ValueError("line optical-depth vectors must be finite")
+    transmission = np.exp(
+        -airmass
+        * (
+            tau_non_h2o_ref
+            + (pwv_mm / PALACE_REFERENCE_PWV_MM) * tau_h2o_ref
+        )
+    )
+    if np.any(~np.isfinite(transmission)) or np.any(transmission < 0.0):
+        raise ValueError("line transmission must be finite and non-negative")
+    return transmission
+
+
+@lru_cache(maxsize=None)
+def _load_line_telluric_coefficients(
+    path: str,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    table = Table.read(path)
+    required = {"wave_air_model_A", "tau_non_H2O_ref", "tau_H2O_ref"}
+    if not required.issubset(table.colnames):
+        raise ValueError("PALACE line telluric table is missing required columns")
+    if int(table.meta.get("RMAX", 0)) != 4_000_000:
+        raise ValueError("PALACE line telluric table is not the R=4e6 product")
+    if float(table.meta.get("PWVREF", np.nan)) != PALACE_REFERENCE_PWV_MM:
+        raise ValueError("PALACE line telluric table has the wrong reference PWV")
+    arrays = tuple(
+        np.asarray(table[name], dtype=np.float64)
+        for name in ("wave_air_model_A", "tau_non_H2O_ref", "tau_H2O_ref")
+    )
+    if any(array.ndim != 1 or np.any(~np.isfinite(array)) for array in arrays):
+        raise ValueError("PALACE line telluric columns must be finite vectors")
+    return arrays
 
 
 def calculate_drp_transmission(
@@ -105,10 +160,14 @@ class SkyDecompTelluricLinesLSFSpline2D(SkyDecompLSFSpline2D):
         self.telluric_calculator = telluric_calculator
         self.pwv_mm = _positive_scalar(pwv_mm, "pwv_mm")
         self.line_airmass = _positive_scalar(line_airmass, "line_airmass")
-        self._transmission_hr: np.ndarray | None = None
         base_dir = Path(kwargs.get("base_dir") or DEFAULT_DATA_ROOT).resolve()
         if (base_dir / "bundle_manifest.json").is_file():
             validate_decomposition_data_root(str(base_dir))
+            validate_decomposition_asset_contract(
+                str(base_dir),
+                LINE_TELLURIC_CONTRACT,
+                "PALACE R=4e6 line telluric",
+            )
         kwargs["base_dir"] = base_dir
         super().__init__(*args, **kwargs)
 
@@ -117,21 +176,17 @@ class SkyDecompTelluricLinesLSFSpline2D(SkyDecompLSFSpline2D):
             "atom": [(wave.copy(), amp.copy()) for wave, amp in self._atom_line_groups],
             "orc": [(wave.copy(), amp.copy()) for wave, amp in self._orc_line_groups],
         }
-        self._transmission_hr = np.asarray(
-            self.telluric_calculator.calc_transmission(
-                self.pwv_mm,
-                airmass=self.line_airmass,
-            ),
-            dtype=float,
+        coefficient_wave, tau_non_h2o_ref, tau_h2o_ref = (
+            _load_line_telluric_coefficients(str(base_dir / LINE_TELLURIC_ASSET))
         )
-        if self._transmission_hr.shape != np.asarray(
-            self.telluric_calculator.wave_air
-        ).shape:
-            raise ValueError("high-resolution transmission has an unexpected shape")
-        if np.any(~np.isfinite(self._transmission_hr)) or np.any(
-            self._transmission_hr < 0.0
-        ):
-            raise ValueError("high-resolution transmission must be finite and nonnegative")
+        if not np.array_equal(coefficient_wave, self._line_wave):
+            raise ValueError("PALACE line telluric table does not match the model line order")
+        self._line_transmission_values = calculate_line_transmission(
+            tau_non_h2o_ref,
+            tau_h2o_ref,
+            self.pwv_mm,
+            self.line_airmass,
+        )
 
         self._line_transmission(self._line_wave)
         for family in ("oh", "atom", "orc"):
@@ -140,20 +195,9 @@ class SkyDecompTelluricLinesLSFSpline2D(SkyDecompLSFSpline2D):
 
     def _line_transmission(self, line_wave_air: np.ndarray) -> np.ndarray:
         line_wave_air = np.asarray(line_wave_air, dtype=float)
-        if self._transmission_hr is None:
-            return np.ones_like(line_wave_air)
-        transmission = np.interp(
-            line_wave_air,
-            np.asarray(self.telluric_calculator.wave_air, dtype=float),
-            self._transmission_hr,
-            left=np.nan,
-            right=np.nan,
-        )
-        if np.any(~np.isfinite(transmission)) or np.any(transmission <= 0.0):
-            raise ValueError(
-                "the transmission model does not cover every retained line with positive transmission"
-            )
-        return transmission
+        if not np.array_equal(line_wave_air, self._line_wave):
+            raise ValueError("line transmission requires the exact ordered model line catalog")
+        return self._line_transmission_values.copy()
 
     def _line_weights(self) -> np.ndarray:
         return super()._line_weights() * self._line_transmission(self._line_wave)
@@ -163,7 +207,11 @@ class SkyDecompTelluricLinesLSFSpline2D(SkyDecompLSFSpline2D):
         matrix = np.zeros((len(groups), self.wave.size), dtype=float)
         matrix_stick = np.zeros_like(matrix)
         for index, (line_wave, intrinsic_amplitude) in enumerate(groups):
-            amplitude = intrinsic_amplitude * self._line_transmission(line_wave)
+            group_index = self._group_slices[family].start + index
+            line_index = np.flatnonzero(self._line_group == group_index)
+            if not np.array_equal(self._line_wave[line_index], line_wave):
+                raise ValueError(f"{family} line order changed after catalog construction")
+            amplitude = intrinsic_amplitude * self._line_transmission_values[line_index]
             matrix[index] = grp2vector(line_wave, amplitude, self.wave, self.lsf_sigma)
             matrix_stick[index] = sticks2vector(line_wave, amplitude, self.wave)
         setattr(self, f"matrix_{family}", matrix)
@@ -171,7 +219,7 @@ class SkyDecompTelluricLinesLSFSpline2D(SkyDecompLSFSpline2D):
 
     def _prefit_o2(self, flux: np.ndarray, ivar: np.ndarray) -> None:
         intrinsic_aij = self.aij_o2.copy()
-        self.aij_o2 = intrinsic_aij * self._line_transmission(self.lam_o2)
+        self.aij_o2 = intrinsic_aij * self._line_transmission_values[self._o2_slice]
         try:
             super()._prefit_o2(flux, ivar)
         finally:
@@ -249,11 +297,28 @@ class SkyDecompAdam25kTelluricLSFSpline2D(
         super().__init__(*args, **kwargs)
 
 
+class SkyDecompAdam25kNivContinuumLSFSpline2D(
+    SkyDecompAdam25kTelluricLSFSpline2D
+):
+    """Adam-25k lines plus Niv continuum priors and continuous 2-D LSF."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **apply_niv_continuum_contract(kwargs))
+
+    def _finalize_result(self, *args: Any, **kwargs: Any):
+        result = super()._finalize_result(*args, **kwargs)
+        result.fit_summary += " | continuum_contract=niv-v1"
+        self.fit_summary = result.fit_summary
+        return result
+
+
 __all__ = [
+    "SkyDecompAdam25kNivContinuumLSFSpline2D",
     "SkyDecompAdam25kTelluricLSFSpline2D",
     "SkyDecompTelluricCorrectedLinesLSFSpline2D",
     "SkyDecompTelluricLinesLSFSpline2D",
     "TELLURIC_CORRECTED_LINES_FIT_MODEL",
     "calculate_drp_transmission",
+    "calculate_line_transmission",
     "restore_drp_input",
 ]

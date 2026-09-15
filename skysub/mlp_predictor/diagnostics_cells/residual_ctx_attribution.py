@@ -38,6 +38,49 @@ _X_full = np.asarray(ctx_sci_all[_te], dtype=np.float64)
 _y_true = np.asarray(coef_sci_all[_te], dtype=np.float64)
 _y_pred = np.asarray(coef_pred_det, dtype=np.float64)
 
+# --- DIAGNOSTIC-ONLY probe features: helio-relative ecliptic longitude -------
+# The model is never given lambda - lambda_sun.  `zodi_ctx_restriction` carries
+# absolute ecl_lon_sin/cos but neither lambda_sun nor the obstime_year_* terms,
+# so the zodi branch cannot construct the helio-relative angle that the Leinert
+# lookup is actually a function of -- it only gets the coarse table output
+# `zodi_log10_v`.  `ecl_lon_sin` has been the #1 RF importance on the zodi
+# residual across every configuration tried, which is what a missing feature
+# looks like.  But it could equally be a seasonal / observing-pattern proxy,
+# since LVM visits given fields at given times of year.
+#
+# Appending helio_lon here (RF input only -- the network is NOT changed and no
+# retrain is implied) separates the two:
+#   helio_lon outranks ecl_lon      -> ecl_lon was a proxy for the real angle;
+#                                      adding the feature to the model is worth
+#                                      a training run.
+#   ecl_lon still outranks helio_lon -> seasonal confound; adding the feature
+#                                      will not help, run saved.
+_PROBE_NAMES = []
+if all(_n in _ctx_names for _n in ('ecl_lon_sin', 'ecl_lon_cos')):
+    _lon_s = _X_full[:, _ctx_names.index('ecl_lon_sin')]
+    _lon_c = _X_full[:, _ctx_names.index('ecl_lon_cos')]
+    _lon_deg = np.rad2deg(np.arctan2(_lon_s, _lon_c)) % 360.0
+    _sun_lon_deg = _sun_ecliptic_longitude_deg(
+        np.asarray(filtered_triplet['obstime_mjd'], dtype=np.float64)[_te])
+    # Same convention as data._augment_triplet_with_physics_priors (-180, 180].
+    _helio_lon_deg = ((_lon_deg - _sun_lon_deg + 180.0) % 360.0) - 180.0
+    _helio_rad = np.deg2rad(_helio_lon_deg)
+    _probe = np.column_stack([np.sin(_helio_rad), np.cos(_helio_rad),
+                              np.abs(_helio_lon_deg)])
+    # |helio_lon| is the actual axis of the Leinert table (it is symmetric about
+    # the sun), so it is included alongside the cyclic pair.
+    _PROBE_NAMES = ['helio_lon_sin*', 'helio_lon_cos*', 'abs_helio_lon_deg*']
+    _X_full = np.column_stack([_X_full, _probe])
+    _ctx_names = _ctx_names + _PROBE_NAMES
+    print(f'  probe features appended (diagnostic only, * suffix): '
+          f'{", ".join(_PROBE_NAMES)}')
+    print(f'    helio_lon range [{_helio_lon_deg.min():.1f}, '
+          f'{_helio_lon_deg.max():.1f}] deg, '
+          f'|corr(helio_lon_sin, ecl_lon_sin)| = '
+          f'{abs(np.corrcoef(np.sin(_helio_rad), _lon_s)[0, 1]):.3f}')
+else:
+    print('  probe features SKIPPED (ecl_lon_sin/cos not in ctx)')
+
 # Drop constant / near-constant columns (would trip the standardiser).
 _std_x = np.nanstd(_X_full, axis=0)
 _keep_cols = np.where(_std_x > 1e-12)[0]
@@ -95,6 +138,19 @@ for gname, idx in _group_indices_compress.items():
     for _i in _rf_top:
         print(f'      {_ctx_names_k[_i]:<22s} imp  = {_rf.feature_importances_[_i]:.3g}')
 
+    # Head-to-head: absolute vs helio-relative ecliptic longitude.
+    _fam_ecl = _fam_helio = np.nan
+    if _PROBE_NAMES:
+        def _fam_imp(_names):
+            return float(sum(_rf.feature_importances_[_ctx_names_k.index(_n)]
+                             for _n in _names if _n in _ctx_names_k))
+        _fam_ecl = _fam_imp(['ecl_lon_sin', 'ecl_lon_cos'])
+        _fam_helio = _fam_imp(_PROBE_NAMES)
+        _verdict = ('helio WINS' if _fam_helio > 1.2 * _fam_ecl else
+                    'ecl WINS' if _fam_ecl > 1.2 * _fam_helio else 'tied')
+        print(f'    ecl_lon family imp = {_fam_ecl:.3g}   '
+              f'helio_lon family imp = {_fam_helio:.3g}   -> {_verdict}')
+
     _summary.append({
         'group': gname,
         'n': int(_finite.sum()),
@@ -102,6 +158,8 @@ for gname, idx in _group_indices_compress.items():
         'lin_R2': _lin_r2,
         'rf_R2':  _rf_r2,
         'nonlin_gain': _rf_r2 - _lin_r2,
+        'imp_ecl_lon': _fam_ecl,
+        'imp_helio_lon': _fam_helio,
     })
 
 if _summary:
@@ -120,3 +178,34 @@ if _summary:
     print('  both < 0.02          -> residual is irreducible from ctx.  Look at '
           'sky_arm_disagreement_floor() to check the noise floor and '
           'wavelength_residual_atlas() to see where the failure lives.')
+
+    if _PROBE_NAMES:
+        _zrow = [_r for _r in _summary if _r['group'] == 'zodi']
+        print()
+        print('helio-relative longitude probe (diagnostic only; the model was '
+              'NOT given these):')
+        if _zrow:
+            _e, _h = _zrow[0]['imp_ecl_lon'], _zrow[0]['imp_helio_lon']
+            print(f'  zodi: ecl_lon family = {_e:.3g}, helio_lon family = {_h:.3g}')
+            if _h > 1.2 * _e:
+                print('  GO: the helio-relative angle outranks absolute ecliptic '
+                      'longitude, so ecl_lon was standing in for it.  Adding '
+                      'helio_lon_sin/cos per arm in '
+                      '_augment_triplet_with_physics_priors and routing them '
+                      'into zodi_ctx_restriction + moon_zodi_ctx_restriction is '
+                      'worth a training run.')
+            elif _e > 1.2 * _h:
+                print('  NO-GO: absolute ecliptic longitude still outranks the '
+                      'helio-relative angle, so the zodi residual is tracking '
+                      'season / observing pattern rather than zodiacal geometry.  '
+                      'Adding the feature is unlikely to help; spend the run '
+                      'elsewhere.')
+            else:
+                print('  INCONCLUSIVE: the two families rank within 20% of each '
+                      'other.  The probe does not settle it; weigh the cost of '
+                      'the training run against the small remaining zodi headroom '
+                      '(err/delta is already at or below the sky-arm floor).')
+        print('  NB RF importance on residual MAGNITUDE is partly amplitude-driven.  '
+              'Read it alongside zodi_log10_v (the Leinert amplitude proxy the '
+              'branch already has): if that ranks low while a longitude feature '
+              'ranks high, the ranking is not simply tracking zodi brightness.')
