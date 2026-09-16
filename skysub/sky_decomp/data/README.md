@@ -327,22 +327,24 @@ LSF spline state. `results_to_fits` writes them through the existing `COEF`,
 `LSF_COEF`, `LSF_KNOTS`, and `LSF_META` extensions without changing older output
 schemas.
 
-## Niv-continuum VNF PCA30
+## Production split-zodi VNF PCA30
 
-`palace_aijc_vnf_niv_continuum_line_amplitude_pca_v1.npz` is the production
+`palace_aijc_vnf_split_zodi_line_amplitude_pca30_v1.npz` is the production
 PCA30 basis for the merged method. It was trained from 1,000 successful
-PALACE-Aijc VNF fits using the frozen `niv-v1` split Moon/Zodiacal and diffuse
-continuum contract, each spectrum's telluric transmission and continuous LSF,
+PALACE-Aijc VNF fits using the production split Moon/Zodiacal and diffuse
+continuum profile, each spectrum's telluric transmission and continuous LSF,
 and the native 12,401-pixel grid. The recorded robust RMS cut retained 983
 spectra. Thirty signed components explain 0.99972595 of the centered fitted
-line-amplitude variance.
+line-amplitude variance. The unchanged binary retains its original training
+metadata for provenance; the bundle manifest records both its legacy and
+production identifiers.
 
 ```python
 from skysub.sky_decomp.residual_pca import (
-    SkyDecompPalaceAijcVNFNivContinuumLineAmplitudePCA,
+    SkyDecompPalaceAijcVNFSplitZodiLineAmplitudePCA30,
 )
 
-decomposer = SkyDecompPalaceAijcVNFNivContinuumLineAmplitudePCA(
+decomposer = SkyDecompPalaceAijcVNFSplitZodiLineAmplitudePCA30(
     wave,
     telluric_calculator=telluric_calculator,
     pwv_mm=pwv_mm,

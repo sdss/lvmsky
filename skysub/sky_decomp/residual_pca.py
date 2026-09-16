@@ -12,7 +12,7 @@ from typing import Any
 import numpy as np
 import scipy.sparse as sp
 
-from .fit import LSF_CHANNELS
+from .fit import LSF_CHANNELS, SPLIT_ZODI_CONTINUUM_DEFAULTS
 from .lsf_spline2d import (
     LSF_OFFSET_BASIS_COUNT,
     _component_masses,
@@ -25,7 +25,6 @@ from .moon_zodi_model import (
     validate_decomposition_asset_contract,
     wave_sha256,
 )
-from .niv_continuum import apply_niv_continuum_contract
 from .lsf_surface_iterative import continuum_fit_weights
 from .telluric_corrected_lines import SkyDecompTelluricCorrectedLinesLSFSpline2D
 
@@ -63,8 +62,8 @@ VNF_LINE_ADJOINT_PCA_ASSET = (
 VNF_LINE_ADJOINT_PCA_FIT_MODEL = (
     "telluric-corrected-lines-palace-aijc-vnf-line-adjoint-pca"
 )
-NIV_VNF_LINE_AMPLITUDE_PCA_ASSET = (
-    "residual_pca/palace_aijc_vnf_niv_continuum_line_amplitude_pca_v1.npz"
+SPLIT_ZODI_VNF_LINE_AMPLITUDE_PCA_ASSET = (
+    "residual_pca/palace_aijc_vnf_split_zodi_line_amplitude_pca30_v1.npz"
 )
 
 
@@ -886,36 +885,36 @@ class SkyDecompPalaceAijcVNFLineAmplitudePCA(
         )
 
 
-class SkyDecompPalaceAijcVNFNivContinuumLSFSpline2D(
+class SkyDecompPalaceAijcVNFSplitZodiLSFSpline2D(
     SkyDecompTelluricCorrectedLinesPalaceAijc
 ):
-    """PALACE VNF lines with the frozen Niv continuum contract."""
+    """PALACE VNF lines with the production split-zodi continuum."""
 
     oh_group_keys = ("v_upper", "N_upper", "F_upper")
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
-        super().__init__(*args, **apply_niv_continuum_contract(kwargs))
+        super().__init__(*args, **(SPLIT_ZODI_CONTINUUM_DEFAULTS | kwargs))
 
     def _finalize_result(self, *args: Any, **kwargs: Any):
         result = super()._finalize_result(*args, **kwargs)
         result.fit_summary += (
             " | oh_grouping=v_upper,N_upper,F_upper"
-            " | continuum_contract=niv-v1"
+            " | continuum_profile=split-zodi-production-v1"
         )
         self.fit_summary = result.fit_summary
         return result
 
 
-class SkyDecompPalaceAijcVNFNivContinuumLineAmplitudePCA(
+class SkyDecompPalaceAijcVNFSplitZodiLineAmplitudePCA30(
     SkyDecompPalaceAijcVNFLineAmplitudePCA
 ):
-    """PALACE VNF plus PCA30 with Niv continuum and continuous 2-D LSF."""
+    """PALACE VNF plus PCA30 with production split-zodi continuum and 2-D LSF."""
 
-    line_amplitude_pca_asset = NIV_VNF_LINE_AMPLITUDE_PCA_ASSET
-    line_amplitude_pca_contract = "niv_vnf_line_amplitude_pca_contract"
+    line_amplitude_pca_asset = SPLIT_ZODI_VNF_LINE_AMPLITUDE_PCA_ASSET
+    line_amplitude_pca_contract = "split_zodi_vnf_line_amplitude_pca_contract"
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
-        kwargs = apply_niv_continuum_contract(kwargs)
+        kwargs = SPLIT_ZODI_CONTINUUM_DEFAULTS | kwargs
         count = int(kwargs.get("n_line_amplitude_pca_components", 30))
         if count != 30:
             raise ValueError("The integrated production method requires PCA30")
@@ -923,9 +922,19 @@ class SkyDecompPalaceAijcVNFNivContinuumLineAmplitudePCA(
 
     def fit(self, *args: Any, **kwargs: Any):
         result = super().fit(*args, **kwargs)
-        result.fit_summary += " | continuum_contract=niv-v1"
+        result.fit_summary += " | continuum_profile=split-zodi-production-v1"
         self.fit_summary = result.fit_summary
         return result
+
+
+# Compatibility for executed notebooks and frozen training provenance.
+NIV_VNF_LINE_AMPLITUDE_PCA_ASSET = SPLIT_ZODI_VNF_LINE_AMPLITUDE_PCA_ASSET
+SkyDecompPalaceAijcVNFNivContinuumLSFSpline2D = (
+    SkyDecompPalaceAijcVNFSplitZodiLSFSpline2D
+)
+SkyDecompPalaceAijcVNFNivContinuumLineAmplitudePCA = (
+    SkyDecompPalaceAijcVNFSplitZodiLineAmplitudePCA30
+)
 
 
 class SkyDecompTelluricCorrectedLinesVNLineAmplitudePCA(
@@ -1164,11 +1173,14 @@ __all__ = [
     "VNF_LINE_ADJOINT_PCA_ASSET",
     "VNF_LINE_ADJOINT_PCA_FIT_MODEL",
     "NIV_VNF_LINE_AMPLITUDE_PCA_ASSET",
+    "SPLIT_ZODI_VNF_LINE_AMPLITUDE_PCA_ASSET",
     "VNF_COEFFICIENT_PCA_PREP_ASSET",
     "VNF_COEFFICIENT_PCA_PREP_FIT_MODEL",
     "SkyDecompPalaceAijcVNFLineAmplitudePCA",
     "SkyDecompPalaceAijcVNFNivContinuumLSFSpline2D",
     "SkyDecompPalaceAijcVNFNivContinuumLineAmplitudePCA",
+    "SkyDecompPalaceAijcVNFSplitZodiLSFSpline2D",
+    "SkyDecompPalaceAijcVNFSplitZodiLineAmplitudePCA30",
     "SkyDecompTelluricCorrectedLinesLineAmplitudePCA",
     "SkyDecompTelluricCorrectedLinesPalaceAijc",
     "SkyDecompTelluricCorrectedLinesPalaceAijcVN",

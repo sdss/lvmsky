@@ -228,13 +228,15 @@
     "rms_outlier_expnums": [],
     "wave_sha256": "78d6785c2ecda6afb2b1d4d02bfc2a28c9803dfca7477ad407d946c46e9e3dd1"
   },
-  "niv_vnf_line_amplitude_pca_contract": {
-    "path": "residual_pca/palace_aijc_vnf_niv_continuum_line_amplitude_pca_v1.npz",
+  "split_zodi_vnf_line_amplitude_pca_contract": {
+    "path": "residual_pca/palace_aijc_vnf_split_zodi_line_amplitude_pca30_v1.npz",
     "sha256": "b2a1253fb50f78603cd18c16143a2060d4a6ddd2ae61412695e924f10c23da09",
     "basis_id": "palace-aijc-vnf-niv-continuum-line-amplitude-pca30-v1",
+    "production_basis_id": "palace-aijc-vnf-split-zodi-line-amplitude-pca30-v1",
     "source_model": "SkyDecompPalaceAijcVNFNivContinuumLSFSpline2D",
+    "production_model": "SkyDecompPalaceAijcVNFSplitZodiLSFSpline2D",
     "source_oh_group_keys": ["v_upper", "N_upper", "F_upper"],
-    "continuum_contract": "niv-v1",
+    "continuum_profile": "split-zodi-production-v1",
     "input_spectra": 1000,
     "successful_input_fits": 1000,
     "training_spectra": 983,

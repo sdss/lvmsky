@@ -451,11 +451,25 @@ def test_batch_role_coordinate_and_lsf_contract(monkeypatch):
         "palace-aijc-vnf-line-amplitude-pca30": (
             "_palace_aijc_vnf_line_amplitude_pca30"
         ),
+        "adam25k-telluric-split-zodi-lsf-spline2d": (
+            "_adam25k_telluric_split_zodi_lsf_spline2d"
+        ),
+        "palace-aijc-vnf-pca30-split-zodi-lsf-spline2d": (
+            "_palace_aijc_vnf_pca30_split_zodi_lsf_spline2d"
+        ),
         "adam25k-telluric-niv-continuum": "_adam25k_telluric_niv_continuum",
         "palace-aijc-vnf-pca30-niv-continuum": (
             "_palace_aijc_vnf_pca30_niv_continuum"
         ),
     }
+    assert (
+        decompose_parallel.ADAM25K_NIV_CONTINUUM_FIT_MODEL
+        == decompose_parallel.LEGACY_ADAM25K_SPLIT_ZODI_FIT_MODEL
+    )
+    assert (
+        decompose_parallel.PALACE_VNF_PCA30_NIV_CONTINUUM_FIT_MODEL
+        == decompose_parallel.LEGACY_PALACE_VNF_PCA30_SPLIT_ZODI_FIT_MODEL
+    )
 
 
 @pytest.mark.parametrize(
@@ -470,6 +484,26 @@ def test_batch_role_coordinate_and_lsf_contract(monkeypatch):
             decompose_parallel.PALACE_VNF_PCA30_FIT_MODEL,
             "skysub.sky_decomp.residual_pca."
             "SkyDecompPalaceAijcVNFLineAmplitudePCA",
+        ),
+        (
+            decompose_parallel.ADAM25K_SPLIT_ZODI_FIT_MODEL,
+            "skysub.sky_decomp.telluric_corrected_lines."
+            "SkyDecompAdam25kTelluricSplitZodiLSFSpline2D",
+        ),
+        (
+            decompose_parallel.PALACE_VNF_PCA30_SPLIT_ZODI_FIT_MODEL,
+            "skysub.sky_decomp.residual_pca."
+            "SkyDecompPalaceAijcVNFSplitZodiLineAmplitudePCA30",
+        ),
+        (
+            decompose_parallel.LEGACY_ADAM25K_SPLIT_ZODI_FIT_MODEL,
+            "skysub.sky_decomp.telluric_corrected_lines."
+            "SkyDecompAdam25kTelluricSplitZodiLSFSpline2D",
+        ),
+        (
+            decompose_parallel.LEGACY_PALACE_VNF_PCA30_SPLIT_ZODI_FIT_MODEL,
+            "skysub.sky_decomp.residual_pca."
+            "SkyDecompPalaceAijcVNFSplitZodiLineAmplitudePCA30",
         ),
     ],
 )
@@ -545,6 +579,11 @@ def test_telluric_cli_models_use_role_lsf_pwv_and_airmass(
 
     monkeypatch.setattr(lvmdrp.core.fluxcal, "TelluricCalculator", DummyTelluricCalculator)
     monkeypatch.setattr(class_path, DummyDecomposer)
+    monkeypatch.setattr(
+        decompose_parallel,
+        "_install_split_zodi_amplitude_prior",
+        lambda decomposer, kind, row_index: None,
+    )
     decompose_parallel.init_worker(
         wave,
         0.5,
@@ -552,6 +591,12 @@ def test_telluric_cli_models_use_role_lsf_pwv_and_airmass(
         2.0,
         input_path,
         fit_model=fit_model,
+        n_zodi_spline_knots=3,
+        zodi_smooth_lambda=0.25,
+        diffuse_ratio_bound_dex=0.12,
+        diffuse_ratio_nominal=(0.1, 0.6, 0.3),
+        diffuse_oh_centre_log10=-0.5,
+        diffuse_oh_bound_dex=0.08,
     )
     try:
         for kind in ("sci", "sky1", "sky2"):
@@ -566,8 +611,24 @@ def test_telluric_cli_models_use_role_lsf_pwv_and_airmass(
     assert all(np.array_equal(call["drp_transmission"], np.full(3, 0.9)) for call in constructor_calls)
     assert [float(values[0][0]) for values in transmissions] == [1.1, 1.2, 1.3]
     assert all(values[1:] == (4.2, 1.3, True) for values in transmissions)
-    if fit_model == decompose_parallel.PALACE_VNF_PCA30_FIT_MODEL:
+    if fit_model in (
+        decompose_parallel.PALACE_VNF_PCA30_FIT_MODEL,
+        *decompose_parallel.PALACE_VNF_PCA30_SPLIT_ZODI_FIT_MODELS,
+    ):
         assert all(call["n_line_amplitude_pca_components"] == 30 for call in constructor_calls)
+    if fit_model in decompose_parallel.SPLIT_ZODI_TELLURIC_FIT_MODELS:
+        expected = {
+            "n_zodi_spline_knots": 3,
+            "zodi_smooth_lambda": 0.25,
+            "diffuse_ratio_bound_dex": 0.12,
+            "diffuse_ratio_nominal": (0.1, 0.6, 0.3),
+            "diffuse_oh_centre_log10": -0.5,
+            "diffuse_oh_bound_dex": 0.08,
+        }
+        assert all(
+            all(call[key] == value for key, value in expected.items())
+            for call in constructor_calls
+        )
 
 
 def test_batch_preserves_placeholder_and_propagates_unexpected_errors(monkeypatch):

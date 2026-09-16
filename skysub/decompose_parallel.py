@@ -52,10 +52,7 @@ from skysub.sky_decomp.moon_zodi_model import (
     validate_decomposition_data_root,
     wave_sha256,
 )
-from skysub.sky_decomp.niv_continuum import (
-    NIV_CONTINUUM_KWARGS,
-    NIV_ZODI_PRIOR_CALIBRATION,
-)
+from skysub.sky_decomp.fit import SPLIT_ZODI_CONTINUUM_DEFAULTS
 
 try:
     from threadpoolctl import threadpool_limits
@@ -112,6 +109,13 @@ FIT_MODEL_SUFFIXES = {
     "moon-zodi-lsf-surface-iterative": "_moon_zodi_lsf_surface_iterative",
     "adam25k-telluric-lsf-spline2d": "_adam25k_telluric_lsf_spline2d",
     "palace-aijc-vnf-line-amplitude-pca30": "_palace_aijc_vnf_line_amplitude_pca30",
+    "adam25k-telluric-split-zodi-lsf-spline2d": (
+        "_adam25k_telluric_split_zodi_lsf_spline2d"
+    ),
+    "palace-aijc-vnf-pca30-split-zodi-lsf-spline2d": (
+        "_palace_aijc_vnf_pca30_split_zodi_lsf_spline2d"
+    ),
+    # Compatibility aliases for existing commands and persisted provenance.
     "adam25k-telluric-niv-continuum": "_adam25k_telluric_niv_continuum",
     "palace-aijc-vnf-pca30-niv-continuum": "_palace_aijc_vnf_pca30_niv_continuum",
 }
@@ -121,26 +125,49 @@ SPLINE2D_SPLIT_ZODI_FIT_MODEL = "lsf-spline2d-split-zodi"
 SPLIT_ZODI_FIT_MODELS = (SPLIT_ZODI_FIT_MODEL, SPLINE2D_SPLIT_ZODI_FIT_MODEL)
 ADAM25K_TELLURIC_FIT_MODEL = "adam25k-telluric-lsf-spline2d"
 PALACE_VNF_PCA30_FIT_MODEL = "palace-aijc-vnf-line-amplitude-pca30"
-ADAM25K_NIV_CONTINUUM_FIT_MODEL = "adam25k-telluric-niv-continuum"
-PALACE_VNF_PCA30_NIV_CONTINUUM_FIT_MODEL = (
+ADAM25K_SPLIT_ZODI_FIT_MODEL = "adam25k-telluric-split-zodi-lsf-spline2d"
+PALACE_VNF_PCA30_SPLIT_ZODI_FIT_MODEL = (
+    "palace-aijc-vnf-pca30-split-zodi-lsf-spline2d"
+)
+LEGACY_ADAM25K_SPLIT_ZODI_FIT_MODEL = "adam25k-telluric-niv-continuum"
+LEGACY_PALACE_VNF_PCA30_SPLIT_ZODI_FIT_MODEL = (
     "palace-aijc-vnf-pca30-niv-continuum"
+)
+# Public compatibility names used by already-generated notebooks.
+ADAM25K_NIV_CONTINUUM_FIT_MODEL = LEGACY_ADAM25K_SPLIT_ZODI_FIT_MODEL
+PALACE_VNF_PCA30_NIV_CONTINUUM_FIT_MODEL = (
+    LEGACY_PALACE_VNF_PCA30_SPLIT_ZODI_FIT_MODEL
 )
 NIV_CONTINUUM_FIT_MODELS = (
     ADAM25K_NIV_CONTINUUM_FIT_MODEL,
     PALACE_VNF_PCA30_NIV_CONTINUUM_FIT_MODEL,
 )
+ADAM25K_SPLIT_ZODI_FIT_MODELS = (
+    ADAM25K_SPLIT_ZODI_FIT_MODEL,
+    LEGACY_ADAM25K_SPLIT_ZODI_FIT_MODEL,
+)
+PALACE_VNF_PCA30_SPLIT_ZODI_FIT_MODELS = (
+    PALACE_VNF_PCA30_SPLIT_ZODI_FIT_MODEL,
+    LEGACY_PALACE_VNF_PCA30_SPLIT_ZODI_FIT_MODEL,
+)
+SPLIT_ZODI_TELLURIC_FIT_MODELS = (
+    *ADAM25K_SPLIT_ZODI_FIT_MODELS,
+    *PALACE_VNF_PCA30_SPLIT_ZODI_FIT_MODELS,
+)
 TELLURIC_FIT_MODELS = (
     ADAM25K_TELLURIC_FIT_MODEL,
     PALACE_VNF_PCA30_FIT_MODEL,
-    *NIV_CONTINUUM_FIT_MODELS,
+    *SPLIT_ZODI_TELLURIC_FIT_MODELS,
 )
 
 # Defaults for the SkyDecompLSFSurfaceIterative(split_zodi=True) knobs; match the
 # settings validated on the p40_p70 every10 identifiability notebook.
-SPLIT_ZODI_N_KNOTS_DEFAULT = NIV_CONTINUUM_KWARGS["n_zodi_spline_knots"]
-SPLIT_ZODI_SMOOTH_LAMBDA_DEFAULT = NIV_CONTINUUM_KWARGS["zodi_smooth_lambda"]
-SPLIT_ZODI_MOON_ALBEDO_PHASE_DEG = NIV_CONTINUUM_KWARGS["moon_albedo_fiducial_phase_deg"]
-SPLIT_ZODI_COLOR_EXPONENT = NIV_CONTINUUM_KWARGS["zodi_color_exponent"]
+SPLIT_ZODI_N_KNOTS_DEFAULT = SPLIT_ZODI_CONTINUUM_DEFAULTS["n_zodi_spline_knots"]
+SPLIT_ZODI_SMOOTH_LAMBDA_DEFAULT = SPLIT_ZODI_CONTINUUM_DEFAULTS["zodi_smooth_lambda"]
+SPLIT_ZODI_MOON_ALBEDO_PHASE_DEG = SPLIT_ZODI_CONTINUUM_DEFAULTS[
+    "moon_albedo_fiducial_phase_deg"
+]
+SPLIT_ZODI_COLOR_EXPONENT = SPLIT_ZODI_CONTINUUM_DEFAULTS["zodi_color_exponent"]
 # --- split-zodi identifiability defaults (validated 2026-09-03) --------------
 # Without these the split is degenerate in a way fit quality cannot see: on 200
 # lunation-stratified sky spectra the deployed configuration put the moon and
@@ -163,10 +190,10 @@ SPLIT_ZODI_COLOR_EXPONENT = NIV_CONTINUUM_KWARGS["zodi_color_exponent"]
 # Cost: median rms x1.01 over the sample, concentrated entirely at bright moon
 # (x1.49 median for FLI > 0.8, ~1% of the continuum, blue-weighted).  Part of
 # that is the baseline overfitting via the spline hole described above.
-SPLIT_ZODI_MOON_RATIO_BOUND = NIV_CONTINUUM_KWARGS["moon_ratio_bound"]
-SPLIT_ZODI_ZODI_RATIO_BOUND = NIV_CONTINUUM_KWARGS["zodi_ratio_bound"]
-SPLIT_ZODI_AMP_PRIOR_TOL = NIV_CONTINUUM_KWARGS["amp_prior_tol"]
-SPLIT_ZODI_ZODI_AMP_BOUND = NIV_CONTINUUM_KWARGS["zodi_amp_bound"]
+SPLIT_ZODI_MOON_RATIO_BOUND = SPLIT_ZODI_CONTINUUM_DEFAULTS["moon_ratio_bound"]
+SPLIT_ZODI_ZODI_RATIO_BOUND = SPLIT_ZODI_CONTINUUM_DEFAULTS["zodi_ratio_bound"]
+SPLIT_ZODI_AMP_PRIOR_TOL = SPLIT_ZODI_CONTINUUM_DEFAULTS["amp_prior_tol"]
+SPLIT_ZODI_ZODI_AMP_BOUND = SPLIT_ZODI_CONTINUUM_DEFAULTS["zodi_amp_bound"]
 
 # Diffuse species-ratio bracket, ON by default since 2026-09-10.  The three
 # diffuse species are individually unidentifiable in the LVM band: on the
@@ -196,8 +223,12 @@ SPLIT_ZODI_ZODI_AMP_BOUND = NIV_CONTINUUM_KWARGS["zodi_amp_bound"]
 # or all-zero, so a row whose fit wants HO2 = 0 loses its entire diffuse
 # block (measured 0.2-0.4% of rows).  `diffuse_zeroed_keep_mask` catches
 # those downstream; count them after a run.
-SPLIT_ZODI_DIFFUSE_RATIO_BOUND_DEX = NIV_CONTINUUM_KWARGS["diffuse_ratio_bound_dex"]
-SPLIT_ZODI_DIFFUSE_RATIO_NOMINAL = NIV_CONTINUUM_KWARGS["diffuse_ratio_nominal"]
+SPLIT_ZODI_DIFFUSE_RATIO_BOUND_DEX = SPLIT_ZODI_CONTINUUM_DEFAULTS[
+    "diffuse_ratio_bound_dex"
+]
+SPLIT_ZODI_DIFFUSE_RATIO_NOMINAL = SPLIT_ZODI_CONTINUUM_DEFAULTS[
+    "diffuse_ratio_nominal"
+]
 
 # Moon-gated upper bound on the DIFFUSE BLOCK relative to OH.
 # The three diffuse species are mesospheric chemiluminescence and cannot
@@ -299,10 +330,18 @@ SPLIT_ZODI_DIFFUSE_RATIO_NOMINAL = NIV_CONTINUUM_KWARGS["diffuse_ratio_nominal"]
 # matrix_diffuse.  A cross-family ratio built from matrix_* is 5.01x wrong on
 # the OH side; integrate the stored COMP_* planes instead.  Measured that way
 # the bound binds at log10 = -0.4924 against the specified -0.4989.
-SPLIT_ZODI_DIFFUSE_OH_CENTRE_LOG10 = NIV_CONTINUUM_KWARGS["diffuse_oh_centre_log10"]
-SPLIT_ZODI_DIFFUSE_OH_BOUND_DEX = NIV_CONTINUUM_KWARGS["diffuse_oh_bound_dex"]
-SPLIT_ZODI_DIFFUSE_OH_GATE_FRAC = NIV_CONTINUUM_KWARGS["diffuse_oh_gate_frac"]
-SPLIT_ZODI_DIFFUSE_OH_RELAX_DEX = NIV_CONTINUUM_KWARGS["diffuse_oh_relax_dex"]
+SPLIT_ZODI_DIFFUSE_OH_CENTRE_LOG10 = SPLIT_ZODI_CONTINUUM_DEFAULTS[
+    "diffuse_oh_centre_log10"
+]
+SPLIT_ZODI_DIFFUSE_OH_BOUND_DEX = SPLIT_ZODI_CONTINUUM_DEFAULTS[
+    "diffuse_oh_bound_dex"
+]
+SPLIT_ZODI_DIFFUSE_OH_GATE_FRAC = SPLIT_ZODI_CONTINUUM_DEFAULTS[
+    "diffuse_oh_gate_frac"
+]
+SPLIT_ZODI_DIFFUSE_OH_RELAX_DEX = SPLIT_ZODI_CONTINUUM_DEFAULTS[
+    "diffuse_oh_relax_dex"
+]
 # Absolute recentring of the Leinert anchor.  The anchor brackets the fitted
 # zodi total to [Z_pred/kappa_z, kappa_z * Z_pred], and Z_pred comes from
 # _physics_only_model, whose learned scale factors are deliberately zeroed --
@@ -363,14 +402,14 @@ SPLIT_ZODI_DIFFUSE_OH_RELAX_DEX = NIV_CONTINUUM_KWARGS["diffuse_oh_relax_dex"]
 # (1.000x, IQR 0.0000) and every config gives the same rho(B500) ~ 0.74,
 # rho(FLI) ~ 0.08 and partial rho(FLI | B500) ~ -0.12.  Judge this constraint
 # by pinning fraction, reversals and rms, not by those correlations.
-SPLIT_ZODI_ZODI_PRIOR_CALIBRATION = NIV_ZODI_PRIOR_CALIBRATION
+SPLIT_ZODI_ZODI_PRIOR_CALIBRATION = 1.6
 # Moon_bs interior-knot count.  Deliberately NOT SkyDecomp.__init__'s default
 # (25, with n_zodi_spline_knots 3): the deployed corpus and every measurement
 # behind the SPLIT_ZODI_* bounds above use 11 moon / 1 zodi interior knots.
 # The ratio bounds are per ADJACENT KNOT PAIR, so the same beta is looser the
 # more knots there are -- changing these without re-validating the bounds
 # changes how much colour freedom each family actually has.
-MOON_N_KNOTS_DEFAULT = NIV_CONTINUUM_KWARGS["n_spline_knots"]
+MOON_N_KNOTS_DEFAULT = SPLIT_ZODI_CONTINUUM_DEFAULTS["n_spline_knots"]
 
 # --- Science emission-line mask -------------------------------------------
 # Nebular lines from the SCIENCE field are not sky, and NONE of them exists in
@@ -843,20 +882,18 @@ def init_worker(
             )
 
             _WORKER_DECOMPOSER = SkyDecompPalaceAijcVNFLineAmplitudePCA
-        elif fit_model == ADAM25K_NIV_CONTINUUM_FIT_MODEL:
+        elif fit_model in ADAM25K_SPLIT_ZODI_FIT_MODELS:
             from skysub.sky_decomp.telluric_corrected_lines import (
-                SkyDecompAdam25kNivContinuumLSFSpline2D,
+                SkyDecompAdam25kTelluricSplitZodiLSFSpline2D,
             )
 
-            _WORKER_DECOMPOSER = SkyDecompAdam25kNivContinuumLSFSpline2D
+            _WORKER_DECOMPOSER = SkyDecompAdam25kTelluricSplitZodiLSFSpline2D
         else:
             from skysub.sky_decomp.residual_pca import (
-                SkyDecompPalaceAijcVNFNivContinuumLineAmplitudePCA,
+                SkyDecompPalaceAijcVNFSplitZodiLineAmplitudePCA30,
             )
 
-            _WORKER_DECOMPOSER = (
-                SkyDecompPalaceAijcVNFNivContinuumLineAmplitudePCA
-            )
+            _WORKER_DECOMPOSER = SkyDecompPalaceAijcVNFSplitZodiLineAmplitudePCA30
         _WORKER_TELLURIC_CALCULATOR = TelluricCalculator()
         _WORKER_DECOMPOSER_KWARGS = {
             "lsf_sigma": lsf_sigma,
@@ -872,9 +909,18 @@ def init_worker(
                 roughness_fraction=1.0e-4,
             ),
         }
+        if fit_model in SPLIT_ZODI_TELLURIC_FIT_MODELS:
+            _WORKER_DECOMPOSER_KWARGS.update(
+                n_zodi_spline_knots=int(n_zodi_spline_knots),
+                zodi_smooth_lambda=float(zodi_smooth_lambda),
+                diffuse_ratio_bound_dex=float(diffuse_ratio_bound_dex),
+                diffuse_ratio_nominal=diffuse_ratio_nominal,
+                diffuse_oh_centre_log10=diffuse_oh_centre_log10,
+                diffuse_oh_bound_dex=float(diffuse_oh_bound_dex),
+            )
         if fit_model in (
             PALACE_VNF_PCA30_FIT_MODEL,
-            PALACE_VNF_PCA30_NIV_CONTINUUM_FIT_MODEL,
+            *PALACE_VNF_PCA30_SPLIT_ZODI_FIT_MODELS,
         ):
             _WORKER_DECOMPOSER_KWARGS["n_line_amplitude_pca_components"] = 30
     else:
@@ -1545,7 +1591,7 @@ def _fit_worker_row(kind, idx, flux_row, ivar_row):
         )
     if _WORKER_FIT_MODEL in TELLURIC_FIT_MODELS:
         decomposer = _telluric_decomposer(kind, idx)
-        if _WORKER_FIT_MODEL in NIV_CONTINUUM_FIT_MODELS:
+        if _WORKER_FIT_MODEL in SPLIT_ZODI_TELLURIC_FIT_MODELS:
             _install_split_zodi_amplitude_prior(decomposer, kind, idx)
         return decomposer.fit(flux_row, ivar_row, verbose=False)
     raise RuntimeError(f"Worker has unsupported fit model: {_WORKER_FIT_MODEL}")
@@ -1674,7 +1720,6 @@ def _compact_run_provenance(data_file, wave, fit_model, base_dir, parameters):
                 "fit.py",
                 "lsf_spline2d.py",
                 "lsf_surface_iterative.py",
-                "niv_continuum.py",
                 "residual_pca.py",
                 "telluric_corrected_lines.py",
             )

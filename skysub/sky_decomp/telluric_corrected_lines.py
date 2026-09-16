@@ -9,7 +9,7 @@ from typing import Any
 import numpy as np
 from astropy.table import Table
 
-from .fit import grp2vector, sticks2vector
+from .fit import SPLIT_ZODI_CONTINUUM_DEFAULTS, grp2vector, sticks2vector
 from .lsf_spline2d import SkyDecompLSFSpline2D
 from .moon_zodi_model import (
     DEFAULT_DATA_ROOT,
@@ -17,9 +17,6 @@ from .moon_zodi_model import (
     validate_decomposition_asset_contract,
     validate_decomposition_data_root,
 )
-from .niv_continuum import apply_niv_continuum_contract
-
-
 TELLURIC_CORRECTED_LINES_FIT_MODEL = "telluric-corrected-lines-lsf-spline2d"
 LINE_TELLURIC_ASSET = "palace/PMD/palace_line_telluric_r4m_v1.fits"
 LINE_TELLURIC_CONTRACT = "line_telluric_contract"
@@ -297,24 +294,32 @@ class SkyDecompAdam25kTelluricLSFSpline2D(
         super().__init__(*args, **kwargs)
 
 
-class SkyDecompAdam25kNivContinuumLSFSpline2D(
+class SkyDecompAdam25kTelluricSplitZodiLSFSpline2D(
     SkyDecompAdam25kTelluricLSFSpline2D
 ):
-    """Adam-25k lines plus Niv continuum priors and continuous 2-D LSF."""
+    """Adam-25k lines with production split-zodi continuum and 2-D LSF."""
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
-        super().__init__(*args, **apply_niv_continuum_contract(kwargs))
+        super().__init__(*args, **(SPLIT_ZODI_CONTINUUM_DEFAULTS | kwargs))
 
     def _finalize_result(self, *args: Any, **kwargs: Any):
         result = super()._finalize_result(*args, **kwargs)
-        result.fit_summary += " | continuum_contract=niv-v1"
+        result.fit_summary += " | continuum_profile=split-zodi-production-v1"
         self.fit_summary = result.fit_summary
         return result
+
+
+# Compatibility for executed notebooks and checkpoints created before the
+# production method received its physical name.
+SkyDecompAdam25kNivContinuumLSFSpline2D = (
+    SkyDecompAdam25kTelluricSplitZodiLSFSpline2D
+)
 
 
 __all__ = [
     "SkyDecompAdam25kNivContinuumLSFSpline2D",
     "SkyDecompAdam25kTelluricLSFSpline2D",
+    "SkyDecompAdam25kTelluricSplitZodiLSFSpline2D",
     "SkyDecompTelluricCorrectedLinesLSFSpline2D",
     "SkyDecompTelluricLinesLSFSpline2D",
     "TELLURIC_CORRECTED_LINES_FIT_MODEL",

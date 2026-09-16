@@ -12,7 +12,10 @@ from skysub.sky_decomp.residual_pca import (
     VNF_COEFFICIENT_LINE_AMPLITUDE_PCA_ASSET,
     VNF_COEFFICIENT_PCA_PREP_ASSET,
     VNF_LINE_ADJOINT_PCA_ASSET,
+    SPLIT_ZODI_VNF_LINE_AMPLITUDE_PCA_ASSET,
     SkyDecompPalaceAijcVNFLineAmplitudePCA,
+    SkyDecompPalaceAijcVNFNivContinuumLineAmplitudePCA,
+    SkyDecompPalaceAijcVNFSplitZodiLineAmplitudePCA30,
     SkyDecompTelluricCorrectedLinesLineAmplitudePCA,
     SkyDecompTelluricCorrectedLinesPalaceAijcVN,
     SkyDecompTelluricCorrectedLinesResidualPCA,
@@ -23,6 +26,30 @@ from skysub.sky_decomp.residual_pca import (
 )
 from skysub.sky_decomp.fit import CAP_WAVE, decode_hitran_id, vac_to_air
 from skysub.sky_decomp.moon_zodi_model import DEFAULT_DATA_ROOT, NATIVE_GRID_SHA256
+
+
+def test_split_zodi_pca30_uses_the_neutral_production_asset_and_legacy_alias():
+    assert SPLIT_ZODI_VNF_LINE_AMPLITUDE_PCA_ASSET.endswith(
+        "palace_aijc_vnf_split_zodi_line_amplitude_pca30_v1.npz"
+    )
+    assert (DEFAULT_DATA_ROOT / SPLIT_ZODI_VNF_LINE_AMPLITUDE_PCA_ASSET).is_file()
+    assert (
+        SkyDecompPalaceAijcVNFNivContinuumLineAmplitudePCA
+        is SkyDecompPalaceAijcVNFSplitZodiLineAmplitudePCA30
+    )
+
+
+def test_split_zodi_pca30_manifest_preserves_the_frozen_basis_identity():
+    path = DEFAULT_DATA_ROOT / SPLIT_ZODI_VNF_LINE_AMPLITUDE_PCA_ASSET
+    with np.load(path, allow_pickle=False) as data:
+        metadata = json.loads(str(data["metadata_json"].item()))
+    manifest = json.loads((DEFAULT_DATA_ROOT / "bundle_manifest.json").read_text())
+    contract = manifest["split_zodi_vnf_line_amplitude_pca_contract"]
+
+    assert contract["basis_id"] == metadata["basis_id"]
+    assert contract["production_basis_id"] == (
+        "palace-aijc-vnf-split-zodi-line-amplitude-pca30-v1"
+    )
 
 
 def test_frozen_basis_contract():

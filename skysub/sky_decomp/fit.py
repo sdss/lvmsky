@@ -131,6 +131,33 @@ LSF_CHANNELS = (
     ("Z", 7454.0, None),
 )
 
+# Production split Moon/Zodiacal-light continuum defaults.  These are the
+# calibrated settings from the moon-zodi-shape-priors branch; keeping them next
+# to the SkyDecomp continuum parameters makes the direct class API and the
+# corpus CLI use one ordinary, physically named configuration.
+SPLIT_ZODI_CONTINUUM_DEFAULTS = {
+    "n_spline_knots": 11,
+    "moon_smooth_lambda": 1.0e-1,
+    "split_zodi": True,
+    "n_zodi_spline_knots": 1,
+    "zodi_smooth_lambda": 1.0e-1,
+    "moon_albedo_fiducial_phase_deg": 30.0,
+    "zodi_color_exponent": 0.26,
+    "moon_ratio_bound": 0.7,
+    "zodi_ratio_bound": 0.7,
+    "amp_prior_tol": 3.0,
+    "amp_prior_floor": 0.02,
+    "zodi_amp_bound": 2.0,
+    "diffuse_ratio_bound_dex": 0.2,
+    "diffuse_ratio_nominal": (0.0396, 0.7026, 0.2578),
+    "diffuse_oh_centre_log10": -0.6489,
+    "diffuse_oh_bound_dex": 0.15,
+    "diffuse_oh_gate_frac": 0.6,
+    "diffuse_oh_relax_dex": 0.0,
+    "diffuse_oh_scope": "block",
+    "moon_interline_boost": 0.0,
+}
+
 
 def vac_to_air(lam_vac_a: np.ndarray) -> np.ndarray:
     lam = np.asarray(lam_vac_a, float)

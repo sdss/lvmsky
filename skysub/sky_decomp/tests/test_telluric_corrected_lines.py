@@ -12,6 +12,7 @@ from skysub.sky_decomp.moon_zodi_model import (
 from skysub.sky_decomp.telluric_corrected_lines import (
     SkyDecompAdam25kNivContinuumLSFSpline2D,
     SkyDecompAdam25kTelluricLSFSpline2D,
+    SkyDecompAdam25kTelluricSplitZodiLSFSpline2D,
     SkyDecompTelluricCorrectedLinesLSFSpline2D,
     SkyDecompTelluricLinesLSFSpline2D,
     calculate_drp_transmission,
@@ -207,7 +208,7 @@ def test_named_adam25k_class_locks_its_oh_asset():
         )
 
 
-def test_niv_adam_class_locks_the_continuum_contract():
+def test_split_zodi_adam_class_uses_production_defaults_and_allows_overrides():
     wave = _wave()
     wave_hr = np.linspace(wave[0] - 10.0, wave[-1] + 10.0, 40_000)
     common = {
@@ -219,14 +220,18 @@ def test_niv_adam_class_locks_the_continuum_contract():
     }
     common.pop("n_spline_knots", None)
     common.pop("n_zodi_spline_knots", None)
-    model = SkyDecompAdam25kNivContinuumLSFSpline2D(wave, **common)
+    model = SkyDecompAdam25kTelluricSplitZodiLSFSpline2D(wave, **common)
 
     assert model.split_zodi is True
     assert model.n_spline_knots == 11
     assert model.n_zodi_spline_knots == 1
     assert model.diffuse_oh_scope == "block"
-    with pytest.raises(ValueError, match="requires moon_ratio_bound=0.7"):
-        SkyDecompAdam25kNivContinuumLSFSpline2D(
-            wave,
-            **(common | {"moon_ratio_bound": 0.6}),
-        )
+    overridden = SkyDecompAdam25kTelluricSplitZodiLSFSpline2D(
+        wave,
+        **(common | {"moon_ratio_bound": 0.6}),
+    )
+    assert overridden.moon_ratio_bound == 0.6
+    assert (
+        SkyDecompAdam25kNivContinuumLSFSpline2D
+        is SkyDecompAdam25kTelluricSplitZodiLSFSpline2D
+    )
