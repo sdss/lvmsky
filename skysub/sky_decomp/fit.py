@@ -94,7 +94,9 @@ each carrying a new `COMP_ZODI` HDU alongside the standard component HDUs.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
+import inspect
 import pathlib
 import re
 import time
@@ -236,17 +238,211 @@ def decode_hitran_id(table: Table) -> Table:
     return table
 
 
+@lru_cache(maxsize=None)
+def _cached_ascii_table(path: str, fmt: str) -> Table:
+    if fmt == "ascii.basic":
+        return Table.read(
+            path, format=fmt, guess=False, comment="#", fast_reader=False
+        )
+    return Table.read(path, format=fmt)
+
+
+def read_static_table(path: str | Path, fmt: str = "ascii.basic") -> Table:
+    """Parse a static PMD/PALACE ascii asset once per process.
+
+    The telluric models are constructed once per fitted row, and re-parsing
+    these tables was a fifth of that construction.  The cache holds the
+    pristine parse and every caller gets its own copy, because the builders
+    add and overwrite columns on the table they are handed.
+    """
+    return _cached_ascii_table(str(path), fmt).copy()
+
+
+@lru_cache(maxsize=None)
+def read_static_matrix(path: str, comments: str) -> np.ndarray:
+    """Load a static whitespace-delimited asset once per process.
+
+    The returned array is shared and therefore read-only; copy before any
+    in-place arithmetic.
+    """
+    matrix = np.loadtxt(path, comments=comments)
+    matrix.setflags(write=False)
+    return matrix
+
+
+def _solar_templates(
+    path: str | Path, wave: np.ndarray, lsf_sigma: np.ndarray | float
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return the native-grid solar SED, interpolated and LSF-rebinned.
+
+    Memoised on the asset, the grid and the LSF width, none of which vary
+    between rows; the rebin-and-convolve behind it is otherwise repaid on
+    every per-row model construction.  Callers get their own copies, so the
+    cached templates can never be modified through them.
+    """
+    grid = np.ascontiguousarray(wave, dtype=float)
+    sigma = np.ascontiguousarray(lsf_sigma, dtype=float)
+    solar_hr, solar_rb = _solar_templates_cached(
+        str(path), grid.tobytes(), sigma.tobytes(), sigma.shape
+    )
+    return solar_hr.copy(), solar_rb.copy()
+
+
+@lru_cache(maxsize=8)
+def _solar_templates_cached(
+    path: str,
+    wave_bytes: bytes,
+    sigma_bytes: bytes,
+    sigma_shape: tuple[int, ...],
+) -> tuple[np.ndarray, np.ndarray]:
+    wave = np.frombuffer(wave_bytes, dtype=float)
+    lsf_sigma = np.frombuffer(sigma_bytes, dtype=float).reshape(sigma_shape)
+    sol = read_static_matrix(path, ";")
+    solar_wave = vac_to_air(sol[:, 0] * 10.0)
+    # `sol` is the shared read-only parse; copy before normalising in place.
+    solar_flux = np.array(sol[:, 1], dtype=float)
+    solar_flux /= np.nanmedian(solar_flux)
+    solar_hr = np.nan_to_num(
+        np.interp(wave, solar_wave, solar_flux, left=0.0, right=0.0)
+    )
+    solar_rb = rebin_and_convolve(
+        wave,
+        solar_wave,
+        solar_flux,
+        lsf_sigma * 2.355,
+        lsf_in_wavelength=True,
+    )
+    solar_rb /= np.nanmedian(solar_rb)
+    return solar_hr, solar_rb
+
+
+def _frozen_group(*fields):
+    """Freeze one cached line group: arrays are shared, so they stay read-only."""
+    for field in fields:
+        if isinstance(field, np.ndarray):
+            field.setflags(write=False)
+    return fields
+
+
+@lru_cache(maxsize=None)
+def _oh_line_catalog(
+    path: str,
+    wave_lo: float,
+    wave_hi: float,
+    group_keys: tuple[str, ...],
+    amplitude,
+) -> tuple[tuple[np.ndarray, np.ndarray], ...]:
+    """Tie the OH population model into its fitted line groups, once per process.
+
+    Reading, HITRAN-decoding and grouping this table is the bulk of what is
+    left of model construction, and it depends on nothing that varies from row
+    to row -- only the asset, the grid span, the grouping keys and the class's
+    own amplitude rule, all of which are in the cache key.  The telluric
+    models are rebuilt per fitted row, so this is paid thousands of times a
+    worker otherwise.
+    """
+    oh = read_static_table(path)
+    oh["wave"] = vac_to_air(np.asarray(oh["lam"], float) * 1e4)
+    mask = (oh["wave"] >= wave_lo - CAP_WAVE) & (oh["wave"] <= wave_hi + CAP_WAVE)
+    oh = decode_hitran_id(oh[mask])
+    return tuple(
+        _frozen_group(
+            np.asarray(group["wave"], float),
+            np.asarray(amplitude(group), float),
+        )
+        for group in oh.group_by(list(group_keys)).groups
+    )
+
+
+@lru_cache(maxsize=None)
+def _atom_line_catalog(
+    path: str, wave_lo: float, wave_hi: float
+) -> tuple[tuple[np.ndarray, np.ndarray, str], ...]:
+    """Group the atomic airglow lines by species, once per process."""
+    atom = read_static_table(path)
+    atom["wave"] = vac_to_air(np.asarray(atom["lam"], float) * 1e4)
+    mask = (atom["wave"] >= wave_lo - CAP_WAVE) & (atom["wave"] <= wave_hi + CAP_WAVE)
+    atom = atom[mask]
+    atom = atom[~np.isin(np.asarray(atom["class"], str), ["H", "Orc"])]
+    catalog = []
+    for group in atom.group_by("class").groups:
+        amp = np.array(group["I"], dtype=float)
+        amp /= np.nansum(amp)
+        catalog.append(
+            _frozen_group(
+                np.asarray(group["wave"], float), amp, f"ATOM_{group['class'][0]}"
+            )
+        )
+    return tuple(catalog)
+
+
+@lru_cache(maxsize=None)
+def _orc_line_catalog(
+    path: str, wave_lo: float, wave_hi: float
+) -> tuple[tuple[np.ndarray, np.ndarray, str], ...]:
+    """Group the O2 Herzberg pseudo-continuum features, once per process."""
+    orc = read_static_table(path)
+    orc["wave"] = vac_to_air(np.asarray(orc["lam"], float) * 1e4)
+    mask = (orc["wave"] >= wave_lo - CAP_WAVE) & (orc["wave"] <= wave_hi + CAP_WAVE)
+    return tuple(
+        _frozen_group(
+            np.asarray(group["wave"], float),
+            np.asarray(group["I"], float),
+            f"ATOM_Orc_{group['reffeat'][0]}",
+        )
+        for group in orc[mask].group_by("reffeat").groups
+    )
+
+
+GRP2VECTOR_SIGMA_CUTOFF = 12.0
+
+
 def grp2vector(
     line_wave: np.ndarray,
     line_amp: np.ndarray,
     wave: np.ndarray,
     lsf_sigma: np.ndarray | float,
 ) -> np.ndarray:
+    """Sum Gaussian line profiles of one group onto the native grid.
+
+    Each line is evaluated only on the pixels within
+    ``GRP2VECTOR_SIGMA_CUTOFF`` sigma of its centre instead of on the whole
+    grid.  At 12 sigma the Gaussian is exp(-72) ~ 5e-32 of its peak, i.e. some
+    16 orders of magnitude below the float64 resolution of the pixel it would
+    be added to, so the windowed sum is the full sum to the last bit while the
+    cost falls from O(n_wave * n_lines) to O(window * n_lines).  This is the
+    single hottest routine in model construction, and the telluric models
+    rebuild their line matrices per row, so the window matters there twice.
+    """
     cent = np.asarray(line_wave, float)
     amp = np.asarray(line_amp, float)
-    sig = np.interp(cent, wave, lsf_sigma) if np.ndim(lsf_sigma) > 0 else float(lsf_sigma)
-    yy = (wave[:, None] - cent) / sig
-    return np.sum(amp[None, :] * np.exp(-0.5 * yy**2), axis=1)
+    wave = np.asarray(wave, float)
+    out = np.zeros(wave.size, dtype=float)
+    if cent.size == 0 or wave.size == 0:
+        return out
+
+    sig = (
+        np.interp(cent, wave, lsf_sigma)
+        if np.ndim(lsf_sigma) > 0
+        else np.full(cent.size, float(lsf_sigma))
+    )
+    reach = GRP2VECTOR_SIGMA_CUTOFF * sig
+    first = np.searchsorted(wave, cent - reach, side="left")
+    stop = np.searchsorted(wave, cent + reach, side="right")
+    # A non-positive sigma has no profile at all; the dense form used to make
+    # it inf/nan, which no caller can use.
+    count = np.where(sig > 0.0, stop - first, 0)
+    line = np.repeat(np.arange(cent.size), count)
+    if line.size == 0:
+        return out
+    start = np.repeat(np.cumsum(count) - count, count)
+    pixel = first[line] + np.arange(line.size) - start
+    scaled = (wave[pixel] - cent[line]) / sig[line]
+    return np.bincount(
+        pixel,
+        weights=amp[line] * np.exp(-0.5 * scaled * scaled),
+        minlength=wave.size,
+    )
 
 
 def sticks2vector(
@@ -1938,18 +2134,26 @@ class SkyDecomp:
         return np.vstack(parts)
 
     def _build_oh(self) -> np.ndarray:
-        oh = Table.read(self._pmd_path("pmd_popmodel_OH.dat"), format="ascii.basic", guess=False, comment="#", fast_reader=False)
-        oh["wave"] = vac_to_air(np.asarray(oh["lam"], float) * 1e4)
-        mask = (oh["wave"] >= self.wave.min() - CAP_WAVE) & (oh["wave"] <= self.wave.max() + CAP_WAVE)
-        oh = decode_hitran_id(oh[mask])
-        groups = oh.group_by(self.oh_group_keys).groups
-
+        # The catalog is cached per amplitude RULE, so the rule has to be
+        # identifiable without an instance.  Every subclass states it as a
+        # staticmethod; refuse anything else rather than silently calling an
+        # unbound method with the group as its `self`.
+        amplitude = inspect.getattr_static(type(self), "_oh_amplitude")
+        if not isinstance(amplitude, staticmethod):
+            raise TypeError(
+                f"{type(self).__name__}._oh_amplitude must be a staticmethod"
+            )
+        groups = _oh_line_catalog(
+            str(self._pmd_path("pmd_popmodel_OH.dat")),
+            float(self.wave.min()),
+            float(self.wave.max()),
+            tuple(self.oh_group_keys),
+            amplitude.__func__,
+        )
         matrix = np.zeros((len(groups), self.wave.size))
         self.matrix_oh_stick = np.zeros_like(matrix)
         self._oh_line_groups = []
-        for idx, grp in enumerate(groups):
-            amp = self._oh_amplitude(grp)
-            line_wave = np.asarray(grp["wave"], float)
+        for idx, (line_wave, amp) in enumerate(groups):
             self._oh_line_groups.append((line_wave.copy(), amp.copy()))
             matrix[idx] = grp2vector(line_wave, amp, self.wave, self.lsf_sigma)
             self.matrix_oh_stick[idx] = sticks2vector(line_wave, amp, self.wave)
@@ -1960,20 +2164,9 @@ class SkyDecomp:
         return np.asarray(group["Aij"] * group["gi"], dtype=float)
 
     def _build_moon(self) -> tuple[np.ndarray, list[str]]:
-        sol = np.loadtxt(self._require_path(self.solar_path), comments=";")
-        solar_wave = vac_to_air(sol[:, 0] * 10.0)
-        solar_flux = np.asarray(sol[:, 1], float)
-        solar_flux /= np.nanmedian(solar_flux)
-        solar_hr = np.nan_to_num(np.interp(self.wave, solar_wave, solar_flux, left=0.0, right=0.0))
-
-        solar_rb = rebin_and_convolve(
-            self.wave,
-            solar_wave,
-            solar_flux,
-            self.lsf_sigma * 2.355,
-            lsf_in_wavelength=True,
+        solar_hr, solar_rb = _solar_templates(
+            self._require_path(self.solar_path), self.wave, self.lsf_sigma
         )
-        solar_rb /= np.nanmedian(solar_rb)
         self.vector_moon = solar_rb
 
         w0, w1 = self.wave[0], self.wave[-1]
@@ -2371,7 +2564,7 @@ class SkyDecomp:
         return out
 
     def _build_diffuse(self) -> tuple[np.ndarray, list[str]]:
-        ref = Table.read(self._pmd_path("pmd_refcont.dat"), format="ascii")
+        ref = read_static_table(self._pmd_path("pmd_refcont.dat"), "ascii")
         lam_ref = np.asarray(ref["lam"], float) * 1e4
         exact_native_grid = (
             lam_ref.shape == self.wave.shape
@@ -2393,48 +2586,41 @@ class SkyDecomp:
         return matrix, ["HO2", "FeO", "O2Ac"]
 
     def _build_atom(self) -> tuple[np.ndarray, list[str]]:
-        atom = Table.read(self._pmd_path("pmd_intdata_atom.dat"), format="ascii.basic", guess=False, comment="#", fast_reader=False)
-        atom["wave"] = vac_to_air(np.asarray(atom["lam"], float) * 1e4)
-        mask = (atom["wave"] >= self.wave.min() - CAP_WAVE) & (atom["wave"] <= self.wave.max() + CAP_WAVE)
-        atom = atom[mask]
-        atom = atom[~np.isin(np.asarray(atom["class"], str), ["H", "Orc"])]
-        groups = atom.group_by("class").groups
-
+        groups = _atom_line_catalog(
+            str(self._pmd_path("pmd_intdata_atom.dat")),
+            float(self.wave.min()),
+            float(self.wave.max()),
+        )
         matrix = np.zeros((len(groups), self.wave.size))
         self.matrix_atom_stick = np.zeros_like(matrix)
         self._atom_line_groups = []
         names = []
-        for idx, grp in enumerate(groups):
-            amp = np.asarray(grp["I"], float)
-            amp /= np.nansum(amp)
-            line_wave = np.asarray(grp["wave"], float)
+        for idx, (line_wave, amp, name) in enumerate(groups):
             self._atom_line_groups.append((line_wave.copy(), amp.copy()))
             matrix[idx] = grp2vector(line_wave, amp, self.wave, self.lsf_sigma)
             self.matrix_atom_stick[idx] = sticks2vector(line_wave, amp, self.wave)
-            names.append(f"ATOM_{grp['class'][0]}")
+            names.append(name)
         return matrix, names
 
     def _build_orc(self) -> tuple[np.ndarray, list[str]]:
-        orc = Table.read(self._pmd_path("pmd_intmodel_Orc.dat"), format="ascii.basic", guess=False, comment="#", fast_reader=False)
-        orc["wave"] = vac_to_air(np.asarray(orc["lam"], float) * 1e4)
-        mask = (orc["wave"] >= self.wave.min() - CAP_WAVE) & (orc["wave"] <= self.wave.max() + CAP_WAVE)
-        groups = orc[mask].group_by("reffeat").groups
-
+        groups = _orc_line_catalog(
+            str(self._pmd_path("pmd_intmodel_Orc.dat")),
+            float(self.wave.min()),
+            float(self.wave.max()),
+        )
         matrix = np.zeros((len(groups), self.wave.size))
         self.matrix_orc_stick = np.zeros_like(matrix)
         self._orc_line_groups = []
         names = []
-        for idx, grp in enumerate(groups):
-            amp = np.asarray(grp["I"], float)
-            line_wave = np.asarray(grp["wave"], float)
+        for idx, (line_wave, amp, name) in enumerate(groups):
             self._orc_line_groups.append((line_wave.copy(), amp.copy()))
             matrix[idx] = grp2vector(line_wave, amp, self.wave, self.lsf_sigma)
             self.matrix_orc_stick[idx] = sticks2vector(line_wave, amp, self.wave)
-            names.append(f"ATOM_Orc_{grp['reffeat'][0]}")
+            names.append(name)
         return matrix, names
 
     def _load_o2_model(self) -> None:
-        pop_o2 = Table.read(self._pmd_path("pmd_popmodel_O2.dat"), format="ascii.basic", guess=False, comment="#", fast_reader=False)
+        pop_o2 = read_static_table(self._pmd_path("pmd_popmodel_O2.dat"))
         pop_o2["wave"] = vac_to_air(np.asarray(pop_o2["lam"], float) * 1e4)
         o2 = pop_o2[
             (pop_o2["wave"] >= O2_MIN)

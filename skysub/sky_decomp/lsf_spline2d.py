@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict
-from functools import cache
+from functools import cache, lru_cache
 
 import numpy as np
 import scipy.sparse as sp
@@ -116,7 +116,41 @@ def _integrated_components(
     line_wave: np.ndarray,
     output_mask: np.ndarray,
 ) -> sp.csc_matrix:
-    """Exact native-bin density for every line/M-spline pair."""
+    """Exact native-bin density for every line/M-spline pair.
+
+    Memoised on the exact bytes of its three arguments.  The telluric models
+    are reconstructed once per fitted row while the native grid and the line
+    catalog are fixed for the whole worker, so without this every row repaid
+    the full M-spline bin integration; the row-dependent part of the model
+    (the transmission) never enters here.  The returned matrix is shared
+    between instances and must not be modified in place -- every caller only
+    multiplies it.
+    """
+    wave = np.ascontiguousarray(wave, dtype=float)
+    line_wave = np.ascontiguousarray(line_wave, dtype=float)
+    output_mask = np.ascontiguousarray(output_mask, dtype=bool)
+    return _integrated_components_cached(
+        wave.tobytes(), line_wave.tobytes(), output_mask.tobytes()
+    )
+
+
+@lru_cache(maxsize=16)
+def _integrated_components_cached(
+    wave_bytes: bytes,
+    line_wave_bytes: bytes,
+    output_mask_bytes: bytes,
+) -> sp.csc_matrix:
+    wave = np.frombuffer(wave_bytes, dtype=float)
+    line_wave = np.frombuffer(line_wave_bytes, dtype=float)
+    output_mask = np.frombuffer(output_mask_bytes, dtype=bool)
+    return _build_integrated_components(wave, line_wave, output_mask)
+
+
+def _build_integrated_components(
+    wave: np.ndarray,
+    line_wave: np.ndarray,
+    output_mask: np.ndarray,
+) -> sp.csc_matrix:
     edges = native_pixel_edges(wave)
     widths = np.diff(edges)
     first = np.clip(
