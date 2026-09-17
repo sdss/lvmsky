@@ -19,7 +19,12 @@ import numpy as np
 import scipy.sparse as sp
 from scipy.interpolate import BSpline
 
-from .result_io import CHANNEL_NAMES, METRIC_COLUMNS, STATE_CONFIG_COLUMNS
+from .result_io import (
+    CHANNEL_NAMES,
+    FAILED_INPUT_FIT_STATUS,
+    METRIC_COLUMNS,
+    STATE_CONFIG_COLUMNS,
+)
 from .fit import LSF_CHANNELS, LSF_KERNEL_SIZE, SkyDecomp, SkyDecompResult
 
 
@@ -1427,6 +1432,15 @@ class SkyDecompLSFSurfaceIterative(SkyDecomp):
             if channel in state.channel_bounds
         }
 
+    def _failed_input_lsf_state(self, reason: str) -> LSFSurfaceState:
+        fallback = {
+            channel: self._default_channel_kernel(
+                _channel_mask(self.wave, lower, upper)
+            )
+            for channel, lower, upper in LSF_CHANNELS
+        }
+        return _nominal_lsf_state(self.wave, fallback, self.config, reason)
+
     def _fit_lsf_channels(
         self,
         flux: np.ndarray,
@@ -2084,6 +2098,81 @@ class SkyDecompLSFSurfaceIterative(SkyDecomp):
             coef_cov_moon=run.coef_cov_moon,
             coef_cov_zodi=run.coef_cov_zodi,
         )
+
+    def failed_input_result(self, reason: str) -> LSFSurfaceIterativeResult:
+        """Return a same-schema NaN row for one known invalid input."""
+        reason = str(reason).strip()
+        if not reason:
+            raise ValueError("failed input reason must not be empty")
+
+        state = self._failed_input_lsf_state(reason)
+        for channel, coefficient in state.coefficients.items():
+            state.coefficients[channel] = np.full_like(coefficient, np.nan)
+            state.metrics[channel].update(
+                status="not_run_failed_input",
+                reason=reason,
+            )
+        state.fit_status = FAILED_INPUT_FIT_STATUS
+        state.failure_reason = reason
+        state.final_continuum_status = "not_run_failed_input"
+        state.final_line_status = "not_run_failed_input"
+        self._set_lsf_state(None)
+        self.lsf_surface_state = state
+        self.lsf_metrics = state.metrics
+
+        nan_wave = np.full(self.wave.shape, np.nan, dtype=np.float64)
+        nan_coefficient = np.full(len(self.design_names), np.nan, dtype=np.float64)
+        matrices = self._matrix_bundle(
+            self.matrix_oh,
+            self.matrix_moon,
+            self.matrix_diffuse,
+            self.matrix_atom,
+            self.matrix_orc,
+            self.matrix_o2,
+            matrix_zodi=self.matrix_zodi if self.split_zodi else None,
+        )
+        components = self._components_from_coef(nan_coefficient, matrices)
+        self.lsf_kernels = {
+            channel: np.full(state.tap_offsets.size, np.nan, dtype=np.float64)
+            for channel in state.coefficients
+        }
+        summary = f"status={FAILED_INPUT_FIT_STATUS} | reason={reason}"
+        result = LSFSurfaceIterativeResult(
+            coef=nan_coefficient.copy(),
+            coef_err=nan_coefficient.copy(),
+            bestfit=nan_wave.copy(),
+            resid=nan_wave.copy(),
+            resid_level=np.nan,
+            fit_status=FAILED_INPUT_FIT_STATUS,
+            fit_summary=summary,
+            reduced_chi2=np.nan,
+            fit_elapsed_sec=np.nan,
+            components=components,
+            design_names=list(self.design_names),
+            t_o2=np.nan,
+            t_o2_err=np.nan,
+            r2=np.nan,
+            rms_resid=np.nan,
+            peak_memory_mb=np.nan,
+            o2_fit_status="not_run_failed_input",
+            o2_fit_summary=reason,
+            o2_fit_elapsed_sec=np.nan,
+            o2_valid_frac=np.nan,
+            lsf_kernels=self.lsf_kernels,
+            lsf_metrics=self.lsf_metrics,
+            bestfit_lsf=nan_wave.copy(),
+            moon_knots=self.moon_knots_used.copy(),
+            moon_boosted_pixels=np.array([], dtype=np.float64),
+            vector_o2=nan_wave.copy(),
+            o2_prefit_amp=np.nan,
+            bestfit_lsf_sigma=nan_wave.copy(),
+            zodi_names=list(self.zodi_names),
+            zodi_knots=self.zodi_knots_used.copy(),
+            lsf_state=state,
+        )
+        self.fit_status = result.fit_status
+        self.fit_summary = result.fit_summary
+        return result
 
     def fit(
         self,

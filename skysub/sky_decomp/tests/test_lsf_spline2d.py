@@ -61,11 +61,11 @@ def real_result():
             roughness_fraction=1.0e-4,
         ),
     )
-    return wave, model.fit(flux, ivar)
+    return wave, model, model.fit(flux, ivar)
 
 
 def test_real_fit_state_result_and_fits(real_result, tmp_path):
-    wave, result = real_result
+    wave, _, result = real_result
     state = result.lsf_state
     assert result.fit_status == "Solved"
     assert state.completed_cycles == 1
@@ -93,8 +93,23 @@ def test_real_fit_state_result_and_fits(real_result, tmp_path):
         assert hdul["LSF_COEF"].header["BASIS"] == "M-spline"
 
 
+def test_failed_input_keeps_mspline_contract(real_result):
+    _, model, solved = real_result
+    failed = model.failed_input_result("invalid_airmass: row=833")
+
+    assert tuple(failed.components) == tuple(solved.components)
+    assert failed.lsf_state.legacy_kernel_representation == LSF_SPLINE2D_REPRESENTATION
+    assert failed.lsf_state.coefficients["B"].shape == (11, 1)
+    assert failed.lsf_state.coefficients["R"].shape == (11, 6)
+    assert failed.lsf_state.coefficients["Z"].shape == (11, 6)
+    assert all(
+        np.all(np.isnan(values))
+        for values in failed.lsf_state.coefficients.values()
+    )
+
+
 def test_vn_line_amplitude_pca_fits_header_keeps_compact_lsf(real_result, tmp_path):
-    _, result = real_result
+    _, _, result = real_result
     candidate = copy.deepcopy(result)
     candidate.design_names = [
         name.replace("OH_", "OHVN_", 1) if name.startswith("OH_") else name
@@ -123,7 +138,7 @@ def test_vn_line_amplitude_pca_fits_header_keeps_compact_lsf(real_result, tmp_pa
 
 
 def test_vnf_pca_fits_header_keeps_compact_lsf(real_result, tmp_path):
-    _, result = real_result
+    _, _, result = real_result
     candidate = copy.deepcopy(result)
     old_oh = sum(name.startswith("OH_") for name in candidate.design_names)
     keep = np.arange(old_oh, len(candidate.design_names))
@@ -151,7 +166,7 @@ def test_vnf_pca_fits_header_keeps_compact_lsf(real_result, tmp_path):
 
 
 def test_vnf_line_adjoint_pca_fits_header_keeps_compact_lsf(real_result, tmp_path):
-    _, result = real_result
+    _, _, result = real_result
     candidate = copy.deepcopy(result)
     pca_names = ["LineAdjointPCA_mean", "LineAdjointPCA_001"]
     candidate.design_names.extend(pca_names)

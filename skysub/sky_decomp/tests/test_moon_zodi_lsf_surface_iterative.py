@@ -656,6 +656,51 @@ def test_telluric_cli_models_use_role_lsf_pwv_and_airmass(
         )
 
 
+def test_invalid_airmass_marks_only_that_row_failed(monkeypatch):
+    dtype = [
+        ("pwv_med", "f8"),
+        ("sci_airmass", "f8"),
+        ("skye_airmass", "f8"),
+        ("skyw_airmass", "f8"),
+        ("sky_near_label", "U8"),
+        ("sky_far_label", "U8"),
+    ]
+    meta = np.array([(4.2, -999.9, 1.4, 1.5, "SkyW", "SkyE")], dtype=dtype)
+    reasons = []
+    sentinel = object()
+
+    class TemplateDecomposer:
+        def failed_input_result(self, reason):
+            reasons.append(reason)
+            return sentinel
+
+    monkeypatch.setattr(decompose_parallel, "_WORKER_DECOMPOSER", TemplateDecomposer())
+    monkeypatch.setattr(
+        decompose_parallel,
+        "_WORKER_FIT_MODEL",
+        decompose_parallel.PALACE_VNF_SPLIT_ZODI_FIT_MODEL,
+    )
+    monkeypatch.setattr(decompose_parallel, "_WORKER_META", meta)
+    monkeypatch.setattr(decompose_parallel, "_WORKER_SCIENCE_LINE_MASK", None)
+
+    result = decompose_parallel._fit_worker_row(
+        "sci", 0, np.ones(3), np.ones(3)
+    )
+
+    assert result is sentinel
+    assert reasons == [
+        "invalid_airmass: row=0, role=sci, "
+        "sci_airmass=-999.9, source_airmass=-999.9"
+    ]
+
+    meta["sci_airmass"] = 1.3
+    meta["sky_near_label"] = "unknown"
+    with pytest.raises(ValueError, match="Unknown sky_near_label"):
+        decompose_parallel._fit_worker_row(
+            "sky1", 0, np.ones(3), np.ones(3)
+        )
+
+
 def test_batch_preserves_placeholder_and_propagates_unexpected_errors(monkeypatch):
     dtype = [
         ("expnum", "i8"),

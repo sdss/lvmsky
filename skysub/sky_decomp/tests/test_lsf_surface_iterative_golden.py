@@ -473,3 +473,36 @@ def test_default_n5_state_has_semantic_fits_round_trip(golden_fit, tmp_path):
     )
     assert not hasattr(restored, "wave")
     assert not hasattr(restored, "kernel_surface")
+
+
+def test_failed_input_result_preserves_schema_and_writes_nan_row(golden_fit, tmp_path):
+    _, _, _, _, _, model, solved = golden_fit
+    failed = model.failed_input_result(
+        "invalid_airmass: row=833, role=sci, sci_airmass=-999.9"
+    )
+
+    assert type(failed) is type(solved)
+    assert failed.fit_status == "failed_input"
+    assert "reason=invalid_airmass" in failed.fit_summary
+    assert tuple(failed.components) == tuple(solved.components)
+    for name in (
+        "coef",
+        "coef_err",
+        "bestfit",
+        "bestfit_lsf",
+        "bestfit_lsf_sigma",
+        "resid",
+        "vector_o2",
+    ):
+        assert np.all(np.isnan(getattr(failed, name)))
+    assert all(np.all(np.isnan(values)) for values in failed.components.values())
+    assert all(
+        np.all(np.isnan(values))
+        for values in failed.lsf_state.coefficients.values()
+    )
+
+    output = tmp_path / "solved_and_failed_input.fits"
+    results_to_fits([solved, failed], output)
+    with fits.open(output, memmap=False) as hdul:
+        assert hdul["META"].data[1]["fit_status"].strip() == "failed_input"
+        assert np.all(np.isnan(hdul["BESTFIT_LSF"].data[1]))

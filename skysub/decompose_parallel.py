@@ -106,6 +106,10 @@ _PWV_FALLBACK_REPORTED = False
 # Match lvmdrp.functions.fluxCalMethod.DEFAULT_PWV for invalid or missing PWV_MED.
 DRP_DEFAULT_PWV_MM = 15.0
 
+
+class _InvalidAirmassError(ValueError):
+    """Known bad-coordinate input that should fail only its own row."""
+
 FIT_MODEL_SUFFIXES = {
     "baseline": "",
     "lsf-surface-iterative": "_lsf_surface_iterative",
@@ -1101,8 +1105,10 @@ def _telluric_decomposer(kind, row_index):
         np.isfinite(value) and value > 0.0
         for value in (sci_airmass, source_airmass)
     ):
-        raise ValueError(
-            f"Telluric fit requires positive finite META airmass values at row {row_index}"
+        raise _InvalidAirmassError(
+            "invalid_airmass: "
+            f"row={row_index}, role={kind}, sci_airmass={sci_airmass!r}, "
+            f"source_airmass={source_airmass!r}"
         )
 
     lsf_row = _sanitised_lsf_row(kind, row_index)
@@ -1621,7 +1627,10 @@ def _fit_worker_row(kind, idx, flux_row, ivar_row):
             verbose=False,
         )
     if _WORKER_FIT_MODEL in TELLURIC_FIT_MODELS:
-        decomposer = _telluric_decomposer(kind, idx)
+        try:
+            decomposer = _telluric_decomposer(kind, idx)
+        except _InvalidAirmassError as error:
+            return _WORKER_DECOMPOSER.failed_input_result(str(error))
         if _WORKER_FIT_MODEL in SPLIT_ZODI_TELLURIC_FIT_MODELS:
             _install_split_zodi_amplitude_prior(decomposer, kind, idx)
         return decomposer.fit(flux_row, ivar_row, verbose=False)

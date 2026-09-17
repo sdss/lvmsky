@@ -394,6 +394,9 @@ class SkyDecompLSFSpline2D(SkyDecompLSFSurfaceIterative):
         state.failure_reason = reason
         return state
 
+    def _failed_input_lsf_state(self, reason: str) -> LSFSurfaceState:
+        return self._nominal_state(reason)
+
     def _build_continuum_operator(self, state: LSFSurfaceState) -> sp.csr_matrix:
         widths = np.diff(native_pixel_edges(self.wave))
         blocks = []
