@@ -454,6 +454,9 @@ def test_batch_role_coordinate_and_lsf_contract(monkeypatch):
         "adam25k-telluric-split-zodi-lsf-spline2d": (
             "_adam25k_telluric_split_zodi_lsf_spline2d"
         ),
+        "palace-aijc-vnf-split-zodi-lsf-spline2d": (
+            "_palace_aijc_vnf_split_zodi_lsf_spline2d"
+        ),
         "palace-aijc-vnf-pca30-split-zodi-lsf-spline2d": (
             "_palace_aijc_vnf_pca30_split_zodi_lsf_spline2d"
         ),
@@ -489,6 +492,11 @@ def test_batch_role_coordinate_and_lsf_contract(monkeypatch):
             decompose_parallel.ADAM25K_SPLIT_ZODI_FIT_MODEL,
             "skysub.sky_decomp.telluric_corrected_lines."
             "SkyDecompAdam25kTelluricSplitZodiLSFSpline2D",
+        ),
+        (
+            decompose_parallel.PALACE_VNF_SPLIT_ZODI_FIT_MODEL,
+            "skysub.sky_decomp.residual_pca."
+            "SkyDecompPalaceAijcVNFSplitZodiLSFSpline2D",
         ),
         (
             decompose_parallel.PALACE_VNF_PCA30_SPLIT_ZODI_FIT_MODEL,

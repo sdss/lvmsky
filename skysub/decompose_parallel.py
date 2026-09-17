@@ -112,6 +112,9 @@ FIT_MODEL_SUFFIXES = {
     "adam25k-telluric-split-zodi-lsf-spline2d": (
         "_adam25k_telluric_split_zodi_lsf_spline2d"
     ),
+    "palace-aijc-vnf-split-zodi-lsf-spline2d": (
+        "_palace_aijc_vnf_split_zodi_lsf_spline2d"
+    ),
     "palace-aijc-vnf-pca30-split-zodi-lsf-spline2d": (
         "_palace_aijc_vnf_pca30_split_zodi_lsf_spline2d"
     ),
@@ -126,6 +129,7 @@ SPLIT_ZODI_FIT_MODELS = (SPLIT_ZODI_FIT_MODEL, SPLINE2D_SPLIT_ZODI_FIT_MODEL)
 ADAM25K_TELLURIC_FIT_MODEL = "adam25k-telluric-lsf-spline2d"
 PALACE_VNF_PCA30_FIT_MODEL = "palace-aijc-vnf-line-amplitude-pca30"
 ADAM25K_SPLIT_ZODI_FIT_MODEL = "adam25k-telluric-split-zodi-lsf-spline2d"
+PALACE_VNF_SPLIT_ZODI_FIT_MODEL = "palace-aijc-vnf-split-zodi-lsf-spline2d"
 PALACE_VNF_PCA30_SPLIT_ZODI_FIT_MODEL = (
     "palace-aijc-vnf-pca30-split-zodi-lsf-spline2d"
 )
@@ -152,6 +156,7 @@ PALACE_VNF_PCA30_SPLIT_ZODI_FIT_MODELS = (
 )
 SPLIT_ZODI_TELLURIC_FIT_MODELS = (
     *ADAM25K_SPLIT_ZODI_FIT_MODELS,
+    PALACE_VNF_SPLIT_ZODI_FIT_MODEL,
     *PALACE_VNF_PCA30_SPLIT_ZODI_FIT_MODELS,
 )
 TELLURIC_FIT_MODELS = (
@@ -888,6 +893,12 @@ def init_worker(
             )
 
             _WORKER_DECOMPOSER = SkyDecompAdam25kTelluricSplitZodiLSFSpline2D
+        elif fit_model == PALACE_VNF_SPLIT_ZODI_FIT_MODEL:
+            from skysub.sky_decomp.residual_pca import (
+                SkyDecompPalaceAijcVNFSplitZodiLSFSpline2D,
+            )
+
+            _WORKER_DECOMPOSER = SkyDecompPalaceAijcVNFSplitZodiLSFSpline2D
         else:
             from skysub.sky_decomp.residual_pca import (
                 SkyDecompPalaceAijcVNFSplitZodiLineAmplitudePCA30,
