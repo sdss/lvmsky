@@ -107,8 +107,22 @@ _PWV_FALLBACK_REPORTED = False
 DRP_DEFAULT_PWV_MM = 15.0
 
 
-class _InvalidAirmassError(ValueError):
+class _FailedInputError(ValueError):
+    """Known bad input that must fail only its own row, not the whole chunk.
+
+    Every subclass is caught by `_fit_worker_row` and turned into a
+    same-schema NaN row through `failed_input_result`, so the row is recorded
+    with `fit_status=failed_input` and its reason instead of aborting the
+    worker.
+    """
+
+
+class _InvalidAirmassError(_FailedInputError):
     """Known bad-coordinate input that should fail only its own row."""
+
+
+class _UnusableLSFError(_FailedInputError):
+    """A row whose detector LSF has no pixel `_sanitised_lsf_row` can use."""
 
 FIT_MODEL_SUFFIXES = {
     "baseline": "",
@@ -1117,10 +1131,15 @@ def _telluric_decomposer(kind, row_index, *, schema_only=False):
         sci_airmass = source_airmass = 1.0
 
     lsf_row = _sanitised_lsf_row(kind, row_index)
+    if lsf_row is None and not schema_only:
+        reason = _unusable_lsf_reason(kind, row_index)
+        _report_unusable_lsf(kind, row_index, reason)
+        raise _UnusableLSFError(reason)
     if lsf_row is None:
-        raise ValueError(
-            f"row {row_index} ({kind}) has no finite positive LSF pixel"
-        )
+        # Construct only the result schema; every fitted value returned below
+        # is replaced by NaN, so this placeholder LSF -- a flat 1 A FWHM, the
+        # right order for LVM -- is never scientific data.
+        lsf_row = np.ones_like(_WORKER_WAVE, dtype=np.float64)
     drp_transmission = calculate_drp_transmission(
         _WORKER_WAVE,
         lsf_row[None, :],
@@ -1139,6 +1158,54 @@ def _telluric_decomposer(kind, row_index, *, schema_only=False):
 
 
 _LSF_REPAIR_COUNT = {"rows": 0, "pixels": 0, "reported": False}
+_LSF_UNUSABLE_REPORTED = False
+
+
+def _lsf_row_defect(lsf):
+    """Classify one detector LSF row.
+
+    Returns the finite-positive mask and, when the row cannot be repaired, a
+    short reason.  `_sanitised_lsf_row` and `_unusable_lsf_reason` both go
+    through this so the rule that refuses a row and the reason recorded on
+    that row's failed result can never disagree.
+    """
+    good = np.isfinite(lsf) & (lsf > 0.0)
+    if good.all():
+        return good, None
+    if not good.any():
+        return good, "no finite positive pixel"
+    bad = np.flatnonzero(~good)
+    if np.any(bad == 0) or np.any(bad == lsf.size - 1):
+        return good, "a bad pixel at the array edge"
+    if np.any(~good[bad - 1]) or np.any(~good[bad + 1]):
+        return good, "adjacent bad pixels"
+    return good, None
+
+
+def _unusable_lsf_reason(kind, row_index):
+    """Reason string recorded on a row whose detector LSF cannot be used."""
+    lsf = np.asarray(_WORKER_LSF[kind][row_index], dtype=np.float64)
+    good, reason = _lsf_row_defect(lsf)
+    return (
+        f"unusable_lsf: row={row_index}, role={kind}, "
+        f"finite_positive_pixels={int(good.sum())}/{good.size}, "
+        f"{reason or 'usable'}"
+    )
+
+
+def _report_unusable_lsf(kind, row_index, reason):
+    """Warn once per worker; every such row carries its reason in the output."""
+    global _LSF_UNUSABLE_REPORTED
+    if _LSF_UNUSABLE_REPORTED:
+        return
+    _LSF_UNUSABLE_REPORTED = True
+    warnings.warn(
+        f"{reason}; this row is written as a failed_input NaN row.  Further "
+        f"unusable-LSF rows in this worker are silent -- each one carries "
+        f"fit_status=failed_input and its own reason in the output.",
+        RuntimeWarning,
+        stacklevel=2,
+    )
 
 
 def _sanitised_lsf_row(kind, row_index):
@@ -1158,16 +1225,11 @@ def _sanitised_lsf_row(kind, row_index):
     against a fabricated LSF curve.
     """
     lsf = np.asarray(_WORKER_LSF[kind][row_index], dtype=np.float64)
-    good = np.isfinite(lsf) & (lsf > 0.0)
+    good, reason = _lsf_row_defect(lsf)
+    if reason is not None:
+        return None
     if good.all():
         return lsf
-    if not good.any():
-        return None
-    bad = np.flatnonzero(~good)
-    if np.any(bad == 0) or np.any(bad == lsf.size - 1):
-        return None
-    if np.any(~good[bad - 1]) or np.any(~good[bad + 1]):
-        return None
     idx = np.arange(lsf.size)
     repaired = lsf.copy()
     repaired[~good] = np.interp(idx[~good], idx[good], lsf[good])
@@ -1620,10 +1682,12 @@ def _fit_worker_row(kind, idx, flux_row, ivar_row):
             ivar_row[_science_line_mask_for_row(idx)] = 0.0
         lsf_row = _sanitised_lsf_row(kind, idx)
         if lsf_row is None:
-            raise ValueError(
-                f"row {idx} ({kind}) has no finite positive LSF pixel; "
-                f"cannot fit with {MOON_ZODI_FIT_MODEL}"
-            )
+            # The physical predictor is driven by the detector LSF, so this
+            # row cannot be fitted at all.  Record it as a failed input, the
+            # same as an invalid airmass, rather than killing the chunk.
+            reason = _unusable_lsf_reason(kind, idx)
+            _report_unusable_lsf(kind, idx, reason)
+            return _WORKER_DECOMPOSER.failed_input_result(reason)
         return _WORKER_DECOMPOSER.fit(
             flux_row,
             ivar_row,
@@ -1634,7 +1698,7 @@ def _fit_worker_row(kind, idx, flux_row, ivar_row):
     if _WORKER_FIT_MODEL in TELLURIC_FIT_MODELS:
         try:
             decomposer = _telluric_decomposer(kind, idx)
-        except _InvalidAirmassError as error:
+        except _FailedInputError as error:
             schema = _telluric_decomposer(kind, idx, schema_only=True)
             return schema.failed_input_result(str(error))
         if _WORKER_FIT_MODEL in SPLIT_ZODI_TELLURIC_FIT_MODELS:

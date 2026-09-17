@@ -727,6 +727,205 @@ def test_invalid_airmass_marks_only_that_row_failed(monkeypatch):
         )
 
 
+def test_lsf_row_defect_classifies_what_can_and_cannot_be_repaired():
+    clean = np.ones(6)
+    good, reason = decompose_parallel._lsf_row_defect(clean)
+    assert reason is None and good.all()
+
+    # One isolated interior bad pixel is repairable, so no reason is given.
+    repairable = np.array([1.0, 1.0, 0.0, 1.0, 1.0, 1.0])
+    good, reason = decompose_parallel._lsf_row_defect(repairable)
+    assert reason is None and not good.all()
+
+    for row, expected in (
+        (np.zeros(6), "no finite positive pixel"),
+        (np.full(6, np.nan), "no finite positive pixel"),
+        (np.array([0.0, 1.0, 1.0, 1.0, 1.0, 1.0]), "a bad pixel at the array edge"),
+        (np.array([1.0, 1.0, 1.0, 1.0, 1.0, -1.0]), "a bad pixel at the array edge"),
+        (np.array([1.0, 1.0, 0.0, 0.0, 1.0, 1.0]), "adjacent bad pixels"),
+    ):
+        _good, reason = decompose_parallel._lsf_row_defect(row)
+        assert reason == expected, row
+
+
+def test_unusable_lsf_marks_only_that_row_failed(monkeypatch):
+    """A row with no usable detector LSF must fail alone, with NaN coefficients.
+
+    `_sanitised_lsf_row` refuses to fabricate an LSF curve for such a row, and
+    the telluric decomposition cannot be constructed without one.  That used
+    to raise out of `_fit_worker_row` and kill the whole chunk; it must instead
+    produce a same-schema failed_input row, exactly as an invalid airmass does.
+    """
+    from skysub.sky_decomp import telluric_corrected_lines
+
+    dtype = [
+        ("pwv_med", "f8"),
+        ("sci_airmass", "f8"),
+        ("skye_airmass", "f8"),
+        ("skyw_airmass", "f8"),
+        ("sky_near_label", "U8"),
+        ("sky_far_label", "U8"),
+    ]
+    meta = np.array(
+        [(4.2, 1.3, 1.4, 1.5, "SkyW", "SkyE")] * 2,
+        dtype=dtype,
+    )
+    reasons = []
+    fitted_rows = []
+    transmission_lsf = []
+    sentinel = object()
+    fitted = object()
+
+    class TemplateDecomposer:
+        def __init__(self, model_wave, **kwargs):
+            self.kwargs = kwargs
+
+        def failed_input_result(self, reason):
+            reasons.append(reason)
+            return sentinel
+
+        def fit(self, flux, ivar, **kwargs):
+            fitted_rows.append(np.asarray(flux).copy())
+            return fitted
+
+    def calculate_transmission(wave, lsf, pwv, airmass, calculator):
+        transmission_lsf.append(np.asarray(lsf).copy())
+        return np.ones_like(wave)
+
+    monkeypatch.setattr(
+        telluric_corrected_lines,
+        "calculate_drp_transmission",
+        calculate_transmission,
+    )
+    monkeypatch.setattr(decompose_parallel, "_WORKER_DECOMPOSER", TemplateDecomposer)
+    monkeypatch.setattr(
+        decompose_parallel,
+        "_WORKER_FIT_MODEL",
+        decompose_parallel.PALACE_VNF_SPLIT_ZODI_FIT_MODEL,
+    )
+    monkeypatch.setattr(decompose_parallel, "_WORKER_META", meta)
+    monkeypatch.setattr(decompose_parallel, "_WORKER_WAVE", np.arange(3.0))
+    # Row 0 has no usable LSF pixel at all; row 1 is clean.
+    monkeypatch.setattr(
+        decompose_parallel,
+        "_WORKER_LSF",
+        {"sci": np.array([[0.0, 0.0, 0.0], [1.0, 1.0, 1.0]])},
+    )
+    monkeypatch.setattr(decompose_parallel, "_WORKER_TELLURIC_CALCULATOR", object())
+    monkeypatch.setattr(decompose_parallel, "_WORKER_DECOMPOSER_KWARGS", {})
+    monkeypatch.setattr(decompose_parallel, "_WORKER_SCIENCE_LINE_MASK", None)
+    monkeypatch.setattr(decompose_parallel, "_LSF_UNUSABLE_REPORTED", False)
+    # The geometry prior is exercised elsewhere; stub it so the clean row below
+    # reaches `fit` without needing the full META geometry columns.
+    monkeypatch.setattr(
+        decompose_parallel,
+        "_install_split_zodi_amplitude_prior",
+        lambda decomposer, kind, idx: None,
+    )
+
+    with pytest.warns(RuntimeWarning, match="unusable_lsf"):
+        result = decompose_parallel._fit_worker_row(
+            "sci", 0, np.ones(3), np.ones(3)
+        )
+
+    assert result is sentinel
+    assert reasons == [
+        "unusable_lsf: row=0, role=sci, finite_positive_pixels=0/3, "
+        "no finite positive pixel"
+    ]
+    # The schema-only construction still needs a positive LSF to reach the
+    # result shape; it must be a placeholder, never the row's own values.
+    assert transmission_lsf and np.all(transmission_lsf[0] > 0.0)
+    assert not fitted_rows
+
+    # The next row is untouched by the failure and is fitted normally.
+    assert decompose_parallel._fit_worker_row(
+        "sci", 1, np.full(3, 2.0), np.ones(3)
+    ) is fitted
+    assert len(reasons) == 1
+
+
+def test_unusable_lsf_marks_only_that_row_failed_for_moon_zodi(monkeypatch):
+    dtype = [
+        ("expnum", "i8"),
+        ("date_obs", "U30"),
+        ("sci_ra", "f8"),
+        ("sci_dec", "f8"),
+        ("sky_near_ra", "f8"),
+        ("sky_near_dec", "f8"),
+        ("sky_far_ra", "f8"),
+        ("sky_far_dec", "f8"),
+    ]
+    meta = np.zeros(1, dtype=dtype)
+    reasons = []
+    sentinel = object()
+
+    class TemplateDecomposer:
+        def failed_input_result(self, reason):
+            reasons.append(reason)
+            return sentinel
+
+        def fit(self, *args, **kwargs):
+            raise AssertionError("an unusable-LSF row must never be fitted")
+
+    monkeypatch.setattr(decompose_parallel, "_WORKER_DECOMPOSER", TemplateDecomposer())
+    monkeypatch.setattr(
+        decompose_parallel, "_WORKER_FIT_MODEL", decompose_parallel.MOON_ZODI_FIT_MODEL
+    )
+    monkeypatch.setattr(decompose_parallel, "_WORKER_META", meta)
+    monkeypatch.setattr(decompose_parallel, "_WORKER_WAVE", np.arange(4.0))
+    monkeypatch.setattr(
+        decompose_parallel,
+        "_WORKER_LSF",
+        {"sci": np.array([[1.0, 0.0, 0.0, 1.0]])},
+    )
+    monkeypatch.setattr(decompose_parallel, "_WORKER_SCIENCE_LINE_MASK", None)
+    monkeypatch.setattr(decompose_parallel, "_LSF_UNUSABLE_REPORTED", False)
+
+    with pytest.warns(RuntimeWarning, match="unusable_lsf"):
+        result = decompose_parallel._fit_worker_row(
+            "sci", 0, np.ones(4), np.ones(4)
+        )
+
+    assert result is sentinel
+    assert reasons == [
+        "unusable_lsf: row=0, role=sci, finite_positive_pixels=2/4, "
+        "adjacent bad pixels"
+    ]
+
+
+def test_failed_input_result_is_all_nan_for_an_unusable_lsf_row():
+    """The recorded row must carry NaN coefficients, not a fabricated fit."""
+    from skysub.sky_decomp.lsf_surface_iterative import (
+        LSFSurfaceIterativeConfig,
+        SkyDecompLSFSurfaceIterative,
+    )
+    from skysub.sky_decomp.moon_zodi_model import DEFAULT_DATA_ROOT
+    from skysub.sky_decomp.result_io import FAILED_INPUT_FIT_STATUS
+
+    wave = np.linspace(3600.0, 9800.0, 400)
+    model = SkyDecompLSFSurfaceIterative(
+        wave,
+        base_dir=DEFAULT_DATA_ROOT,
+        lsf_sigma=0.5,
+        moon_smooth_lambda=0.1,
+        moon_interline_boost=0.0,
+        config=LSFSurfaceIterativeConfig(n_refinement_cycles=1),
+    )
+    reason = "unusable_lsf: row=5166, role=sci, finite_positive_pixels=0/400, "\
+             "no finite positive pixel"
+    result = model.failed_input_result(reason)
+
+    assert result.fit_status == FAILED_INPUT_FIT_STATUS
+    assert reason in result.fit_summary
+    assert result.coef.shape == (len(result.design_names),)
+    for values in (result.coef, result.coef_err, result.bestfit, result.resid):
+        assert np.all(np.isnan(values))
+    for name, component in result.components.items():
+        assert np.all(np.isnan(component)), name
+    assert np.isnan(result.r2) and np.isnan(result.reduced_chi2)
+
+
 def test_batch_preserves_placeholder_and_propagates_unexpected_errors(monkeypatch):
     dtype = [
         ("expnum", "i8"),
