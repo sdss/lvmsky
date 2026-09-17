@@ -657,6 +657,8 @@ def test_telluric_cli_models_use_role_lsf_pwv_and_airmass(
 
 
 def test_invalid_airmass_marks_only_that_row_failed(monkeypatch):
+    from skysub.sky_decomp import telluric_corrected_lines
+
     dtype = [
         ("pwv_med", "f8"),
         ("sci_airmass", "f8"),
@@ -667,20 +669,42 @@ def test_invalid_airmass_marks_only_that_row_failed(monkeypatch):
     ]
     meta = np.array([(4.2, -999.9, 1.4, 1.5, "SkyW", "SkyE")], dtype=dtype)
     reasons = []
+    constructor_calls = []
+    transmission_airmasses = []
     sentinel = object()
 
     class TemplateDecomposer:
+        def __init__(self, model_wave, **kwargs):
+            constructor_calls.append((model_wave.copy(), kwargs))
+
         def failed_input_result(self, reason):
             reasons.append(reason)
             return sentinel
 
-    monkeypatch.setattr(decompose_parallel, "_WORKER_DECOMPOSER", TemplateDecomposer())
+    def calculate_transmission(wave, lsf, pwv, airmass, calculator):
+        transmission_airmasses.append(airmass)
+        return np.ones_like(wave)
+
+    monkeypatch.setattr(
+        telluric_corrected_lines,
+        "calculate_drp_transmission",
+        calculate_transmission,
+    )
+    monkeypatch.setattr(decompose_parallel, "_WORKER_DECOMPOSER", TemplateDecomposer)
     monkeypatch.setattr(
         decompose_parallel,
         "_WORKER_FIT_MODEL",
         decompose_parallel.PALACE_VNF_SPLIT_ZODI_FIT_MODEL,
     )
     monkeypatch.setattr(decompose_parallel, "_WORKER_META", meta)
+    monkeypatch.setattr(decompose_parallel, "_WORKER_WAVE", np.arange(3.0))
+    monkeypatch.setattr(
+        decompose_parallel,
+        "_WORKER_LSF",
+        {"sci": np.ones((1, 3))},
+    )
+    monkeypatch.setattr(decompose_parallel, "_WORKER_TELLURIC_CALCULATOR", object())
+    monkeypatch.setattr(decompose_parallel, "_WORKER_DECOMPOSER_KWARGS", {})
     monkeypatch.setattr(decompose_parallel, "_WORKER_SCIENCE_LINE_MASK", None)
 
     result = decompose_parallel._fit_worker_row(
@@ -692,6 +716,8 @@ def test_invalid_airmass_marks_only_that_row_failed(monkeypatch):
         "invalid_airmass: row=0, role=sci, "
         "sci_airmass=-999.9, source_airmass=-999.9"
     ]
+    assert transmission_airmasses == [1.0]
+    assert constructor_calls[0][1]["source_airmass"] == 1.0
 
     meta["sci_airmass"] = 1.3
     meta["sky_near_label"] = "unknown"

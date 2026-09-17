@@ -1061,7 +1061,7 @@ def _moon_zodi_observation(kind, row_index):
     )
 
 
-def _telluric_decomposer(kind, row_index):
+def _telluric_decomposer(kind, row_index, *, schema_only=False):
     global _PWV_FALLBACK_REPORTED
 
     from skysub.sky_decomp.telluric_corrected_lines import calculate_drp_transmission
@@ -1101,15 +1101,20 @@ def _telluric_decomposer(kind, row_index):
         if airmass_column is None:
             raise ValueError(f"Unknown {label_column} value: {label!r}")
         source_airmass = float(row[airmass_column])
-    if not all(
+    invalid_airmass = not all(
         np.isfinite(value) and value > 0.0
         for value in (sci_airmass, source_airmass)
-    ):
+    )
+    if invalid_airmass and not schema_only:
         raise _InvalidAirmassError(
             "invalid_airmass: "
             f"row={row_index}, role={kind}, sci_airmass={sci_airmass!r}, "
             f"source_airmass={source_airmass!r}"
         )
+    if invalid_airmass:
+        # Construct only the result schema; every fitted value returned below
+        # is replaced by NaN, so this neutral airmass is never scientific data.
+        sci_airmass = source_airmass = 1.0
 
     lsf_row = _sanitised_lsf_row(kind, row_index)
     if lsf_row is None:
@@ -1630,7 +1635,8 @@ def _fit_worker_row(kind, idx, flux_row, ivar_row):
         try:
             decomposer = _telluric_decomposer(kind, idx)
         except _InvalidAirmassError as error:
-            return _WORKER_DECOMPOSER.failed_input_result(str(error))
+            schema = _telluric_decomposer(kind, idx, schema_only=True)
+            return schema.failed_input_result(str(error))
         if _WORKER_FIT_MODEL in SPLIT_ZODI_TELLURIC_FIT_MODELS:
             _install_split_zodi_amplitude_prior(decomposer, kind, idx)
         return decomposer.fit(flux_row, ivar_row, verbose=False)
