@@ -515,11 +515,14 @@ def test_batch_role_coordinate_and_lsf_contract(monkeypatch):
         ),
     ],
 )
+@pytest.mark.parametrize(("pwv_med", "expected_pwv"), [(4.2, 4.2), (-999.9, 15.0)])
 def test_telluric_cli_models_use_role_lsf_pwv_and_airmass(
     monkeypatch,
     tmp_path,
     fit_model,
     class_path,
+    pwv_med,
+    expected_pwv,
 ):
     from astropy.table import Table
     import lvmdrp.core.fluxcal
@@ -528,7 +531,7 @@ def test_telluric_cli_models_use_role_lsf_pwv_and_airmass(
     flux = np.array([[1.0, 2.0, 3.0]])
     meta = Table(
         {
-            "pwv_med": [4.2],
+            "pwv_med": [pwv_med],
             "sci_airmass": [1.3],
             "skye_airmass": [1.4],
             "skyw_airmass": [1.5],
@@ -592,6 +595,14 @@ def test_telluric_cli_models_use_role_lsf_pwv_and_airmass(
         "_install_split_zodi_amplitude_prior",
         lambda decomposer, kind, row_index: None,
     )
+    fallback_warnings = []
+    monkeypatch.setattr(
+        decompose_parallel.warnings,
+        "warn",
+        lambda message, category, stacklevel: fallback_warnings.append(
+            (str(message), category, stacklevel)
+        ),
+    )
     decompose_parallel.init_worker(
         wave,
         0.5,
@@ -615,10 +626,16 @@ def test_telluric_cli_models_use_role_lsf_pwv_and_airmass(
         decompose_parallel._WORKER_HDU.close()
 
     assert [call["source_airmass"] for call in constructor_calls] == [1.3, 1.5, 1.4]
-    assert all(call["pwv_mm"] == 4.2 for call in constructor_calls)
+    assert all(call["pwv_mm"] == expected_pwv for call in constructor_calls)
     assert all(np.array_equal(call["drp_transmission"], np.full(3, 0.9)) for call in constructor_calls)
     assert [float(values[0][0]) for values in transmissions] == [1.1, 1.2, 1.3]
-    assert all(values[1:] == (4.2, 1.3, True) for values in transmissions)
+    assert all(values[1:] == (expected_pwv, 1.3, True) for values in transmissions)
+    if pwv_med > 0.0:
+        assert fallback_warnings == []
+    else:
+        assert len(fallback_warnings) == 1
+        assert "using the LVM DRP default PWV=15.0 mm" in fallback_warnings[0][0]
+        assert fallback_warnings[0][1:] == (RuntimeWarning, 2)
     if fit_model in (
         decompose_parallel.PALACE_VNF_PCA30_FIT_MODEL,
         *decompose_parallel.PALACE_VNF_PCA30_SPLIT_ZODI_FIT_MODELS,

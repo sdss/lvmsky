@@ -31,6 +31,7 @@ import queue as queue_mod
 import sys
 import time
 import traceback
+import warnings
 from pathlib import Path
 from concurrent.futures import ProcessPoolExecutor, wait, FIRST_COMPLETED
 import multiprocessing as mp
@@ -100,6 +101,10 @@ _WORKER_SCIENCE_LINE_FWHM = None
 _WORKER_SCIENCE_LINE_CENTRE = True  # overwritten by init_worker
 _WORKER_COMPACT_CACHE_DIR = None
 _WORKER_RUN_FINGERPRINT = None
+_PWV_FALLBACK_REPORTED = False
+
+# Match lvmdrp.functions.fluxCalMethod.DEFAULT_PWV for invalid or missing PWV_MED.
+DRP_DEFAULT_PWV_MM = 15.0
 
 FIT_MODEL_SUFFIXES = {
     "baseline": "",
@@ -716,7 +721,8 @@ def init_worker(
         _WORKER_SCIENCE_LINE_FWHM, \
         _WORKER_SCIENCE_LINE_CENTRE, \
         _WORKER_COMPACT_CACHE_DIR, \
-        _WORKER_RUN_FINGERPRINT
+        _WORKER_RUN_FINGERPRINT, \
+        _PWV_FALLBACK_REPORTED
 
     _clamp_native_threads(1)
 
@@ -742,6 +748,7 @@ def init_worker(
     _WORKER_DECOMPOSER_KWARGS = {}
     _WORKER_COMPACT_CACHE_DIR = compact_cache_dir
     _WORKER_RUN_FINGERPRINT = run_fingerprint
+    _PWV_FALLBACK_REPORTED = False
     # Keep worker-local memmapped access to flux tables to avoid large IPC payloads.
     _WORKER_HDU = fits.open(data_file, memmap=True)
     _WORKER_PROGRESS_QUEUE = progress_queue
@@ -1051,12 +1058,13 @@ def _moon_zodi_observation(kind, row_index):
 
 
 def _telluric_decomposer(kind, row_index):
+    global _PWV_FALLBACK_REPORTED
+
     from skysub.sky_decomp.telluric_corrected_lines import calculate_drp_transmission
 
     row = _WORKER_META[row_index]
     names = set(_WORKER_META.dtype.names or ())
     required = {
-        "pwv_med",
         "sci_airmass",
         "skye_airmass",
         "skyw_airmass",
@@ -1067,7 +1075,18 @@ def _telluric_decomposer(kind, row_index):
     if missing:
         raise KeyError(f"Telluric fit requires META columns: {', '.join(missing)}")
 
-    pwv_mm = float(row["pwv_med"])
+    raw_pwv = float(row["pwv_med"]) if "pwv_med" in names else np.nan
+    pwv_mm = raw_pwv
+    if not np.isfinite(pwv_mm) or pwv_mm <= 0.0:
+        pwv_mm = DRP_DEFAULT_PWV_MM
+        if not _PWV_FALLBACK_REPORTED:
+            warnings.warn(
+                f"Invalid or missing META.pwv_med ({raw_pwv!r}) at row {row_index}; "
+                f"using the LVM DRP default PWV={DRP_DEFAULT_PWV_MM} mm",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            _PWV_FALLBACK_REPORTED = True
     sci_airmass = float(row["sci_airmass"])
     if kind == "sci":
         source_airmass = sci_airmass
@@ -1078,11 +1097,12 @@ def _telluric_decomposer(kind, row_index):
         if airmass_column is None:
             raise ValueError(f"Unknown {label_column} value: {label!r}")
         source_airmass = float(row[airmass_column])
-    physical_values = (pwv_mm, sci_airmass, source_airmass)
-    if not all(np.isfinite(value) and value > 0.0 for value in physical_values):
+    if not all(
+        np.isfinite(value) and value > 0.0
+        for value in (sci_airmass, source_airmass)
+    ):
         raise ValueError(
-            f"Telluric fit requires positive finite META.pwv_med and airmass values "
-            f"at row {row_index}"
+            f"Telluric fit requires positive finite META airmass values at row {row_index}"
         )
 
     lsf_row = _sanitised_lsf_row(kind, row_index)
