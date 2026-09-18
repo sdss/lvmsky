@@ -308,6 +308,110 @@ def _moon_model_augment_direct(triplet, *, wave, lsf_near, lsf_far, lsf_sci,
     return triplet
 
 
+# Fraction of a coefficient's training-set UPPER BOUND below which the fitted
+# or predicted value counts as switched off.  The decomposition gate
+# (`data.diffuse_zeroed_mask`) uses 1e-3 of the corpus MEDIAN instead; inference
+# has no corpus, but the ensemble carries `coef_upper_bound`, and the population
+# is bimodal (values ~1e-9 against ~1e-2), so any threshold in the empty middle
+# picks the same rows.  Checked against the median-based gate on the telluric
+# every10 corpus: identical row sets.
+PREDICTION_OFF_FRAC_OF_UPPER = 1.0e-6
+
+
+def _upper_bound_by_name(coef_names, coef_upper_bound, group_indices=None):
+    """Per-coefficient upper bounds keyed by NAME.
+
+    The ensemble stores them as ``{group: per-coefficient array}`` (moon 15,
+    zodi 5, continuum 3, mesospheric 358, ionospheric 4, ...), so the group's
+    own coefficient indices are needed to attach a bound to a name.  A plain
+    array over all coefficients is accepted too.
+    """
+    names = [str(n) for n in coef_names]
+    if coef_upper_bound is None:
+        return {}
+    if isinstance(coef_upper_bound, Mapping):
+        if not group_indices:
+            return {}
+        out = {}
+        for group, bounds in coef_upper_bound.items():
+            index = np.asarray(group_indices.get(group, ()), dtype=int).ravel()
+            values = np.asarray(bounds, dtype=np.float64).ravel()
+            if index.size != values.size:
+                continue
+            for position, value in zip(index, values):
+                if 0 <= int(position) < len(names):
+                    out[names[int(position)]] = float(value)
+        return out
+    values = np.asarray(coef_upper_bound, dtype=np.float64).ravel()
+    if values.size != len(names):
+        return {}
+    return {name: float(value) for name, value in zip(names, values)}
+
+
+def prediction_reliability(coef, coef_names, coef_upper_bound=None,
+                           group_indices=None,
+                           off_frac=PREDICTION_OFF_FRAC_OF_UPPER):
+    """Reliability bits computable from PREDICTED coefficients alone.
+
+    Production sky subtraction cannot drop a row, so the pathologies that the
+    corpus build gates away have to be reported instead -- see
+    `sky_decomp.reliability` for the bit values and the error/warning split.
+
+    Only the diffuse-collapse test is available without a basis: a reversal is a
+    property of the reconstructed moon and zodi CONTINUA, so it lives in
+    `reliability_from_components`, which the caller invokes with the components
+    it has already reconstructed to build the sky spectrum.  The constraint
+    warnings (anchor pinned, caps binding) have no meaning here at all: there is
+    no QP at prediction time.  They describe how the row's TRAINING TARGETS were
+    shaped, which is a property of the corpus, not of this prediction.
+
+    Returns ``(n_rows,)`` int32 bits, or -1 per row when the test could not be
+    evaluated at all (no usable upper-bound reference).  -1 rather than 0
+    deliberately: a test that did not run must not read as a clean row.
+    """
+    from sky_decomp import reliability as rel
+
+    coef_arr = np.atleast_2d(np.asarray(coef, dtype=np.float64))
+    names = [str(n) for n in coef_names]
+    if coef_arr.shape[1] != len(names):
+        raise ValueError(
+            f"coef has {coef_arr.shape[1]} columns for {len(names)} names")
+    bits = np.zeros(coef_arr.shape[0], dtype=np.int32)
+    upper = _upper_bound_by_name(names, coef_upper_bound, group_indices)
+    try:
+        index = [names.index(n) for n in data.DIFFUSE_COMPONENT_NAMES]
+    except ValueError:
+        return np.full(coef_arr.shape[0], -1, dtype=np.int32)
+    scale = np.array(
+        [upper.get(names[i], float("nan")) for i in index], dtype=np.float64)
+    if not np.all(np.isfinite(scale) & (scale > 0.0)):
+        return np.full(coef_arr.shape[0], -1, dtype=np.int32)
+    collapsed = np.all(
+        coef_arr[:, index] < float(off_frac) * scale[None, :], axis=1)
+    bits[collapsed] |= rel.RELIABILITY_DIFFUSE_COLLAPSED
+    return bits
+
+
+def reliability_from_components(components, wave):
+    """Reliability bits that need the RECONSTRUCTED components of one row.
+
+    Call this with the components dict already built to make the sky spectrum
+    (`data.reconstruct_with_lsf`) and OR the result into the ``reliability``
+    column from `predict_sky_from_minimal_inputs`.  Kept out of the predict
+    call so inference never has to build a basis it does not otherwise need.
+    """
+    from sky_decomp import reliability as rel
+
+    log_wave = np.log(np.asarray(wave, dtype=np.float64))
+    is_reversed, testable, info = rel.reversal_state(components, log_wave)
+    bits = 0
+    if is_reversed:
+        bits |= rel.RELIABILITY_REVERSED
+    if not testable:
+        bits |= rel.RELIABILITY_REVERSAL_UNTESTABLE
+    return np.int32(bits), info
+
+
 def predict_sky_from_minimal_inputs(
     ensemble: Mapping[str, Any],
     *,
@@ -498,6 +602,14 @@ def predict_sky_from_minimal_inputs(
     result = {
         "coef":         coef_mean,
         "coef_std":     coef_std,
+        # Per-row reliability bits, same vocabulary as the decomposition
+        # products (sky_decomp.reliability).  Coefficient-computable bits only;
+        # add the reversal bits with `reliability_from_components` once the
+        # caller has reconstructed the components.
+        "reliability":  prediction_reliability(
+            coef_mean, ensemble["coef_names"],
+            ensemble.get("coef_upper_bound"),
+            ensemble.get("group_indices")),
         "confidence":   confidence,
         "coef_names":   list(ensemble["coef_names"]),
         "triplet":      triplet,

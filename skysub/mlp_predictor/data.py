@@ -3022,6 +3022,9 @@ def diffuse_zeroed_mask(coef_by_arm, coef_names, frac=DIFFUSE_ZEROED_FRAC,
     moon-up against 50.1% of the corpus, i.e. they are dark time, where the two
     smooth continua are least separable.
 
+    The reference median is a NANmedian and an unusable one raises; see the
+    comment in the body for the 100%-of-rows failure that motivated both.
+
     Deliberately NOT the integrated amplitude ``c . B.sum(axis=1)``: that needs
     the basis matrix, and the two definitions agree on 99.99% of rows.  The
     threshold is not delicate either -- frac from 1e-4 to 0.05 selects 186 to
@@ -3038,11 +3041,30 @@ def diffuse_zeroed_mask(coef_by_arm, coef_names, frac=DIFFUSE_ZEROED_FRAC,
             f"diffuse components {DIFFUSE_COMPONENT_NAMES} not all present in "
             f"coef_names; cannot apply the diffuse-zeroed gate") from exc
     ref = np.asarray(coef_by_arm[reference], dtype=np.float64)[:, idx]
-    med = np.median(ref, axis=0)
-    med = np.where(np.isfinite(med) & (med > 0), med, np.inf)
+    # nanmedian, not median: a SINGLE failed row (a `failed_input` fit carries
+    # NaN coefficients) in the reference arm makes the plain median NaN, and the
+    # old guard turned a non-finite median into `inf` -- against which `c < inf`
+    # is True, so the gate silently flagged 100% of rows as collapsed.  The
+    # notebook path never hit it because the loaders drop non-finite coefficient
+    # rows before filtering, but an analysis run straight off the decomposition
+    # products does, and it looks like a total corpus collapse rather than a bug.
+    med = np.nanmedian(ref, axis=0)
+    unusable = ~(np.isfinite(med) & (med > 0.0))
+    if np.any(unusable):
+        raise RuntimeError(
+            f"diffuse-zeroed gate: reference arm {reference!r} has no usable "
+            f"median for "
+            f"{[DIFFUSE_COMPONENT_NAMES[i] for i in np.flatnonzero(unusable)]} "
+            f"(medians {np.asarray(med).tolist()}). Every row would be flagged "
+            f"as collapsed, so this is raised rather than silently dropping the "
+            f"whole sample -- the reference arm's diffuse block is all-zero or "
+            f"all-NaN")
     out = {}
     for arm, coef in coef_by_arm.items():
         c = np.asarray(coef, dtype=np.float64)[:, idx]
+        # A NaN coefficient compares False, so a failed row is reported as NOT
+        # zeroed; failed fits are dropped by the finite-coefficient gate, and
+        # calling them `collapsed diffuse` here would mislabel the failure.
         out[arm] = np.all(c < float(frac) * med[None, :], axis=1)
     return out
 

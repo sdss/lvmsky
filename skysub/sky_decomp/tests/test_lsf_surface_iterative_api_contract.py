@@ -332,7 +332,7 @@ def test_chunk_worker_preserves_indices_and_reports_each_row(monkeypatch):
     kind, results = decompose_parallel.fit_chunk_worker(("sci", 1, 3))
 
     assert kind == "sci"
-    assert results == [(1, 6.0), (2, 12.0)]
+    assert [(i, r) for i, r, _f in results] == [(1, 6.0), (2, 12.0)]
     assert progress == [1, 1]
 
 
@@ -343,7 +343,11 @@ def test_batch_run_restores_row_order_and_writes_three_outputs(monkeypatch, tmp_
 
         def result(self):
             kind, first, last = self.task
-            return kind, [(index, f"{kind}-{index}") for index in range(first, last)]
+            # (index, result, reliability_columns); None flags stands for a row
+            # served from the compact cache.
+            return kind, [
+                (index, f"{kind}-{index}", None) for index in range(first, last)
+            ]
 
     class Executor:
         def __init__(self, **kwargs):
@@ -410,7 +414,8 @@ def test_batch_run_restores_row_order_and_writes_three_outputs(monkeypatch, tmp_
     monkeypatch.setattr(
         decompose_parallel,
         "results_to_fits",
-        lambda results, path: written.append((results, path.name)),
+        lambda results, path, extra_meta=None: written.append(
+            (results, path.name, extra_meta)),
     )
 
     decompose_parallel.run(
@@ -424,8 +429,10 @@ def test_batch_run_restores_row_order_and_writes_three_outputs(monkeypatch, tmp_
         max_in_flight=2,
     )
 
+    # Every row here comes back with no reliability columns (the stub future
+    # reports None), so no extra META block is written at all.
     assert written == [
-        (["sci-0", "sci-1", "sci-2"], "input_decomp_sci.fits"),
-        (["sky1-0", "sky1-1", "sky1-2"], "input_decomp_sky1.fits"),
-        (["sky2-0", "sky2-1", "sky2-2"], "input_decomp_sky2.fits"),
+        (["sci-0", "sci-1", "sci-2"], "input_decomp_sci.fits", None),
+        (["sky1-0", "sky1-1", "sky1-2"], "input_decomp_sky1.fits", None),
+        (["sky2-0", "sky2-1", "sky2-2"], "input_decomp_sky2.fits", None),
     ]

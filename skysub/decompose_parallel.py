@@ -94,17 +94,82 @@ _WORKER_PROGRESS_QUEUE = None
 _WORKER_FIT_MODEL = "baseline"
 _WORKER_EXPOSURE_SECONDS = 900.0
 _WORKER_WAVE = None
+_WORKER_LOG_WAVE = None  # log(wave), for the reversal colour test
+_WORKER_REVERSAL_RETRY_BOUND = None  # None disables retry-on-reversal
 _WORKER_TELLURIC_CALCULATOR = None
 _WORKER_DECOMPOSER_KWARGS = {}
 _WORKER_SCIENCE_LINE_MASK = None
 _WORKER_SCIENCE_LINE_FWHM = None
 _WORKER_SCIENCE_LINE_CENTRE = True  # overwritten by init_worker
+_WORKER_FIT_PIXEL_WEIGHTS = False  # overwritten by init_worker
+_WORKER_FIT_PIXEL_WEIGHT_CLIP = None  # overwritten by init_worker
+_WORKER_SENS_ABS = None  # absolute sensitivity on _WORKER_WAVE, when weighting
 _WORKER_COMPACT_CACHE_DIR = None
 _WORKER_RUN_FINGERPRINT = None
 _PWV_FALLBACK_REPORTED = False
 
 # Match lvmdrp.functions.fluxCalMethod.DEFAULT_PWV for invalid or missing PWV_MED.
 DRP_DEFAULT_PWV_MM = 15.0
+
+# --- per-pixel fit weights -------------------------------------------------
+# ON BY DEFAULT since 2026-09-18; `--no-fit-pixel-weights` restores the old
+# behaviour.
+#
+# The fit USED to be run with ivar = 1 on every pixel -- an unweighted MASK with
+# 0 only in the science-line windows, not a variance, and not even
+# isfinite-filtered.  Every pixel counted equally, from the OH band heads to the
+# faint inter-band continuum, although their photon noise differs by more than an
+# order of magnitude.  The ML loss has used the absolute photon model since
+# 2026-09-09; this puts the FIT on the same footing, sharing the curves and the
+# variance floor through `sky_decomp.pixel_weights` so the two cannot drift apart.
+#
+# The weights are row-normalised to mean 1 over the good pixels, which means
+# exptime, the fibre count and FACTOR all cancel: only the SHAPE of
+# flux*sens(lambda) survives, plus the 5%-of-median variance floor.  That is
+# deliberate -- it keeps the overall scale exactly where the unweighted mask had
+# it, so `moon_smooth_lambda`, `zodi_smooth_lambda`, the LSF `roughness_fraction`
+# and `line_weight`, all tuned against ivar = 1, keep their meaning.
+#
+# MEASURED on the full 1447-row every10 telluric subset against the unweighted
+# products for the same rows, scored on the ABSOLUTE single-fibre photon chi2
+# (`reduced_chi2` becomes a weighted chi2 and its values stop being comparable
+# across this change -- judge runs on the absolute metric instead):
+#
+#     arm    full band     blue      rows improved
+#     sci      -11.6%     -1.9%       1421/1445
+#     near     -11.2%     -3.1%       1444/1445
+#     far      -14.0%     -3.7%       1438/1444
+#
+# The blue improves on every arm, so the fit is NOT trading it away for OH --
+# which is what the 3x red/blue weight ratio made me expect.  The cost is a
+# PARTITION one that chi2 cannot see: the deployed diffuse-zeroed gate
+# (mlp_predictor.data.diffuse_zeroed_mask) goes 42 -> 51 rows, 12 newly collapsed
+# against 3 recovered, i.e. -0.62% yield.  The diffuse block moves >0.1 dex on
+# 5.5% of rows and >0.3 dex on 2.6%; OH, moon and zodi barely move.  Fit status
+# is unchanged.
+#
+# Confirmed on a 1000-row run with retry-on-reversal also enabled: -11.1% sci /
+# -10.9% near / -14.8% far full band, blue -2.5/-1.8/-4.4%, fit status identical
+# to baseline.  NOTE the two changes interact -- the weights RAISE the first-fit
+# reversal count (sci 13 -> 17) by moving the moon/zodi partition, and the retry
+# absorbs it (43/43 recovered).  Turning the weights on WITHOUT the retry would
+# cost yield rather than save it.
+FIT_PIXEL_WEIGHTS = True
+# Bound on the weight dynamic range, as a factor about the row mean: `3.0` keeps
+# every weight inside [1/3, 3].  None leaves the raw photon weights, which span
+# ~600x within a row.  A 20-row probe had put the diffuse-collapse rate at 5%
+# and clipping at 3 removed it for half the chi2 gain; on the full 1447-row
+# subset the true rate is 0.83%, so the clip is NOT needed and defaults to off.
+FIT_PIXEL_WEIGHT_CLIP = None
+
+FIT_PIXEL_WEIGHT_FLOOR_FRAC = 0.05
+FIT_PIXEL_WEIGHT_EXPTIME_S = 900.0
+# Per-arm fibre-count column; only used when the weights are NOT normalised.
+FIT_PIXEL_WEIGHT_FIBRE_COLUMN = {
+    "sci": "fibers_sci_used",
+    "sky1": "fibers_sky_near_used",
+    "sky2": "fibers_sky_far_used",
+}
 
 
 class _FailedInputError(ValueError):
@@ -220,6 +285,39 @@ SPLIT_ZODI_COLOR_EXPONENT = SPLIT_ZODI_CONTINUUM_DEFAULTS["zodi_color_exponent"]
 # that is the baseline overfitting via the spline hole described above.
 SPLIT_ZODI_MOON_RATIO_BOUND = SPLIT_ZODI_CONTINUUM_DEFAULTS["moon_ratio_bound"]
 SPLIT_ZODI_ZODI_RATIO_BOUND = SPLIT_ZODI_CONTINUUM_DEFAULTS["zodi_ratio_bound"]
+
+# RETRY-ON-REVERSAL.  A reversal -- fitted moon continuum REDDER than the fitted
+# zodi, i.e. the two families have swapped roles -- is a MISLABELLED row, not a
+# hard one, so the corpus build has always simply dropped it (2.3% of every10
+# rows; 2.1% marginal past every other gate, ~220 rows on the full corpus).
+# Production cannot drop a row: it still owes a prediction.  And the rows are
+# recoverable, because a reversal is a SHAPE-labelling artefact rather than a
+# brightness error -- measured on the 18 reversed sci rows of
+# gaia-stars-mask-telluric every10, refitting with a tighter moon/zodi spline
+# shape bound (moon_ratio_bound = zodi_ratio_bound):
+#
+#     bound   un-reversed   median chi2 ratio vs deployed 0.70
+#     0.70       1/18            1.000   (control: reproduces the gate)
+#     0.85      18/18            1.028
+#     0.95      18/18            1.084
+#
+# All 18 recover at 0.85 for +2.8% median chi2 (worst single row +109%), and the
+# AMPLITUDES barely move -- moon share 0.434 -> 0.433, 0.568 -> 0.568 on typical
+# rows -- because the data barely distinguish the two branches
+# (rho(moon, zodi) = -0.948).  Only the shape assignment flips.
+#
+# Retrying per row is strictly better than tightening globally: the deployed 0.70
+# is kept for the 97.9% of rows that are fine and only the failures are
+# tightened.  The retry is recorded in the `reliability` column either way, so a
+# consumer can still tell a retried row from a clean one, and a row that stays
+# reversed is flagged rather than silently written.
+SPLIT_ZODI_REVERSAL_RETRY = True
+SPLIT_ZODI_REVERSAL_RETRY_BOUND = 0.85
+# Test geometry, matching mlp_predictor.data.split_zodi_reversal_diagnostics and
+# sky_decomp.reliability: only rows whose moon share of the moon+zodi continuum
+# lies inside [frac, 1 - frac] carry ordering information.
+SPLIT_ZODI_REVERSAL_MIN_COMPONENT_FRAC = 0.05
+SPLIT_ZODI_REVERSAL_MIN_SEPARATION = 0.0
 SPLIT_ZODI_AMP_PRIOR_TOL = SPLIT_ZODI_CONTINUUM_DEFAULTS["amp_prior_tol"]
 SPLIT_ZODI_ZODI_AMP_BOUND = SPLIT_ZODI_CONTINUUM_DEFAULTS["zodi_amp_bound"]
 
@@ -714,6 +812,11 @@ def init_worker(
     zodi_smooth_lambda=SPLIT_ZODI_SMOOTH_LAMBDA_DEFAULT,
     mask_science_lines=SCIENCE_LINE_MASK_ENABLED,
     centre_on_halpha=SCIENCE_LINE_MASK_CENTRE_ON_HALPHA,
+    fit_pixel_weights=FIT_PIXEL_WEIGHTS,
+    fit_pixel_weight_clip=FIT_PIXEL_WEIGHT_CLIP,
+    reversal_retry_bound=(
+        SPLIT_ZODI_REVERSAL_RETRY_BOUND if SPLIT_ZODI_REVERSAL_RETRY else None
+    ),
     diffuse_ratio_bound_dex=SPLIT_ZODI_DIFFUSE_RATIO_BOUND_DEX,
     diffuse_ratio_nominal=SPLIT_ZODI_DIFFUSE_RATIO_NOMINAL,
     diffuse_oh_centre_log10=SPLIT_ZODI_DIFFUSE_OH_CENTRE_LOG10,
@@ -738,6 +841,11 @@ def init_worker(
         _WORKER_SCIENCE_LINE_MASK, \
         _WORKER_SCIENCE_LINE_FWHM, \
         _WORKER_SCIENCE_LINE_CENTRE, \
+        _WORKER_FIT_PIXEL_WEIGHTS, \
+        _WORKER_FIT_PIXEL_WEIGHT_CLIP, \
+        _WORKER_LOG_WAVE, \
+        _WORKER_REVERSAL_RETRY_BOUND, \
+        _WORKER_SENS_ABS, \
         _WORKER_COMPACT_CACHE_DIR, \
         _WORKER_RUN_FINGERPRINT, \
         _PWV_FALLBACK_REPORTED
@@ -762,6 +870,8 @@ def init_worker(
     _WORKER_FIT_MODEL = fit_model
     _WORKER_EXPOSURE_SECONDS = float(exposure_seconds)
     _WORKER_WAVE = np.asarray(wave, dtype=np.float64)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        _WORKER_LOG_WAVE = np.log(_WORKER_WAVE)
     _WORKER_TELLURIC_CALCULATOR = None
     _WORKER_DECOMPOSER_KWARGS = {}
     _WORKER_COMPACT_CACHE_DIR = compact_cache_dir
@@ -970,6 +1080,34 @@ def init_worker(
     _WORKER_SCIENCE_LINE_MASK = None
     _WORKER_SCIENCE_LINE_FWHM = None
     _WORKER_SCIENCE_LINE_CENTRE = bool(centre_on_halpha)
+    _WORKER_REVERSAL_RETRY_BOUND = (
+        None if reversal_retry_bound is None else float(reversal_retry_bound)
+    )
+    _WORKER_FIT_PIXEL_WEIGHTS = bool(fit_pixel_weights)
+    _WORKER_FIT_PIXEL_WEIGHT_CLIP = (
+        None if fit_pixel_weight_clip is None else float(fit_pixel_weight_clip)
+    )
+    _WORKER_SENS_ABS = None
+    if _WORKER_FIT_PIXEL_WEIGHTS:
+        from skysub.sky_decomp.pixel_weights import absolute_sensitivity
+        try:
+            _WORKER_SENS_ABS = absolute_sensitivity(
+                wave, verbose=(worker_rank == 0))
+        except RuntimeError as error:
+            # Deliberately fatal rather than a silent fallback: the weights are
+            # ON by default now, and quietly producing an UNWEIGHTED corpus that
+            # everyone believes is weighted is the worse failure by far.  Say
+            # what to do about it.
+            raise RuntimeError(
+                f"{error}  The per-pixel photon weights are on by default and "
+                f"need the absolute sensitivity across the whole fitted grid. "
+                f"Pass --no-fit-pixel-weights to fit unweighted instead (the "
+                f"pre-2026-09-18 behaviour), or restrict the wavelength grid to "
+                f"the covered range.") from error
+        if worker_rank == 0:
+            print('[fit weights] per-pixel inverse-variance weighting ON '
+                  '(row-normalised to mean 1; reduced_chi2 is now a '
+                  'WEIGHTED chi2 and not comparable to earlier runs)')
     if mask_science_lines:
         # Use the DETECTOR LSF FWHM from the input FITS, median-combined over
         # rows and arms, not the scalar `lsf_sigma` argument -- that is a
@@ -1357,11 +1495,15 @@ def _compact_result_payload(kind, row_index, result):
     return payload
 
 
-def _save_compact_cache(kind, row_index, result=None, error=None):
+def _save_compact_cache(kind, row_index, result=None, error=None, flags=None):
     path = _compact_cache_path(kind, row_index)
     path.parent.mkdir(parents=True, exist_ok=True)
     if error is None:
         payload = _compact_result_payload(kind, row_index, result)
+        if flags is not None:
+            payload["reliability_json"] = np.asarray(
+                json.dumps({k: (int(v) if k == "reliability" else float(v))
+                            for k, v in flags.items()}, sort_keys=True))
     else:
         payload = {
             "fingerprint": np.asarray(_compact_row_fingerprint(kind, row_index)),
@@ -1662,18 +1804,251 @@ def _science_line_mask_for_row(row_index):
     return mask
 
 
+def _fit_ivar_row(kind, idx, flux_row):
+    """Per-pixel ivar for one row: photon weights when enabled, else all ones.
+
+    The all-ones fallback reproduces the historical behaviour exactly, so the
+    flag is the only thing that changes a fit.
+    """
+    if not _WORKER_FIT_PIXEL_WEIGHTS or _WORKER_SENS_ABS is None:
+        return np.ones_like(flux_row)
+    from skysub.sky_decomp.pixel_weights import pixel_ivar
+
+    n_fibres = None
+    if _WORKER_META is not None:
+        _col = FIT_PIXEL_WEIGHT_FIBRE_COLUMN.get(kind)
+        # In the worker META is a numpy recarray (not an astropy Table), so ask
+        # the dtype for the columns; accept either so the helper also works when
+        # called from a notebook with a Table.
+        _names = getattr(_WORKER_META, "colnames", None)
+        if _names is None:
+            _dt = getattr(_WORKER_META, "dtype", None)
+            _names = getattr(_dt, "names", None) or ()
+        if _col and _col in _names:
+            _v = float(np.asarray(_WORKER_META[_col])[int(idx)])
+            n_fibres = _v if np.isfinite(_v) and _v > 0.0 else None
+    # `normalise=True` makes n_fibres, exptime and FACTOR cancel; they are passed
+    # anyway so the call stays correct if the normalisation is ever turned off.
+    return pixel_ivar(
+        flux_row,
+        _WORKER_WAVE,
+        exptime=FIT_PIXEL_WEIGHT_EXPTIME_S,
+        n_fibres=n_fibres,
+        flux_scale=_WORKER_FACTOR,
+        floor_frac=FIT_PIXEL_WEIGHT_FLOOR_FRAC,
+        clip=_WORKER_FIT_PIXEL_WEIGHT_CLIP,
+        sens=_WORKER_SENS_ABS,
+        normalise=True,
+    )
+
+
+def _reliability_extra_meta(rows, n_rows):
+    """Per-row reliability columns for the writer, or None if none were built.
+
+    A row served from the compact cache carries no freshly computed flags, and a
+    missing flag must not read as a CLEAN row: those get `reliability = -1`
+    ("not evaluated") and NaN diagnostics, because the writer requires every row
+    to carry the same columns.
+    """
+    present = [entry for entry in rows if entry is not None]
+    if not present:
+        return None
+    filler = {
+        key: (np.int32(-1) if key == "reliability" else float("nan"))
+        for key in present[0]
+    }
+    return [dict(filler) if entry is None else entry for entry in rows[:n_rows]]
+
+
+# Scalars that were INSTALLED on the decomposer for a row, read back so the
+# binding tests compare against the bound the solve actually used rather than
+# against a module default that a CLI flag may have overridden.
+_CONSTRAINT_PRIOR_ATTRS = {
+    "moon_fraction": "_amp_prior_moon_fraction",
+    "zodi_total": "_amp_prior_zodi_total",
+    "diffuse_oh_amp": "_diffuse_oh_amp",
+    "amp_prior_tol": "amp_prior_tol",
+    "amp_prior_floor": "amp_prior_floor",
+    "zodi_amp_bound": "zodi_amp_bound",
+    "diffuse_oh_centre_log10": "diffuse_oh_centre_log10",
+    "diffuse_oh_bound_dex": "diffuse_oh_bound_dex",
+    "diffuse_oh_relax_dex": "diffuse_oh_relax_dex",
+    "diffuse_oh_gate_frac": "diffuse_oh_gate_frac",
+    "diffuse_ratio_nominal": "diffuse_ratio_nominal",
+    "diffuse_ratio_bound_dex": "diffuse_ratio_bound_dex",
+    "moon_ratio_bound": "moon_ratio_bound",
+    "zodi_ratio_bound": "zodi_ratio_bound",
+}
+
+
+def _constraint_prior(decomposer):
+    if decomposer is None:
+        return {}
+    return {
+        key: getattr(decomposer, attribute, None)
+        for key, attribute in _CONSTRAINT_PRIOR_ATTRS.items()
+    }
+
+
+def _coef_blocks(result):
+    """Moon and Zodi spline coefficients, for the adjacent-knot bound test."""
+    names = [str(n) for n in (getattr(result, "design_names", None) or ())]
+    coef = np.asarray(getattr(result, "coef", ()), dtype=np.float64).ravel()
+    if not names or coef.size != len(names):
+        return {}
+    blocks = {}
+    for family, prefix in (("moon", "Moon_bs"), ("zodi", "Zodi_bs")):
+        index = [i for i, n in enumerate(names) if n.startswith(prefix)]
+        if index:
+            blocks[family] = coef[np.asarray(index, dtype=int)]
+    return blocks
+
+
+def _row_colour_excess(row_index):
+    """dC for this exposure, from all three arms of the input stack.
+
+    A property of the ROW, not of the arm being fitted: the science fibre either
+    carries continuum the sky model cannot represent or it does not, and the
+    flag is set on every arm's row so a consumer joining on the row index sees
+    it regardless of which product it is reading.
+    """
+    from skysub.sky_decomp import reliability as rel
+
+    try:
+        sci = _WORKER_FLUX["sci"][int(row_index)]
+        near = _WORKER_FLUX["sky1"][int(row_index)]
+        far = _WORKER_FLUX["sky2"][int(row_index)]
+    except (KeyError, IndexError, TypeError):
+        return float("nan")
+    if _WORKER_WAVE is None:
+        return float("nan")
+    return rel.sci_colour_excess(sci, near, far, _WORKER_WAVE)
+
+
+def _reliability_flags(result, retried=False, retry_bound=float("nan"),
+                       was_reversed=False, decomposer=None, ivar=None,
+                       row_index=None):
+    """Per-row reliability columns for one finished fit.
+
+    Computed here rather than in the writer because only the fitter knows
+    whether a retry was run and which bounds were installed, and the result
+    dataclasses use `slots=True` so nothing can be attached to them -- the
+    columns travel as `extra_meta`.
+
+    ERROR bits say the coefficients do not describe what their names say;
+    WARNING bits say a constraint shaped the fit.  See `sky_decomp.reliability`.
+    """
+    from skysub.sky_decomp import reliability as rel
+
+    bits = 0
+    info = {"moon_slope": float("nan"), "zodi_slope": float("nan"),
+            "separation": float("nan"), "moon_frac": float("nan")}
+    constraint_info = {}
+    excess = float("nan") if row_index is None else _row_colour_excess(row_index)
+    if np.isfinite(excess) and excess > rel.SCI_COLOUR_EXCESS_MAX:
+        bits |= rel.RELIABILITY_SCI_COLOUR_EXCESS
+    if str(getattr(result, "fit_status", "")) != "Solved":
+        bits |= rel.RELIABILITY_FIT_FAILED
+    else:
+        components = getattr(result, "components", None) or {}
+        is_reversed, testable, info = rel.reversal_state(
+            components, _WORKER_LOG_WAVE,
+            min_component_frac=SPLIT_ZODI_REVERSAL_MIN_COMPONENT_FRAC,
+            min_separation=SPLIT_ZODI_REVERSAL_MIN_SEPARATION)
+        if is_reversed:
+            bits |= rel.RELIABILITY_REVERSED
+        if not testable:
+            bits |= rel.RELIABILITY_REVERSAL_UNTESTABLE
+        if rel.diffuse_collapsed(components,
+                                 getattr(result, "bestfit_lsf", None)):
+            bits |= rel.RELIABILITY_DIFFUSE_COLLAPSED
+        if retried:
+            bits |= rel.RELIABILITY_REVERSAL_RETRIED
+            if was_reversed and not is_reversed:
+                bits |= rel.RELIABILITY_REVERSAL_RECOVERED
+        if decomposer is not None:
+            good = None if ivar is None else (np.asarray(ivar) > 0.0)
+            constraint_bits, constraint_info = rel.constraint_bits(
+                components, _constraint_prior(decomposer), good=good,
+                coef_blocks=_coef_blocks(result))
+            bits |= constraint_bits
+    return {
+        "reliability": np.int32(bits),
+        "reversal_separation": float(info["separation"]),
+        "reversal_moon_frac": float(info["moon_frac"]),
+        "reversal_retry_bound": float(retry_bound),
+        "sci_colour_excess": float(excess),
+        "moon_share": float(constraint_info.get("moon_share", float("nan"))),
+        "zodi_int": float(constraint_info.get("zodi_int", float("nan"))),
+        # The shape-bound BOOLEAN fires on ~100% of rows; this count (0 to 16 of
+        # 18 adjacent pairs) is what distinguishes a lightly shaped fit from one
+        # whose whole continuum sits on the bound.
+        "shape_bound_pairs": np.int32(
+            constraint_info.get("shape_bound_pairs", -1)),
+    }
+
+
+def _fit_split_zodi_with_reversal_retry(decomposer, flux_row, ivar_row):
+    """Fit; if the moon/zodi roles came out swapped, refit once tighter.
+
+    Returns ``(result, retried, retry_bound, was_reversed)``.  The bounds are
+    read by the solver through `getattr` at fit time (see
+    `sky_decomp/fit.py`, the ratio_rows block), so tightening them needs no
+    rebuild -- but the decomposer is reused for every row in this worker, so
+    they are restored in a `finally`.
+    """
+    from skysub.sky_decomp import reliability as rel
+
+    result = decomposer.fit(flux_row, ivar_row, verbose=False)
+    if _WORKER_REVERSAL_RETRY_BOUND is None:
+        return result, False, float("nan"), False
+    if str(getattr(result, "fit_status", "")) != "Solved":
+        return result, False, float("nan"), False
+    is_reversed, _testable, _info = rel.reversal_state(
+        getattr(result, "components", None) or {}, _WORKER_LOG_WAVE,
+        min_component_frac=SPLIT_ZODI_REVERSAL_MIN_COMPONENT_FRAC,
+        min_separation=SPLIT_ZODI_REVERSAL_MIN_SEPARATION)
+    if not is_reversed:
+        return result, False, float("nan"), False
+    bound = float(_WORKER_REVERSAL_RETRY_BOUND)
+    saved = (getattr(decomposer, "moon_ratio_bound", None),
+             getattr(decomposer, "zodi_ratio_bound", None))
+    try:
+        decomposer.moon_ratio_bound = bound
+        decomposer.zodi_ratio_bound = bound
+        retry = decomposer.fit(flux_row, ivar_row, verbose=False)
+    finally:
+        if saved[0] is not None:
+            decomposer.moon_ratio_bound = saved[0]
+        if saved[1] is not None:
+            decomposer.zodi_ratio_bound = saved[1]
+    # A retry that fails to solve is worse than a reversed-but-solved row, so
+    # keep the original and report it as reversed and not retried.
+    if str(getattr(retry, "fit_status", "")) != "Solved":
+        return result, False, float("nan"), True
+    return retry, True, bound, True
+
+
 def _fit_worker_row(kind, idx, flux_row, ivar_row):
+    """Fit one row.  Returns ``(result, reliability_columns)``."""
     if _WORKER_SCIENCE_LINE_MASK is not None:
         ivar_row[_science_line_mask_for_row(idx)] = 0.0
     if _WORKER_FIT_MODEL == "baseline":
-        return _WORKER_DECOMPOSER.fit(
+        result = _WORKER_DECOMPOSER.fit(
             flux_row, ivar_row, verbose=False, n_lsf_refits=3
         )
+        return result, _reliability_flags(result, row_index=idx)
     if _WORKER_FIT_MODEL == "lsf-surface-iterative":
-        return _WORKER_DECOMPOSER.fit(flux_row, ivar_row, verbose=False)
+        result = _WORKER_DECOMPOSER.fit(flux_row, ivar_row, verbose=False)
+        return result, _reliability_flags(result, row_index=idx)
     if _WORKER_FIT_MODEL in SPLIT_ZODI_FIT_MODELS:
         _install_split_zodi_amplitude_prior(_WORKER_DECOMPOSER, kind, idx)
-        return _WORKER_DECOMPOSER.fit(flux_row, ivar_row, verbose=False)
+        result, retried, bound, was_reversed = (
+            _fit_split_zodi_with_reversal_retry(
+                _WORKER_DECOMPOSER, flux_row, ivar_row))
+        return result, _reliability_flags(
+            result, retried, bound, was_reversed,
+            decomposer=_WORKER_DECOMPOSER, ivar=ivar_row, row_index=idx)
     if _WORKER_FIT_MODEL == MOON_ZODI_FIT_MODEL:
         # Invalid source pixels remain on the native grid and are excluded only
         # by zero inverse variance.
@@ -1687,23 +2062,34 @@ def _fit_worker_row(kind, idx, flux_row, ivar_row):
             # same as an invalid airmass, rather than killing the chunk.
             reason = _unusable_lsf_reason(kind, idx)
             _report_unusable_lsf(kind, idx, reason)
-            return _WORKER_DECOMPOSER.failed_input_result(reason)
-        return _WORKER_DECOMPOSER.fit(
+            result = _WORKER_DECOMPOSER.failed_input_result(reason)
+            return result, _reliability_flags(result, row_index=idx)
+        result = _WORKER_DECOMPOSER.fit(
             flux_row,
             ivar_row,
             observation=_moon_zodi_observation(kind, idx),
             detector_lsf_fwhm=lsf_row,
             verbose=False,
         )
+        return result, _reliability_flags(result, row_index=idx)
     if _WORKER_FIT_MODEL in TELLURIC_FIT_MODELS:
         try:
             decomposer = _telluric_decomposer(kind, idx)
         except _FailedInputError as error:
             schema = _telluric_decomposer(kind, idx, schema_only=True)
-            return schema.failed_input_result(str(error))
+            result = schema.failed_input_result(str(error))
+            return result, _reliability_flags(result, row_index=idx)
         if _WORKER_FIT_MODEL in SPLIT_ZODI_TELLURIC_FIT_MODELS:
             _install_split_zodi_amplitude_prior(decomposer, kind, idx)
-        return decomposer.fit(flux_row, ivar_row, verbose=False)
+            result, retried, bound, was_reversed = (
+                _fit_split_zodi_with_reversal_retry(
+                    decomposer, flux_row, ivar_row))
+            return result, _reliability_flags(
+                result, retried, bound, was_reversed,
+                decomposer=decomposer, ivar=ivar_row, row_index=idx)
+        result = decomposer.fit(flux_row, ivar_row, verbose=False)
+        return result, _reliability_flags(
+            result, decomposer=decomposer, ivar=ivar_row, row_index=idx)
     raise RuntimeError(f"Worker has unsupported fit model: {_WORKER_FIT_MODEL}")
 
 
@@ -1719,26 +2105,28 @@ def fit_chunk_worker(args):
         if _WORKER_COMPACT_CACHE_DIR is not None and _compact_cache_is_current(
             kind, idx
         ):
-            out.append((idx, {"cached": True}))
+            out.append((idx, {"cached": True}, None))
         else:
             flux_row = flux_chunk[j] * _WORKER_FACTOR
             try:
-                result = _fit_worker_row(
-                    kind, idx, flux_row, np.ones_like(flux_row)
+                result, flags = _fit_worker_row(
+                    kind, idx, flux_row, _fit_ivar_row(kind, idx, flux_row)
                 )
             except Exception as error:
                 if _WORKER_COMPACT_CACHE_DIR is None:
                     raise
                 _save_compact_cache(kind, idx, error=error)
                 out.append(
-                    (idx, {"cached": False, "error": f"{type(error).__name__}: {error}"})
+                    (idx,
+                     {"cached": False, "error": f"{type(error).__name__}: {error}"},
+                     None)
                 )
             else:
                 if _WORKER_COMPACT_CACHE_DIR is None:
-                    out.append((idx, result))
+                    out.append((idx, result, flags))
                 else:
-                    _save_compact_cache(kind, idx, result=result)
-                    out.append((idx, {"cached": False}))
+                    _save_compact_cache(kind, idx, result=result, flags=flags)
+                    out.append((idx, {"cached": False}, flags))
         if _WORKER_PROGRESS_QUEUE is not None:
             _WORKER_PROGRESS_QUEUE.put(1)
     return kind, out
@@ -1869,6 +2257,11 @@ def run(
     diffuse_oh_bound_dex=SPLIT_ZODI_DIFFUSE_OH_BOUND_DEX,
     mask_science_lines=SCIENCE_LINE_MASK_ENABLED,
     centre_on_halpha=SCIENCE_LINE_MASK_CENTRE_ON_HALPHA,
+    fit_pixel_weights=FIT_PIXEL_WEIGHTS,
+    fit_pixel_weight_clip=FIT_PIXEL_WEIGHT_CLIP,
+    reversal_retry_bound=(
+        SPLIT_ZODI_REVERSAL_RETRY_BOUND if SPLIT_ZODI_REVERSAL_RETRY else None
+    ),
     compact_only=False,
 ):
     base_dir, resolved_moon_zodi_data_root = resolve_runtime_data_roots(
@@ -1901,6 +2294,9 @@ def run(
             "diffuse_oh_bound_dex": diffuse_oh_bound_dex,
             "mask_science_lines": mask_science_lines,
             "centre_on_halpha": centre_on_halpha,
+            "fit_pixel_weights": fit_pixel_weights,
+            "fit_pixel_weight_clip": fit_pixel_weight_clip,
+            "reversal_retry_bound": reversal_retry_bound,
             "palace_suffix": palace_suffix,
             "palace_oh_suffix": palace_oh_suffix,
             "palace_diffuse_suffix": palace_diffuse_suffix,
@@ -1946,6 +2342,7 @@ def run(
 
     n_tasks = int(np.ceil(n_rows / chunk_size)) * 3
     results = {kind: [None] * n_rows for kind in ("sci", "sky1", "sky2")}
+    reliability = {kind: [None] * n_rows for kind in ("sci", "sky1", "sky2")}
     completed = 0
 
     t0 = time.perf_counter()
@@ -1995,6 +2392,9 @@ def run(
             float(zodi_smooth_lambda),
             bool(mask_science_lines),
             bool(centre_on_halpha),
+            bool(fit_pixel_weights),
+            None if fit_pixel_weight_clip is None else float(fit_pixel_weight_clip),
+            None if reversal_retry_bound is None else float(reversal_retry_bound),
             float(diffuse_ratio_bound_dex),
             diffuse_ratio_nominal,
             diffuse_oh_centre_log10,
@@ -2031,8 +2431,10 @@ def run(
             _drain_progress_queue()
             for future in done:
                 kind, chunk_results = future.result()
-                for idx, result in chunk_results:
+                for idx, result, flags in chunk_results:
                     results[kind][idx] = result
+                    if flags is not None:
+                        reliability[kind][idx] = flags
                 completed += 1
                 pbar.set_postfix(chunks=f"{completed}/{n_tasks}")
             _submit_until_full()
@@ -2059,7 +2461,9 @@ def run(
             )
         else:
             results_to_fits(
-                results[kind], output_dir / f"{stem}_decomp_{kind}{suffix}.fits"
+                results[kind],
+                output_dir / f"{stem}_decomp_{kind}{suffix}.fits",
+                extra_meta=_reliability_extra_meta(reliability[kind], n_rows),
             )
     return compact_provenance
 
@@ -2463,6 +2867,65 @@ def main():
         ),
     )
     parser.add_argument(
+        "--no-fit-pixel-weights",
+        action="store_true",
+        help=(
+            "Fit with ivar = 1 on every pixel (the historical unweighted mask) "
+            "instead of the absolute photon model, which is now the DEFAULT. "
+            "The default weighting uses the same sensitivity curves and "
+            "variance floor as the ML loss, vendored in "
+            "sky_decomp/data/sensitivity, row-normalised to mean 1 so exptime, "
+            "the fibre count and FACTOR cancel and every tuned regularisation "
+            "constant keeps its meaning; measured on 1447 rows it improves the "
+            "absolute photon chi2 by 11-14%% full band and 2-4%% in the blue "
+            "for -0.62%% yield through the diffuse-collapse gate. Use this flag "
+            "to reproduce a pre-2026-09-18 corpus, remembering that "
+            "reduced_chi2 is a weighted chi2 with the weights on and an "
+            "unweighted residual-per-pixel with them off, so its values are "
+            "not comparable between the two. See FIT_PIXEL_WEIGHTS."
+        ),
+    )
+    parser.add_argument(
+        "--fit-pixel-weight-clip",
+        type=float,
+        default=FIT_PIXEL_WEIGHT_CLIP,
+        metavar="FACTOR",
+        help=(
+            "Bound the fit weights to [1/FACTOR, FACTOR] about the row mean "
+            "(ignored with --no-fit-pixel-weights). The raw photon weights span "
+            "~600x within a row, enough for the fit to abandon a faint blue "
+            "component: FACTOR 3 stopped the one diffuse collapse seen in 20 "
+            "rows and kept half the chi2 gain (-5.8%% full band). Default: "
+            "unclipped."
+        ),
+    )
+    parser.add_argument(
+        "--no-reversal-retry",
+        action="store_true",
+        help=(
+            "Do not refit moon/zodi role-reversed rows with a tighter spline "
+            "shape bound. A reversal is a shape-labelling artefact, not a "
+            "brightness error, and the corpus build has simply DROPPED such "
+            "rows (2.3%% of every10; ~220 on the full corpus) -- which "
+            "production cannot do. Measured on 18 reversed rows, all 18 "
+            "recover at bound 0.85 for +2.8%% median chi2 with the amplitudes "
+            "essentially unchanged. Retried rows are flagged in the "
+            "reliability column either way. See SPLIT_ZODI_REVERSAL_RETRY."
+        ),
+    )
+    parser.add_argument(
+        "--reversal-retry-bound",
+        type=float,
+        default=SPLIT_ZODI_REVERSAL_RETRY_BOUND,
+        metavar="BETA",
+        help=(
+            "Moon/zodi adjacent-knot ratio bound used for the reversal retry "
+            "only (default %(default)s); every row that is not reversed keeps "
+            "the deployed SPLIT_ZODI_MOON_RATIO_BOUND. 0.95 also un-reverses "
+            "all 18 measured rows but costs +8.4%% chi2 against +2.8%% at 0.85."
+        ),
+    )
+    parser.add_argument(
         "--no-halpha-centring",
         action="store_true",
         help=(
@@ -2559,6 +3022,11 @@ def main():
             ),
             mask_science_lines=not args.no_science_line_mask,
             centre_on_halpha=not args.no_halpha_centring,
+            fit_pixel_weights=not args.no_fit_pixel_weights,
+            fit_pixel_weight_clip=args.fit_pixel_weight_clip,
+            reversal_retry_bound=(
+                None if args.no_reversal_retry else args.reversal_retry_bound
+            ),
             compact_only=args.compact_only,
         )
 

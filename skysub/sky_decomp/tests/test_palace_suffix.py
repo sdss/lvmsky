@@ -183,6 +183,9 @@ def test_parallel_worker_propagates_suffix_to_lsf_surface_model(monkeypatch):
         1.0,
         "input.fits",
         fit_model="lsf-surface-iterative",
+        # 2-pixel synthetic grid: outside the absolute-sensitivity coverage, and
+        # this test is about suffix propagation, not the photon weights.
+        fit_pixel_weights=False,
         palace_oh_suffix="_custom_oh",
         palace_diffuse_suffix="_custom_diffuse",
     )

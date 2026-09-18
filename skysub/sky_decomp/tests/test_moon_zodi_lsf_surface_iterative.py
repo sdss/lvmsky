@@ -610,6 +610,9 @@ def test_telluric_cli_models_use_role_lsf_pwv_and_airmass(
         2.0,
         input_path,
         fit_model=fit_model,
+        # 3-pixel synthetic grid, and this test is about the telluric kwargs
+        # rather than the photon weights (on by default since 2026-09-18).
+        fit_pixel_weights=False,
         n_zodi_spline_knots=3,
         zodi_smooth_lambda=0.25,
         diffuse_ratio_bound_dex=0.12,
@@ -621,7 +624,8 @@ def test_telluric_cli_models_use_role_lsf_pwv_and_airmass(
         for kind in ("sci", "sky1", "sky2"):
             returned_kind, rows = decompose_parallel.fit_chunk_worker((kind, 0, 1))
             assert returned_kind == kind
-            assert rows == [(0, len(constructor_calls))]
+            # fit_chunk_worker rows are (index, result, reliability_columns)
+            assert [(i, r) for i, r, _f in rows] == [(0, len(constructor_calls))]
     finally:
         decompose_parallel._WORKER_HDU.close()
 
@@ -707,7 +711,7 @@ def test_invalid_airmass_marks_only_that_row_failed(monkeypatch):
     monkeypatch.setattr(decompose_parallel, "_WORKER_DECOMPOSER_KWARGS", {})
     monkeypatch.setattr(decompose_parallel, "_WORKER_SCIENCE_LINE_MASK", None)
 
-    result = decompose_parallel._fit_worker_row(
+    result, _flags = decompose_parallel._fit_worker_row(
         "sci", 0, np.ones(3), np.ones(3)
     )
 
@@ -824,7 +828,7 @@ def test_unusable_lsf_marks_only_that_row_failed(monkeypatch):
     )
 
     with pytest.warns(RuntimeWarning, match="unusable_lsf"):
-        result = decompose_parallel._fit_worker_row(
+        result, _flags = decompose_parallel._fit_worker_row(
             "sci", 0, np.ones(3), np.ones(3)
         )
 
@@ -841,7 +845,7 @@ def test_unusable_lsf_marks_only_that_row_failed(monkeypatch):
     # The next row is untouched by the failure and is fitted normally.
     assert decompose_parallel._fit_worker_row(
         "sci", 1, np.full(3, 2.0), np.ones(3)
-    ) is fitted
+    )[0] is fitted
     assert len(reasons) == 1
 
 
@@ -883,7 +887,7 @@ def test_unusable_lsf_marks_only_that_row_failed_for_moon_zodi(monkeypatch):
     monkeypatch.setattr(decompose_parallel, "_LSF_UNUSABLE_REPORTED", False)
 
     with pytest.warns(RuntimeWarning, match="unusable_lsf"):
-        result = decompose_parallel._fit_worker_row(
+        result, _flags = decompose_parallel._fit_worker_row(
             "sci", 0, np.ones(4), np.ones(4)
         )
 
@@ -956,7 +960,8 @@ def test_batch_preserves_placeholder_and_propagates_unexpected_errors(monkeypatc
     monkeypatch.setattr(decompose_parallel, "_WORKER_SCIENCE_LINE_MASK", None)
     kind, rows = decompose_parallel.fit_chunk_worker(("sky2", 0, 2))
     assert kind == "sky2"
-    assert rows == [(0, sentinels[42]), (1, sentinels[43])]
+    assert [(i, r) for i, r, _f in rows] == [
+        (0, sentinels[42]), (1, sentinels[43])]
 
     class UnexpectedFailure(PlaceholderResult):
         def fit(self, *_args, **_kwargs):

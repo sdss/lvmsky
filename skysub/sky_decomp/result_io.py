@@ -666,8 +666,45 @@ def _validate_result_batch(results):
     return design_names, component_keys, all(has_lsf), all(has_moon_zodi)
 
 
-def results_to_fits(results, filename):
-    """Write a homogeneous batch of sky-decomposition results to FITS."""
+def extra_meta_columns(extra_meta, n_results, reserved=()):
+    """Validate per-row extra META entries and pivot them into columns.
+
+    ``extra_meta`` is a sequence of dicts aligned with the results, all sharing
+    one key set -- every row of a FITS column must exist, so a caller that
+    computes a flag for only some rows has to fill the rest explicitly (see
+    `decompose_parallel._reliability_extra_meta`, which writes -1 rather than
+    letting a missing flag read as a clean row).  ``None`` yields no columns.
+    """
+    if extra_meta is None:
+        return {}
+    extra_meta = list(extra_meta)
+    if len(extra_meta) != int(n_results):
+        raise ValueError(
+            f"extra_meta has {len(extra_meta)} entries for "
+            f"{int(n_results)} results")
+    key_sets = {tuple(sorted(entry)) for entry in extra_meta}
+    if len(key_sets) > 1:
+        raise ValueError(
+            f"extra_meta rows disagree on their columns: {sorted(key_sets)}")
+    columns = {}
+    for key in (key_sets.pop() if key_sets else ()):
+        if key in reserved:
+            raise ValueError(
+                f"extra_meta column {key!r} collides with a result field")
+        columns[key] = [entry[key] for entry in extra_meta]
+    return columns
+
+
+def results_to_fits(results, filename, extra_meta=None):
+    """Write a homogeneous batch of sky-decomposition results to FITS.
+
+    ``extra_meta`` optionally adds per-row META columns that do not live on the
+    result object -- the result dataclasses use ``slots=True``, so a caller
+    cannot attach anything to them.  It is a sequence aligned with ``results``
+    of dicts sharing one key set, which is how `decompose_parallel` carries the
+    `sky_decomp.reliability` flags (a decision made by the FITTER, e.g. whether
+    a reversal retry was run, and therefore not recoverable from the result).
+    """
     from astropy.io import fits
     from astropy.table import Table
 
@@ -689,6 +726,7 @@ def results_to_fits(results, filename):
         "o2_fit_elapsed_sec": [result.o2_fit_elapsed_sec for result in results],
         "o2_valid_frac": [result.o2_valid_frac for result in results],
     }
+    rows.update(extra_meta_columns(extra_meta, len(results), reserved=rows))
 
     def stack(attribute):
         return np.vstack([getattr(result, attribute) for result in results])
@@ -875,5 +913,6 @@ __all__ = [
     "load_lsf_surface_state",
     "load_moon_zodi_state",
     "results_to_fits",
+    "extra_meta_columns",
     "validate_moon_zodi_states",
 ]
