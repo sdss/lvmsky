@@ -205,6 +205,12 @@ print(f"  O2 template per arm ({ROW_LABEL}): "
       f"far={'VECTOR_O2' if _o2_vec_far is not None else 'zero'}, "
       f"sci={'VECTOR_O2' if _o2_vec_sci is not None else 'zero'}")
 
+# Telluric variant: per-row basis; see full_spectrum_batch_rmse for why.
+_telluric_for = globals().get('TELLURIC_ROW_FOR')
+_tel_sci  = None if _telluric_for is None else _telluric_for('sci',  int(idx_row))
+_tel_near = None if _telluric_for is None else _telluric_for('sky1', int(idx_row))
+_tel_far  = None if _telluric_for is None else _telluric_for('sky2', int(idx_row))
+
 comps_sci = reconstruct_with_lsf(
     wave=wave_row,
     coef=coef_pred_row,
@@ -213,6 +219,7 @@ comps_sci = reconstruct_with_lsf(
     n_zodi_spline_knots=N_ZODI_KNOTS,
     base_dir=base_dir_guess,
     o2_vector=_o2_vec_sci,
+    telluric=_tel_sci,
 )
 comps_near_from_near = reconstruct_with_lsf(
     wave=wave_row,
@@ -223,6 +230,7 @@ comps_near_from_near = reconstruct_with_lsf(
     base_dir=base_dir_guess,
     o2_vector=_o2_vec_near,
     coef_err=coef_err_near_row,
+    telluric=_tel_near,
 )
 comps_far_from_far = reconstruct_with_lsf(
     wave=wave_row,
@@ -233,6 +241,7 @@ comps_far_from_far = reconstruct_with_lsf(
     base_dir=base_dir_guess,
     o2_vector=_o2_vec_far,
     coef_err=coef_err_far_row,
+    telluric=_tel_far,
 )
 # Reconstruction of the observed sci spectrum from the fitted sci coefs, so panel 3
 # can separate the sky-decomposition fit residual (obs vs recon-from-sci-coef)
@@ -246,6 +255,7 @@ comps_sci_true = reconstruct_with_lsf(
     base_dir=base_dir_guess,
     o2_vector=_o2_vec_sci,
     coef_err=coef_err_sci_row,
+    telluric=_tel_sci,
 )
 
 flux_sci_pred_row = np.asarray(comps_sci["total"], dtype=np.float64) / FACTOR

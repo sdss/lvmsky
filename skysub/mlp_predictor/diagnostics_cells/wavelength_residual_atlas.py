@@ -199,6 +199,8 @@ with fits.open(EVERY10_INPUT) as hdul:
 _wave_ref_recon = wave_arr if wave_arr.ndim == 1 else wave_arr[int(sel_rows[0])]
 base_dir_guess = _infer_base_dir_for_reconstruction()
 
+from mlp_predictor.data import make_reconstruction_decomposer
+_telluric_for = globals().get('TELLURIC_ROW_FOR')
 _lsf_model = SkyDecompLSFSurfaceIterative(
     _wave_ref_recon, lsf_sigma=1.0, n_spline_knots=N_MOON_KNOTS,
     base_dir=base_dir_guess,
@@ -262,18 +264,26 @@ def _reconstruct_sci_total(coef_row, row_idx, lsf_sigma_fallback):
         _o2_row = _state_sci['o2_cube'][int(row_idx)]
         if np.isfinite(_o2_row).any() and float(np.nansum(np.abs(_o2_row))) > 0.0:
             _o2 = _o2_row
+    # Telluric variant: the basis is per row, so rebuild instead of reusing the
+    # hoisted model.  See full_spectrum_batch_rmse for the reasoning.
+    _tel = (None if _telluric_for is None
+            else _telluric_for('sci', int(row_idx)))
+    _mdl = (_lsf_model if _tel is None else make_reconstruction_decomposer(
+        _lsf_model.wave, n_spline_knots=N_MOON_KNOTS, base_dir=base_dir_guess,
+        split_zodi=SPLIT_ZODI, n_zodi_spline_knots=N_ZODI_KNOTS, telluric=_tel))
     if isinstance(_lsf_state, LSFSurfaceState):
-        _lsf_model._set_lsf_state(_lsf_state)
-        _mats = _lsf_model._assemble_refined_matrices()
+        _mdl._set_lsf_state(_lsf_state)
+        _mats = _mdl._assemble_refined_matrices()
         if _o2 is not None:
             _mats['o2'] = np.asarray(_o2, float).ravel()[None, :]
-        _comps = _lsf_model._components_from_coef(np.asarray(coef_row, float).ravel(), _mats)
+        _comps = _mdl._components_from_coef(np.asarray(coef_row, float).ravel(), _mats)
     else:
         # Rare fallback.
         _comps = reconstruct_with_lsf(
-            wave=_lsf_model.wave, coef=coef_row, lsf=lsf_sigma_fallback,
+            wave=_mdl.wave, coef=coef_row, lsf=lsf_sigma_fallback,
             n_spline_knots=N_MOON_KNOTS, base_dir=base_dir_guess, o2_vector=_o2,
-            split_zodi=SPLIT_ZODI, n_zodi_spline_knots=N_ZODI_KNOTS)
+            split_zodi=SPLIT_ZODI, n_zodi_spline_knots=N_ZODI_KNOTS,
+            telluric=_tel)
     _by_group = _group_components(_comps)
     _total = np.zeros_like(next(iter(_by_group.values())), dtype=np.float64)
     for _v in _by_group.values():

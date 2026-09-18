@@ -53,8 +53,17 @@ def infer_spline_knots(coef_names: list[str]) -> tuple[int, bool, int]:
 def wavelength_cache_matches_corpus(
     cache_path: Path,
     coef_names: list[str],
+    decomp_suffix: str | None = None,
 ) -> bool:
-    """Return True iff the cache at ``cache_path`` has the expected schema and coef names."""
+    """True iff the cache matches the schema, the coef names AND the basis.
+
+    ``decomp_suffix`` identifies WHICH decomposition basis the cached
+    wavelengths describe.  Names alone are not enough: every variant uses the
+    same 388 coefficient names, but the telluric fit groups OH differently and
+    its per-stick centroids differ from the split-zodi ones by a median 46.9 A.
+    A cache written before basis stamping has no suffix recorded and is
+    accepted, so delete it if it may have been copied between corpora.
+    """
 
     cache_path = Path(cache_path)
     if not cache_path.exists():
@@ -63,8 +72,13 @@ def wavelength_cache_matches_corpus(
         if "coef_names" not in c.files or "k_eff_a" not in c.files:
             return False
         cached = [str(x) for x in c["coef_names"]]
+        _have = (str(c["decomp_suffix"]) if "decomp_suffix" in c.files
+                 else None)
     corpus = [str(x) for x in coef_names]
-    return cached == corpus
+    if cached != corpus:
+        return False
+    _want = str(decomp_suffix or "")
+    return (not _want) or (_have is None) or (_have == _want)
 
 
 def populate_wavelength_cache(
@@ -78,6 +92,7 @@ def populate_wavelength_cache(
     palace_oh_suffix: str | None = None,
     palace_diffuse_suffix: str | None = None,
     verbose: bool = True,
+    decomp_suffix: str | None = None,
 ) -> tuple[np.ndarray, np.ndarray] | tuple[None, None]:
     """Idempotently populate the wavelength+k_eff cache; return the two arrays.
 
@@ -88,7 +103,7 @@ def populate_wavelength_cache(
     """
 
     cache_path = Path(cache_path)
-    if wavelength_cache_matches_corpus(cache_path, coef_names):
+    if wavelength_cache_matches_corpus(cache_path, coef_names, decomp_suffix):
         with np.load(cache_path, allow_pickle=True) as c:
             n = len(c["coef_names"])
             lam_ok = int(np.isfinite(c["wavelengths_a"]).sum())
@@ -111,7 +126,8 @@ def populate_wavelength_cache(
     if verbose:
         print(
             f"[wavelength-cache] populating for {len(coef_names)} coefs "
-            f"(one reconstruction call each, ~13 min total)..."
+            f"(read off the decomposer design, <1 s; the old per-coefficient "
+            f"reconstruction loop took ~13 min and is now only a fallback)..."
         )
     with fits.open(str(input_fits_for_basis)) as hdul:
         ext_names = [h.name for h in hdul]
@@ -127,6 +143,46 @@ def populate_wavelength_cache(
     if lsf_ref.ndim > 1:
         lsf_ref = lsf_ref[0]
 
+    # BASIS FOR THIS VARIANT.  `coef_wavelengths_from_basis` builds a split-zodi
+    # basis by default and cannot produce the telluric line grouping, so for a
+    # telluric corpus we hand it the right decomposer explicitly.  Without this
+    # the cache would silently carry split-zodi OH centroids -- wrong by a
+    # median 46.9 A -- under a telluric basis stamp.
+    from . import data as _data
+    _variant = _data.decomp_variant_for_suffix(str(decomp_suffix or ''))
+    _decomposer = None
+    _tel_note = ''
+    if _variant is not None and _data.DECOMP_VARIANTS[_variant]['telluric']:
+        # The telluric basis is divided by a PER-ROW transmission, but the cache
+        # is one set of wavelengths for the corpus, so a representative row is
+        # needed.  Use the row whose sci_airmass is the median: T enters the
+        # centroid only as a smooth multiplicative weight (median T = 0.9997
+        # on this corpus), so the choice moves the centroids far less than the
+        # line grouping it exists to capture -- measured below and reported.
+        from astropy.io import fits as _fits
+        from astropy.table import Table as _Table
+        with _fits.open(str(input_fits_for_basis), memmap=False) as _h:
+            _meta = _Table(_h['META'].data)
+            _lsf = np.asarray(_h['LSF_SCI'].data, dtype=np.float64)
+        _am = np.asarray(_meta['sci_airmass'], dtype=np.float64)
+        _ok = np.flatnonzero(np.isfinite(_am) & (_am > 0.0))
+        if _ok.size == 0:
+            raise ValueError(f'{input_fits_for_basis} has no usable sci_airmass '
+                             f'row to build a representative telluric basis')
+        _rep = int(_ok[np.argsort(_am[_ok])[_ok.size // 2]])
+        _tel = _data.telluric_row_kwargs(
+            _meta, _rep, 'sci', wave_ref,
+            _lsf[_rep])
+        _decomposer = _data.make_reconstruction_decomposer(
+            wave_ref, n_spline_knots=n_moon_knots, base_dir=_data._infer_base_dir_for_reconstruction(),
+            split_zodi=split_zodi, n_zodi_spline_knots=n_zodi_knots,
+            palace_oh_suffix=palace_oh_suffix,
+            palace_diffuse_suffix=palace_diffuse_suffix, telluric=_tel)
+        _decomposer.lsf_sigma = lsf_ref / 2.35
+        _tel_note = (f' (telluric basis from representative row {_rep}, '
+                     f'sci_airmass {_am[_rep]:.3f}, pwv {_tel["pwv_mm"]:g} mm)')
+        if verbose:
+            print(f'[wavelength-cache] building the TELLURIC basis{_tel_note}')
     t0 = time.perf_counter()
     result = coef_wavelengths_from_basis(
         coef_names=coef_names,
@@ -140,6 +196,8 @@ def populate_wavelength_cache(
         cache_path=cache_path,
         return_k_eff=True,
         verbose=verbose,
+        decomp_suffix=decomp_suffix,
+        decomposer=_decomposer,
     )
     if verbose:
         print(f"[wavelength-cache] populated in {time.perf_counter() - t0:.0f} s")
@@ -196,6 +254,7 @@ def resolve_wavelengths_and_extinction(
     palace_diffuse_suffix: str | None = None,
     n_wavelength_bins: int = 8,
     verbose: bool = True,
+    decomp_suffix: str | None = None,
 ) -> ExtinctionResolution:
     """Populate ``filtered_triplet`` with ``coef_wavelengths_a`` + ``coef_extinction_k``.
 
@@ -241,6 +300,7 @@ def resolve_wavelengths_and_extinction(
             palace_oh_suffix=palace_oh_suffix,
             palace_diffuse_suffix=palace_diffuse_suffix,
             verbose=verbose,
+            decomp_suffix=decomp_suffix,
         )
     except Exception as exc:
         if verbose:

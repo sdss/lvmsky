@@ -21,6 +21,9 @@ missing = [k for k in required if k not in globals()]
 if missing:
     raise RuntimeError("Run the batch RMSE subset cell first. Missing: " + ", ".join(missing))
 
+# Telluric variant: see full_spectrum_batch_rmse for why the basis is per row.
+_telluric_for = globals().get('TELLURIC_ROW_FOR')
+
 n_worst = 15
 row_pos = np.asarray(rmse_subset_results["row_positions"], dtype=int)
 row_idx = np.asarray(rmse_subset_results["row_indices"], dtype=int)
@@ -170,16 +173,19 @@ for case_i, j in enumerate(worst_local):
         wave=wave_row, coef=coef_near_subset[j], lsf=lsf_arg_near,
         n_spline_knots=N_MOON_KNOTS, base_dir=base_dir_guess, o2_vector=o2_near,
         split_zodi=SPLIT_ZODI, n_zodi_spline_knots=N_ZODI_KNOTS,
+        telluric=(None if _telluric_for is None else _telluric_for('sky1', rr)),
     )
     comps_far = reconstruct_with_lsf(
         wave=wave_row, coef=coef_far_subset[j], lsf=lsf_arg_far,
         n_spline_knots=N_MOON_KNOTS, base_dir=base_dir_guess, o2_vector=o2_far,
         split_zodi=SPLIT_ZODI, n_zodi_spline_knots=N_ZODI_KNOTS,
+        telluric=(None if _telluric_for is None else _telluric_for('sky2', rr)),
     )
     comps_sci = reconstruct_with_lsf(
         wave=wave_row, coef=coef_pred_subset[j], lsf=lsf_arg_sci,
         n_spline_knots=N_MOON_KNOTS, base_dir=base_dir_guess, o2_vector=o2_sci,
         split_zodi=SPLIT_ZODI, n_zodi_spline_knots=N_ZODI_KNOTS,
+        telluric=(None if _telluric_for is None else _telluric_for('sci', rr)),
     )
 
     near_obs = np.asarray(flux_near_all[rr], dtype=np.float64) * FACTOR

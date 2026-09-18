@@ -170,10 +170,16 @@ if all(k in globals() for k in _MES_FLUX_KEYS):
             with _fits_bl.open(f'{DECOMP_DATA_ROOT}/{DECOMP_STEM}_every10.fits') as _hbl:
                 _wbl = np.asarray(_hbl['WAVE'].data, dtype=np.float64)
                 _wbl = _wbl if _wbl.ndim == 1 else _wbl[0]
-            _mbl = SkyDecompLSFSurfaceIterative(
-                _wbl, lsf_sigma=1.0, n_spline_knots=N_MOON_KNOTS,
+            # Must be THIS corpus's basis: the telluric variant groups OH
+            # differently, so projecting its coefficient errors through the
+            # split-zodi stick matrix would measure the wrong thing.
+            from mlp_predictor.data import (
+                make_reconstruction_decomposer as _mk_decomp_bl)
+            _mbl = _mk_decomp_bl(
+                _wbl, n_spline_knots=N_MOON_KNOTS,
                 base_dir=_infer_base_dir_for_reconstruction(),
-                split_zodi=SPLIT_ZODI, n_zodi_spline_knots=N_ZODI_KNOTS)
+                split_zodi=SPLIT_ZODI, n_zodi_spline_knots=N_ZODI_KNOTS,
+                telluric=globals().get('TELLURIC_BASIS_KW'))
             _Mbl = np.asarray(_mbl._convolve_matrix_channelwise(_mbl.matrix_oh_stick),
                               dtype=np.float64)
             if _Mbl.shape[0] != _oh_bl.size:

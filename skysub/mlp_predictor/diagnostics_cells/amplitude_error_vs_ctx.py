@@ -106,10 +106,26 @@ _true = np.asarray(filtered_triplet['coef_sci'], dtype=np.float64)[_te]
 with fits.open(f'{DECOMP_DATA_ROOT}/{DECOMP_STEM}_every10.fits') as _h:
     _w = np.asarray(_h['WAVE'].data, dtype=np.float64)
     _wave = _w if _w.ndim == 1 else _w[0]
-_model = SkyDecompLSFSurfaceIterative(
-    _wave, lsf_sigma=1.0, n_spline_knots=N_MOON_KNOTS,
-    base_dir=_infer_base_dir_for_reconstruction(),
-    split_zodi=SPLIT_ZODI, n_zodi_spline_knots=N_ZODI_KNOTS)
+# The amplitude weights v_g must come from the basis THIS corpus was fitted
+# with.  Moon / zodi / diffuse are byte-identical between the decomposition
+# variants (verified: max |diff| exactly 0), but OH is NOT -- the telluric fit
+# groups it differently -- so an OH amplitude built on the split-zodi basis
+# would be the wrong linear functional.  `TELLURIC_BASIS_KW` is the
+# representative-row telluric bundle the notebook installs, or None.
+from mlp_predictor.data import make_reconstruction_decomposer as _mk_decomp
+_basis_tel = globals().get('TELLURIC_BASIS_KW')
+if _basis_tel is not None:
+    _model = _mk_decomp(
+        _wave, n_spline_knots=N_MOON_KNOTS,
+        base_dir=_infer_base_dir_for_reconstruction(),
+        split_zodi=SPLIT_ZODI, n_zodi_spline_knots=N_ZODI_KNOTS,
+        telluric=_basis_tel)
+    print('  amplitude basis: TELLURIC variant (representative row)')
+else:
+    _model = SkyDecompLSFSurfaceIterative(
+        _wave, lsf_sigma=1.0, n_spline_knots=N_MOON_KNOTS,
+        base_dir=_infer_base_dir_for_reconstruction(),
+        split_zodi=SPLIT_ZODI, n_zodi_spline_knots=N_ZODI_KNOTS)
 
 # Per-family basis, with the row order asserted against the coefficient names.
 _mes_idx = np.asarray(group_indices['mesospheric'], dtype=int)
