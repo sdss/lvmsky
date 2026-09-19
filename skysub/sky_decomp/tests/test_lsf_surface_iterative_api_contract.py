@@ -283,7 +283,7 @@ def test_moon_zodi_cli_does_not_require_legacy_palace_path(monkeypatch):
             "decompose_parallel.py",
             "input.fits",
             "--fit-model",
-            decompose_parallel.MOON_ZODI_FIT_MODEL,
+            decompose_parallel.PALACE_VNF_SPLIT_ZODI_FIT_MODEL,
             "--moon-zodi-data-root",
             "/external/data",
         ],
@@ -293,19 +293,6 @@ def test_moon_zodi_cli_does_not_require_legacy_palace_path(monkeypatch):
 
     assert captured["palace_dir"] is None
     assert str(captured["moon_zodi_data_root"]) == "/external/data"
-
-
-def test_legacy_cli_still_requires_palace_path(monkeypatch):
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        ["decompose_parallel.py", "input.fits", "--fit-model", "baseline"],
-    )
-
-    with pytest.raises(SystemExit) as error:
-        decompose_parallel.main()
-
-    assert error.value.code == 2
 
 
 def test_chunk_worker_preserves_indices_and_reports_each_row(monkeypatch):

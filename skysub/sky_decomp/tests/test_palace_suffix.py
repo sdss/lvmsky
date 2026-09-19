@@ -313,7 +313,7 @@ def test_cli_forwards_optional_palace_suffix(monkeypatch):
             "input.fits",
             "/custom/base",
             "--fit-model",
-            "lsf-surface-iterative",
+            decompose_parallel.PALACE_VNF_SPLIT_ZODI_FIT_MODEL,
             "--palace-suffix",
             "_adam_100_v1",
             "--palace-oh-suffix",
@@ -343,7 +343,7 @@ def test_split_zodi_cli_does_not_require_legacy_palace_path(monkeypatch):
             "decompose_parallel.py",
             "input.fits",
             "--fit-model",
-            decompose_parallel.SPLIT_ZODI_FIT_MODEL,
+            decompose_parallel.PALACE_VNF_SPLIT_ZODI_FIT_MODEL,
         ],
     )
 

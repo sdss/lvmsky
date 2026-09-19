@@ -7,7 +7,9 @@ entry point.
 
 Cells consolidated:
 - ``infer-spline-knots``   : ``infer_spline_knots(coef_names)``.
-- ``wavelength-cache-gate``: cache gate around ``coef_wavelengths_from_basis``.
+- ``wavelength-cache-gate``: the gate around ``coef_wavelengths_from_basis``
+                             (the on-disk cache it guarded was removed once the
+                             design-matrix path brought the build down to ~1 s).
 - ``98a37092``             : the full "populate coef wavelengths + extinction"
                              sequence (basis wavelengths, wavelength resolution,
                              physical-context assertion, fitted extinction,
@@ -50,40 +52,8 @@ def infer_spline_knots(coef_names: list[str]) -> tuple[int, bool, int]:
     return n_moon_knots, split_zodi, n_zodi_knots
 
 
-def wavelength_cache_matches_corpus(
-    cache_path: Path,
-    coef_names: list[str],
-    decomp_suffix: str | None = None,
-) -> bool:
-    """True iff the cache matches the schema, the coef names AND the basis.
-
-    ``decomp_suffix`` identifies WHICH decomposition basis the cached
-    wavelengths describe.  Names alone are not enough: every variant uses the
-    same 388 coefficient names, but the telluric fit groups OH differently and
-    its per-stick centroids differ from the split-zodi ones by a median 46.9 A.
-    A cache written before basis stamping has no suffix recorded and is
-    accepted, so delete it if it may have been copied between corpora.
-    """
-
-    cache_path = Path(cache_path)
-    if not cache_path.exists():
-        return False
-    with np.load(cache_path, allow_pickle=True) as c:
-        if "coef_names" not in c.files or "k_eff_a" not in c.files:
-            return False
-        cached = [str(x) for x in c["coef_names"]]
-        _have = (str(c["decomp_suffix"]) if "decomp_suffix" in c.files
-                 else None)
-    corpus = [str(x) for x in coef_names]
-    if cached != corpus:
-        return False
-    _want = str(decomp_suffix or "")
-    return (not _want) or (_have is None) or (_have == _want)
-
-
-def populate_wavelength_cache(
+def build_coef_wavelengths(
     *,
-    cache_path: Path,
     input_fits_for_basis: str | Path,
     coef_names: list[str],
     n_moon_knots: int,
@@ -94,41 +64,23 @@ def populate_wavelength_cache(
     verbose: bool = True,
     decomp_suffix: str | None = None,
 ) -> tuple[np.ndarray, np.ndarray] | tuple[None, None]:
-    """Idempotently populate the wavelength+k_eff cache; return the two arrays.
+    """Build the per-coefficient wavelength centroids and k_eff for a corpus.
 
-    If the cache is stale or missing, computes it (one reconstruction call per
-    coefficient); otherwise loads the existing arrays.  Returns ``(None, None)``
-    only if the FITS reference is missing the required extensions and
+    Nothing is cached.  The centroid and the B^2-weighted ``k_eff`` are read
+    straight off the decomposer's design matrix, which costs ~1 s for the 388
+    coefficients (the old per-coefficient reconstruction loop took ~13 min and
+    is now only a fallback).  That is cheap enough that a cache would only buy
+    back ~1 s per run while reintroducing the stale-cache failure mode: the
+    coefficient NAMES are identical across decomposition variants -- the
+    telluric fit is also OH_000..OH_356 -- so a cache copied between corpora
+    passed the name check while carrying OH centroids wrong by a median 46.9 A.
+
+    ``decomp_suffix`` selects WHICH basis to build.  Returns ``(None, None)``
+    only if the FITS reference is missing the required extensions and the
     computation fails.
     """
 
-    cache_path = Path(cache_path)
-    if wavelength_cache_matches_corpus(cache_path, coef_names, decomp_suffix):
-        with np.load(cache_path, allow_pickle=True) as c:
-            n = len(c["coef_names"])
-            lam_ok = int(np.isfinite(c["wavelengths_a"]).sum())
-            k_ok = int(np.isfinite(c["k_eff_a"]).sum())
-            wavelengths_a = np.asarray(c["wavelengths_a"], dtype=np.float64)
-            k_eff_a = np.asarray(c["k_eff_a"], dtype=np.float64)
-        if verbose:
-            print(f"[wavelength-cache] {cache_path}:")
-            print(
-                f"                   {lam_ok}/{n} finite centroids, "
-                f"{k_ok}/{n} finite k_eff (loaded, no compute)"
-            )
-        return wavelengths_a, k_eff_a
-
-    if cache_path.exists() and verbose:
-        print(
-            f"[wavelength-cache] {cache_path.name} exists but does not "
-            f"match current corpus; will overwrite."
-        )
-    if verbose:
-        print(
-            f"[wavelength-cache] populating for {len(coef_names)} coefs "
-            f"(read off the decomposer design, <1 s; the old per-coefficient "
-            f"reconstruction loop took ~13 min and is now only a fallback)..."
-        )
+    t0 = time.perf_counter()
     with fits.open(str(input_fits_for_basis)) as hdul:
         ext_names = [h.name for h in hdul]
         if "WAVE" not in ext_names:
@@ -146,16 +98,16 @@ def populate_wavelength_cache(
     # BASIS FOR THIS VARIANT.  `coef_wavelengths_from_basis` builds a split-zodi
     # basis by default and cannot produce the telluric line grouping, so for a
     # telluric corpus we hand it the right decomposer explicitly.  Without this
-    # the cache would silently carry split-zodi OH centroids -- wrong by a
-    # median 46.9 A -- under a telluric basis stamp.
+    # we would silently get split-zodi OH centroids -- wrong by a median
+    # 46.9 A -- for a telluric corpus.
     from . import data as _data
     _variant = _data.decomp_variant_for_suffix(str(decomp_suffix or ''))
     _decomposer = None
     _tel_note = ''
     if _variant is not None and _data.DECOMP_VARIANTS[_variant]['telluric']:
-        # The telluric basis is divided by a PER-ROW transmission, but the cache
-        # is one set of wavelengths for the corpus, so a representative row is
-        # needed.  Use the row whose sci_airmass is the median: T enters the
+        # The telluric basis is divided by a PER-ROW transmission, but we need
+        # one set of wavelengths for the whole corpus, so a representative row
+        # is needed.  Use the row whose sci_airmass is the median: T enters the
         # centroid only as a smooth multiplicative weight (median T = 0.9997
         # on this corpus), so the choice moves the centroids far less than the
         # line grouping it exists to capture -- measured below and reported.
@@ -182,8 +134,7 @@ def populate_wavelength_cache(
         _tel_note = (f' (telluric basis from representative row {_rep}, '
                      f'sci_airmass {_am[_rep]:.3f}, pwv {_tel["pwv_mm"]:g} mm)')
         if verbose:
-            print(f'[wavelength-cache] building the TELLURIC basis{_tel_note}')
-    t0 = time.perf_counter()
+            print(f'[wavelength-basis] building the TELLURIC basis{_tel_note}')
     result = coef_wavelengths_from_basis(
         coef_names=coef_names,
         wave=wave_ref,
@@ -193,14 +144,12 @@ def populate_wavelength_cache(
         n_zodi_spline_knots=n_zodi_knots,
         palace_oh_suffix=palace_oh_suffix,
         palace_diffuse_suffix=palace_diffuse_suffix,
-        cache_path=cache_path,
         return_k_eff=True,
         verbose=verbose,
-        decomp_suffix=decomp_suffix,
         decomposer=_decomposer,
     )
     if verbose:
-        print(f"[wavelength-cache] populated in {time.perf_counter() - t0:.0f} s")
+        print(f"[wavelength-basis] built in {time.perf_counter() - t0:.1f} s")
     if isinstance(result, tuple):
         return result
     return result, None
@@ -247,7 +196,6 @@ class ExtinctionResolution:
 def resolve_wavelengths_and_extinction(
     filtered_triplet: dict[str, Any],
     *,
-    cache_path: Path,
     input_fits_for_basis: str | Path,
     use_fitted_extinction: bool = True,
     palace_oh_suffix: str | None = None,
@@ -259,7 +207,7 @@ def resolve_wavelengths_and_extinction(
     """Populate ``filtered_triplet`` with ``coef_wavelengths_a`` + ``coef_extinction_k``.
 
     This is the notebook-facing entry point that mirrors cell ``98a37092``'s
-    end-to-end sequence: infer knots, populate the wavelength cache, resolve
+    end-to-end sequence: infer knots, build the basis wavelengths, resolve
     per-coef wavelengths, verify context is physical, fit LCO-effective
     extinction, resolve per-coef extinction.
 
@@ -290,8 +238,7 @@ def resolve_wavelengths_and_extinction(
         t_start = time.perf_counter()
 
     try:
-        basis_lam, basis_k = populate_wavelength_cache(
-            cache_path=cache_path,
+        basis_lam, basis_k = build_coef_wavelengths(
             input_fits_for_basis=input_fits_for_basis,
             coef_names=coef_names,
             n_moon_knots=n_moon_knots,
@@ -369,8 +316,7 @@ def resolve_wavelengths_and_extinction(
 
 __all__ = [
     "ExtinctionResolution",
+    "build_coef_wavelengths",
     "infer_spline_knots",
-    "populate_wavelength_cache",
     "resolve_wavelengths_and_extinction",
-    "wavelength_cache_matches_corpus",
 ]

@@ -105,10 +105,8 @@ def main() -> None:
     data._augment_triplet_with_moon_model(
         filtered, args.stack.with_suffix(""), force=True
     )
-    cache_path = args.decomposition_dir / "coef_wavelengths_basis_niv_adam_v1.npz"
     extinction = wavelengths.resolve_wavelengths_and_extinction(
         filtered,
-        cache_path=cache_path,
         input_fits_for_basis=args.stack,
         use_fitted_extinction=True,
         palace_oh_suffix=DEFAULT_PALACE_OH_SUFFIX,

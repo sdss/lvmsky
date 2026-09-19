@@ -10,7 +10,6 @@ on one configuration.  Older experiment-tracking dataclasses were removed
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from pathlib import Path
 
 # Default context columns pulled from the science + sky rows.  Mirrors the
 # split-zodi notebook's ``context_cols`` list (cell "starter data load").
@@ -88,10 +87,6 @@ class DataConfig:
 
     def decomp_fits(self, arm: str) -> str:
         return f"{self.decomp_prefix}_decomp_{arm}{self.decomp_suffix}.fits"
-
-    @property
-    def wavelength_cache_path(self) -> Path:
-        return Path(f"{self.decomp_data_root}/coef_wavelengths_basis_v4.npz")
 
 
 @dataclass

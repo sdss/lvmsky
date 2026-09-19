@@ -95,6 +95,104 @@ def _srmse_per_group(y_true, y_pred, group_indices, row_mask):
 
 _group_names = list(_group_indices_compress.keys())
 
+# --- Integrated FLUX AMPLITUDE per coefficient ----------------------------
+# The sRMSE table below is an UNWEIGHTED sum of coefficient errors, and for a
+# large block that is dominated by whichever few coefficients happen to be
+# numerically biggest: measured on the telluric corpora, 93-95% of the ML's
+# mesospheric MSE comes from FIVE of 358 coefficients, against 65-75% for the
+# baseline.  So the coefficient table reported the ML LOSING to B1_near_geo on
+# OH by -72.9% (telluric) and -12.3% (telluric-chi2) while, in flux, the same
+# predictions BEAT that baseline on both the integrated amplitude (0.00650 vs
+# 0.00726 dex; 0.00640 vs 0.00689) and the per-pixel residual (1.93% vs 2.05%;
+# 1.77% vs 1.95%).  The sign flips, and it has flipped before -- see
+# `mesospheric` in the flux companion at the bottom of this cell.
+#
+# A_g = c_g . v_g with v_g the per-coefficient template integral, so this is
+# the band-integrated flux each family contributes.  It uses THIS corpus's own
+# basis (the telluric variant groups OH differently) and it is scale-free per
+# row, which is what makes it comparable across groups.
+# Same prerequisites as the mesospheric companion below, named here because
+# this block runs FIRST and that one's tuple is defined further down.
+_FLUX_BASIS_KEYS = ('SkyDecompLSFSurfaceIterative',
+                    '_infer_base_dir_for_reconstruction',
+                    'N_MOON_KNOTS', 'SPLIT_ZODI', 'N_ZODI_KNOTS',
+                    'DECOMP_DATA_ROOT', 'DECOMP_STEM')
+_amp_v = None
+_amp_note = ''
+if all(k in globals() for k in _FLUX_BASIS_KEYS):
+    try:
+        from astropy.io import fits as _fits_amp
+        from mlp_predictor.data import (
+            make_reconstruction_decomposer as _mk_decomp_amp)
+        _cn_amp = [str(n) for n in filtered_triplet['coef_names']]
+        with _fits_amp.open(f'{DECOMP_DATA_ROOT}/{DECOMP_STEM}_every10.fits') as _hamp:
+            _wamp = np.asarray(_hamp['WAVE'].data, dtype=np.float64)
+            _wamp = _wamp if _wamp.ndim == 1 else _wamp[0]
+        _m_amp = _mk_decomp_amp(
+            _wamp, n_spline_knots=N_MOON_KNOTS,
+            base_dir=_infer_base_dir_for_reconstruction(),
+            split_zodi=SPLIT_ZODI, n_zodi_spline_knots=N_ZODI_KNOTS,
+            telluric=globals().get('TELLURIC_BASIS_KW'))
+        # `_assemble_refined_matrices()` needs a FITTED LSF state, which a
+        # freshly built decomposer has not got ('NoneType' has no attribute
+        # 'knot_vectors').  `_convolve_matrix_channelwise` falls back to the
+        # parent's nominal kernel when no operator is installed, which is what
+        # the mesospheric companion below already relies on.
+        _cv_amp = _m_amp._convolve_matrix_channelwise
+        _mats_amp = {
+            'oh': _cv_amp(_m_amp.matrix_oh_stick),
+            'moon': _cv_amp(_m_amp.matrix_moon_hr),
+            'diffuse': np.asarray(_m_amp.matrix_diffuse, dtype=np.float64),
+            'atom': _cv_amp(_m_amp.matrix_atom_stick),
+            'orc': _cv_amp(_m_amp.matrix_orc_stick),
+            'o2': _cv_amp(_m_amp.matrix_o2_stick),
+            'zodi': (_cv_amp(_m_amp.matrix_zodi_hr)
+                     if getattr(_m_amp, 'matrix_zodi', np.zeros((0, 0))).shape[0]
+                     else np.zeros((0, _wamp.size))),
+        }
+        # Map each family matrix onto ITS coefficient names, by name, with the
+        # row counts asserted -- never by assuming a concatenation order.
+        _sel_amp = lambda _f: [i for i, n in enumerate(_cn_amp) if _f(n)]
+        _blocks_amp = {
+            'oh': _sel_amp(lambda n: n.startswith('OH_')),
+            'moon': _sel_amp(lambda n: n.startswith('Moon_bs')),
+            'diffuse': _sel_amp(lambda n: n in ('HO2', 'FeO', 'O2Ac')),
+            'orc': _sel_amp(lambda n: n.startswith('ATOM_Orc')),
+            'atom': _sel_amp(lambda n: n.startswith('ATOM_')
+                             and not n.startswith('ATOM_Orc')),
+            'o2': _sel_amp(lambda n: n == 'O2_b01'),
+            'zodi': _sel_amp(lambda n: n.startswith('Zodi_bs')),
+        }
+        _amp_v = np.full(len(_cn_amp), np.nan, dtype=np.float64)
+        for _k_amp, _idx_amp in _blocks_amp.items():
+            _M_amp = np.asarray(_mats_amp[_k_amp], dtype=np.float64)
+            if _M_amp.shape[0] != len(_idx_amp):
+                raise RuntimeError(
+                    f'{_k_amp} basis has {_M_amp.shape[0]} rows for '
+                    f'{len(_idx_amp)} coefficients')
+            if _idx_amp:
+                _amp_v[np.asarray(_idx_amp, dtype=int)] = _M_amp.sum(axis=1)
+        if not np.isfinite(_amp_v).all():
+            raise RuntimeError('some coefficient got no basis row')
+    except Exception as _exc_amp:
+        _amp_v = None
+        _amp_note = f'{type(_exc_amp).__name__}: {_exc_amp}'
+
+
+def _amp_dex_per_group(y_true, y_pred, group_indices, row_mask, v):
+    """Median |dlog10(A_pred / A_true)| per group on the masked rows."""
+    _r = np.asarray(row_mask, dtype=bool)
+    out = {}
+    for gname, idx in group_indices.items():
+        idx = np.asarray(idx, dtype=int)
+        _at = np.asarray(y_true, dtype=np.float64)[_r][:, idx] @ v[idx]
+        _ap = np.asarray(y_pred, dtype=np.float64)[_r][:, idx] @ v[idx]
+        _ok = np.isfinite(_at) & np.isfinite(_ap) & (_at > 0) & (_ap > 0)
+        out[gname] = (float(np.median(np.abs(np.log10(_ap[_ok] / _at[_ok]))))
+                      if _ok.any() else float('nan'))
+    return out
+
+
 print('=' * 90)
 print(f'Naive baselines vs ML on test split ({_te_bl.size} rows, '
       f'{_y_te.shape[1]} coefficients, {len(_group_names)} groups)')
@@ -119,9 +217,22 @@ for regime, mask in _masks.items():
     print(_df.to_string(float_format=lambda v: f'{v:.4g}'))
 
     print('  ML vs best naive baseline per group '
-          '(pct gain positive = ML wins over the best non-ML variant):')
+          '(pct gain positive = ML wins over the best non-ML variant).')
+    if _amp_v is None:
+        print(f'  FLUX AMPLITUDE column unavailable ({_amp_note or "inputs missing"}) '
+              f'-- the coefficient number ALONE has twice reported a sign that '
+              f'flux space reverses.')
+    else:
+        print('  Two spaces per group: coefficient sRMSE, then the integrated '
+              'FLUX amplitude |dlog10|.\n  When they disagree, the FLUX number '
+              'is the one that describes the subtracted spectrum.')
+    _amp_by_variant = ({name: _amp_dex_per_group(_y_te, pred,
+                                                 _group_indices_compress, mask, _amp_v)
+                        for name, pred in _all_preds.items()}
+                       if _amp_v is not None else {})
     if regime == 'all':
         naive_baseline_per_group = {}
+        _amp_export = {}
     for g in _group_names:
         _col = _df[g]
         _ml = float(_col.loc['ML_default'])
@@ -130,8 +241,21 @@ for regime, mask in _masks.items():
         _best_bl_val = float(_bl_col.min())
         _winner = 'ML' if _ml <= _best_bl_val else _best_bl_name
         _gain_pct = 100.0 * (_best_bl_val - _ml) / max(_best_bl_val, 1e-30)
+        _amp_txt = ''
+        if _amp_v is not None:
+            _a_ml = _amp_by_variant['ML_default'][g]
+            _a_bl = {k: v[g] for k, v in _amp_by_variant.items() if k != 'ML_default'}
+            _a_bn = min(_a_bl, key=lambda k: _a_bl[k])
+            _a_gain = 100.0 * (_a_bl[_a_bn] - _a_ml) / max(_a_bl[_a_bn], 1e-30)
+            _amp_txt = (f'   |  FLUX amp: ML={_a_ml:.5f} dex  '
+                        f'best_naive={_a_bn}:{_a_bl[_a_bn]:.5f}  '
+                        f'gain={_a_gain:+.1f}%')
+            if regime == 'all':
+                _amp_export[g] = dict(ml_dex=_a_ml, best_naive_dex=_a_bl[_a_bn],
+                                      best_naive_name=str(_a_bn), gain_pct=_a_gain)
         print(f'    {g:<12s} winner={_winner:<12s}  ML={_ml:.4g}  '
-              f'best_naive={_best_bl_name}:{_best_bl_val:.4g}  gain={_gain_pct:+.1f}%')
+              f'best_naive={_best_bl_name}:{_best_bl_val:.4g}  '
+              f'gain={_gain_pct:+.1f}%{_amp_txt}')
         if regime == 'all':
             naive_baseline_per_group[g] = dict(
                 ml=_ml, best_naive=_best_bl_val,
@@ -252,6 +376,25 @@ else:
           'Check moon/zodi rows in the per-regime tables to see whether the loss '
           'is defeated in the physically relevant regimes.')
 
+# The aggregate above is a mean of COEFFICIENT sRMSEs and inherits their
+# degeneracy: on the telluric corpora it read -52.3% and -3.7% while the same
+# predictions won in flux.  Repeat it in flux amplitude so the verdict is not
+# taken from the degenerate space alone.
+if _amp_v is not None and _amp_export:
+    _ge_ml = float(np.mean([v['ml_dex'] for v in _amp_export.values()]))
+    _ge_bl = float(np.mean([v['best_naive_dex'] for v in _amp_export.values()]))
+    _ge_gain = 100.0 * (_ge_bl - _ge_ml) / max(_ge_bl, 1e-30)
+    print()
+    print(f'Group-equal FLUX AMPLITUDE |dlog10|: ML {_ge_ml:.5f}  '
+          f'best-naive-per-group {_ge_bl:.5f}  ML improvement {_ge_gain:+.1f}%')
+    _agree = (_ge_gain > 0) == (_gain_pct > 0)
+    print(f'Verdict (flux amplitude): '
+          + ('the network earns its complexity.' if _ge_gain > 0
+             else 'the per-group baselines win.')
+          + ('' if _agree else
+             '  NOTE this DISAGREES in sign with the coefficient verdict above; '
+             'the flux number is the one that describes the subtracted spectrum.'))
+
 
 # Persisted so `headline_summary` can synthesise without recomputing.  Named
 # without a leading underscore on purpose: the diagnostics cells share one
@@ -260,6 +403,7 @@ naive_baseline_result = dict(
     per_group=naive_baseline_per_group,
     # Flux-space mesospheric gain; the coefficient-space one above is degenerate.
     mesospheric_flux=naive_baseline_mesospheric_flux,
+    flux_amplitude_per_group=(_amp_export if _amp_v is not None else None),
     group_equal=dict(ml=_ml_v, best_naive=_best_v, best_naive_name=str(_best),
                      gain_pct=_gain_pct),
     n_test=int(_y_te.shape[0]),

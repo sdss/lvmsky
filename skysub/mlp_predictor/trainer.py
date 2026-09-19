@@ -66,6 +66,7 @@ See notebook chapter 3.9 for the measurements behind every threshold.
 from __future__ import annotations
 
 import copy
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
@@ -82,6 +83,7 @@ from .compressor import (
     compress_coef_err_to_score_sigma,
     compress_coefs_to_scores,
     expand_scores_to_coefs,
+    inverse_group_compressor,
 )
 from .data import _infer_base_dir_for_reconstruction, airglow_geometry_scale
 from . import noise
@@ -1001,6 +1003,57 @@ def train_compressed_group_mlp(
                   f'({100*float(flux_amp_floor_frac):g}% of median), '
                   f'amp lambda={flux_amp_lambda!r}.')
 
+    # --- Does the IN-LOSS reconstruction match the DEPLOYED one? -----------
+    # The loss rebuilds each group's spectrum from the compressed scores with
+    # its own torch implementation of the inverse compressor.  Everything
+    # OUTSIDE the loss -- diagnostics, inference, the flux-space scoring -- goes
+    # through `compressor.inverse_group_compressor` instead.  Two
+    # implementations of one transform is exactly the kind of pair that drifts,
+    # so compare them here on real rows, starting from the SAME raw scores.
+    #
+    # This checks the two IMPLEMENTATIONS against each other on the same raw
+    # scores.  It deliberately does NOT compare against the raw corpus
+    # coefficients: `filtered` inside this function is not the caller's triplet
+    # row-for-row, so such a comparison needs the row mapping resolved first --
+    # see the note in the changelog before adding one.
+    if _flux_mse_state_by_group:
+        _chk_rows = np.asarray(train_idx, dtype=int)[:64]
+        for _g_ck, _st_ck in _flux_mse_state_by_group.items():
+            _lo_ck, _hi_ck = score_slices[_g_ck]
+            _comp_ck = compressors[_g_ck]
+            # Undo the RobustScaler exactly as the loss does, to get raw scores.
+            _raw_ck = (sci_s[_chk_rows][:, _lo_ck:_hi_ck].astype(np.float64)
+                       * np.asarray(_st_ck['score_scale'], dtype=np.float64)
+                       + np.asarray(_st_ck['score_center'], dtype=np.float64))
+            # (a) the deployed inverse, used everywhere outside the loss
+            _em_ref = inverse_group_compressor(_comp_ck, _raw_ck)
+            # (b) the loss's own chain, in torch, on the same input
+            _t = torch.from_numpy(_raw_ck.astype(np.float32))
+            _z_t = (_t @ torch.from_numpy(_st_ck['basis_T'])) \
+                * torch.from_numpy(_st_ck['sd_vec']) \
+                + torch.from_numpy(_st_ck['mean_vec'])
+            _em_t = torch.clamp(_z_t, min=0.0) ** 2
+            _em_loss = _em_t.detach().cpu().numpy().astype(np.float64)
+            # Compare in FLUX space, which is what the loss consumes.  A
+            # per-COEFFICIENT relative difference is the wrong metric here: the
+            # asinh groups carry hundreds of ~1e-6 coefficients whose float32
+            # sinh differs from float64 by percent while contributing nothing
+            # to the spectrum (measured: 3.2e-2 per coefficient, 6e-8 in flux).
+            _A_ck2 = _st_ck['A'].astype(np.float64)
+            _f_ref = _em_ref @ _A_ck2
+            _f_loss = _em_loss @ _A_ck2
+            _rel = float(np.nanmax(
+                np.abs(_f_loss - _f_ref).sum(axis=1)
+                / np.maximum(np.abs(_f_ref).sum(axis=1), 1e-30)))
+            print(f'  [flux-recon check] {_g_ck}: in-loss torch inverse vs '
+                  f'compressor.inverse_group_compressor -- max relative FLUX '
+                  f'difference {_rel:.3e} over {_chk_rows.size} rows')
+            if not (_rel < 1e-4):
+                raise RuntimeError(
+                    f"[flux-recon check] {_g_ck}: the loss's torch inverse "
+                    f"disagrees with compressor.inverse_group_compressor by "
+                    f"{_rel:.3e} (relative); the two implementations have drifted")
+
     # Device selection.
     if torch.cuda.is_available():
         device = 'cuda'
@@ -1730,7 +1783,30 @@ def predict_sci_coefficients_default(artifacts, coef_near_phys, coef_far_phys,
 # --- Deployed ensemble config (matches the shipped mlp_ensemble_split_zodi_current.pt) ---
 default_dual_group_config: dict[str, Any] = {
     "name": "dual_group_mlp_compressed",
-    "n_epochs": 50,
+    # 2026-09-18: 50 -> 300 epochs, patience 12 -> 100.  Early stopping here
+    # does NOT protect against overfitting -- the loop keeps `best_state` and
+    # restores it -- so patience only ever saved compute, and at 12 it was
+    # firing inside the plateau noise.  Simulated on four recorded 300-epoch
+    # curves (telluric corpus), stop/best epoch per seed:
+    #
+    #   patience   seed42    seed43    seed44    seed45   mean best_val
+    #         12    17/  5    51/ 39    58/ 46    24/ 12      0.018813
+    #         20    91/ 71    59/ 39    66/ 46    51/ 31      0.018537
+    #         60   194/134    99/ 39   217/157   120/ 60      0.018423
+    #        120   300/299   159/ 39   277/157   180/ 60      0.018358
+    #        none  300/299   300/242   300/157   300/ 60      0.018292
+    #
+    # At 12 two of four seeds stopped at epoch 17 and 24, keeping a model from
+    # epoch 5 and 12.  The stall before the eventual best epoch is 28-131
+    # epochs, so anything under ~100 truncates a real run.
+    #
+    # The budget is worth paying because it is measured in FLUX space, not in
+    # the coefficient metrics: 50 -> 300 epochs improves the reconstructed sky
+    # by -8.9% fractional RMS (-13.8% in the blue) and -12.0% integrated error,
+    # better on 4/4 paired seeds.  mean_eRMSE/median_corr say the OPPOSITE
+    # because 92.3% of those averages is the mesospheric block -- see the
+    # §3 of the notebook doc.
+    "n_epochs": 300,
     "batch_size": 512,
     "lr": 1.0e-3,
     "encoder_dims": (768, 384),
@@ -1744,7 +1820,7 @@ default_dual_group_config: dict[str, Any] = {
     "blend_init_alpha": 0.7,
     "alpha_lr_mult": 1.0,
     "weight_decay": 1.0e-4,
-    "patience": 12,
+    "patience": 100,
     "moon_group_weight": 2.0,
     "zodi_group_weight": 2.0,
     "continuum_group_weight": 1.0,
@@ -1802,6 +1878,78 @@ default_dual_group_config: dict[str, Any] = {
 _WAVE_STRIDE_FLUX_LOSS = 1
 
 
+_ENSEMBLE_SHARED: dict = {}
+
+
+def _ensemble_worker_init(payload):
+    """Stage the shared training inputs once per worker process."""
+    global _ENSEMBLE_SHARED
+    _ENSEMBLE_SHARED = payload
+
+
+def _member_to_cpu(member):
+    """Move a trained member off the accelerator so it can be pickled home.
+
+    A member trained on MPS/CUDA holds device tensors, and those cannot cross
+    a process boundary.  Only the top level is walked: everything the ensemble
+    consumes (`model`, `state_dict`) lives there.
+    """
+    for key, value in list(member.items()):
+        if isinstance(value, torch.nn.Module):
+            member[key] = value.to('cpu')
+        elif torch.is_tensor(value):
+            member[key] = value.detach().to('cpu')
+        elif isinstance(value, dict) and value and all(
+                torch.is_tensor(v) for v in value.values()):
+            member[key] = {k: v.detach().to('cpu') for k, v in value.items()}
+    return member
+
+
+def _select_torch_device():
+    """The device `train_compressed_group_mlp` would pick, same order."""
+    if torch.cuda.is_available():
+        return 'cuda'
+    _mps = getattr(torch.backends, 'mps', None)
+    if _mps is not None and _mps.is_available():
+        return 'mps'
+    return 'cpu'
+
+
+def _member_to_device(member, device):
+    """Undo `_member_to_cpu` so a worker-trained member matches a local one.
+
+    The sequential path leaves each member's model on the accelerator and
+    everything downstream (per-seed test metrics, the ensemble prediction)
+    stages its inputs there, so a member that came home on CPU has to go back
+    or the first forward pass raises a device mismatch.
+    """
+    for key, value in list(member.items()):
+        if isinstance(value, torch.nn.Module):
+            member[key] = value.to(device)
+        elif torch.is_tensor(value):
+            member[key] = value.to(device)
+        elif isinstance(value, dict) and value and all(
+                torch.is_tensor(v) for v in value.values()):
+            member[key] = {k: v.to(device) for k, v in value.items()}
+    return member
+
+
+def _ensemble_worker_run(seed):
+    """Train ONE ensemble member in this worker; returns (seed, member)."""
+    payload = _ENSEMBLE_SHARED
+    if not payload:
+        raise RuntimeError("ensemble worker was not initialised")
+    member = train_compressed_group_mlp(
+        payload['filtered_triplet'], payload['compressors'],
+        payload['group_indices'], payload['geom_kwargs'],
+        split_indices=payload['split_indices'],
+        seed=int(seed),
+        train_row_mask=payload['train_row_mask'],
+        **payload['shared'],
+    )
+    return int(seed), _member_to_cpu(member)
+
+
 def _precompute_flux_basis_and_geometry(
     *,
     filtered_triplet,
@@ -1812,6 +1960,7 @@ def _precompute_flux_basis_and_geometry(
     n_zodi_knots,
     palace_oh_suffix=None,
     palace_diffuse_suffix=None,
+    group_indices=None,
     input_fits_flux=None,
     pixel_weight_floor_frac=0.05,
     flux_exptime_s=900.0,
@@ -1873,13 +2022,62 @@ def _precompute_flux_basis_and_geometry(
               f"calibration disabled.")
 
     stride = slice(None, None, int(_WAVE_STRIDE_FLUX_LOSS))
-    flux_basis_matrices = {
-        "moon": np.asarray(model.matrix_moon[:, stride], dtype=np.float32),
+    # WHICH basis do the corpus coefficients actually multiply?  Measured
+    # 2026-09-18 as integral(c_g @ B) / integral(COMP_g) over 40 every10 sci
+    # rows of the telluric corpus -- 1.0 means "this is the convention":
+    #
+    #     family    refined (_assemble_refined_matrices)   static matrix_*
+    #     moon                    0.99987                      1.17357
+    #     zodi                    0.99918                      0.99954
+    #     diffuse                 1.00000                      1.00000
+    #     oh                      0.48751                      2.44421
+    #
+    # So the REFINED bundle is the corpus convention and `model.matrix_moon`,
+    # used here until now, was 17% off in integral.  A pure scale cancels in
+    # `scale_match` below, but the shape difference does not, so the refined
+    # bundle is used for every family from now on.
+    _refined = model._assemble_refined_matrices()
+    _names_all = [str(_n) for _n in filtered_triplet["coef_names"]]
+    _sel = lambda _f: [i for i, n in enumerate(_names_all) if _f(n)]
+    _BLOCKS = {
+        "oh": _sel(lambda n: n.startswith("OH_")),
+        "moon": _sel(lambda n: n.startswith("Moon_bs")),
+        "diffuse": _sel(lambda n: n in ("HO2", "FeO", "O2Ac")),
+        "orc": _sel(lambda n: n.startswith("ATOM_Orc")),
+        "atom": _sel(lambda n: n.startswith("ATOM_") and not n.startswith("ATOM_Orc")),
+        "o2": _sel(lambda n: n == "O2_b01"),
+        "zodi": _sel(lambda n: n.startswith("Zodi_bs")),
     }
+    _B_all = np.zeros((len(_names_all), wave_ref.size), dtype=np.float64)
+    for _k, _idx in _BLOCKS.items():
+        _M = np.asarray(_refined.get(_k, np.zeros((0, wave_ref.size))), dtype=np.float64)
+        if _M.shape[0] != len(_idx):
+            raise RuntimeError(
+                f"refined basis {_k!r} has {_M.shape[0]} rows for {len(_idx)} "
+                f"coefficient names; the flux basis would pair coefficients "
+                f"with the wrong rows")
+        if _idx:
+            _B_all[np.asarray(_idx, int)] = _M
+    if not np.isfinite(_B_all).all():
+        raise RuntimeError("refined flux basis contains non-finite rows")
+
+    def _group_basis(_g):
+        """Basis rows for a group, IN THE ORDER the loss will index its coefs."""
+        if group_indices is None or _g not in group_indices:
+            return None
+        _gi = np.asarray(group_indices[_g], dtype=int)
+        return np.asarray(_B_all[_gi][:, stride], dtype=np.float32)
+
+    flux_basis_matrices = {}
+    _moon_basis = _group_basis("moon")
+    flux_basis_matrices["moon"] = (
+        np.asarray(model.matrix_moon[:, stride], dtype=np.float32)
+        if _moon_basis is None else _moon_basis)
     if split_zodi and model.matrix_zodi.shape[0] > 0:
-        flux_basis_matrices["zodi"] = np.asarray(
-            model.matrix_zodi[:, stride], dtype=np.float32
-        )
+        _zb = _group_basis("zodi")
+        flux_basis_matrices["zodi"] = (
+            np.asarray(model.matrix_zodi[:, stride], dtype=np.float32)
+            if _zb is None else _zb)
     # The diffuse continuum (HO2 + FeO + O2Ac) has its own basis in exactly the
     # same layout, and until 2026-09-04 it simply was not wired up here -- so
     # `continuum` in flux_mse_groups silently did nothing.  It matters: with no
@@ -1902,9 +2100,16 @@ def _precompute_flux_basis_and_geometry(
                 f"diffuse basis row order {_dnames} does not match the order the "
                 f"same names appear in coef_names ({_seen}); the continuum flux "
                 f"term would pair coefficients with the wrong basis rows.")
-        flux_basis_matrices["continuum"] = np.asarray(
-            _diffuse[:, stride], dtype=np.float32
-        )
+        _cb = _group_basis("continuum")
+        flux_basis_matrices["continuum"] = (
+            np.asarray(_diffuse[:, stride], dtype=np.float32) if _cb is None else _cb)
+    if group_indices is not None:
+        _covered = sum(int(np.asarray(group_indices[_g]).size)
+                       for _g in flux_basis_matrices if _g in group_indices)
+        print(f"[flux-mse prep] flux basis covers {_covered} of "
+              f"{len(_names_all)} coefficients "
+              f"({', '.join(sorted(flux_basis_matrices))}); the other groups "
+              f"are fitted in compressed coefficient space only")
     flux_geom_sc_sci = airglow_geometry_scale(
         filtered_triplet["ctx_sci"], **compress_geom_kwargs
     ).astype(np.float32)
@@ -2054,6 +2259,8 @@ class Trainer:
     # rejected.  Present-but-unread keys are still reported below, which is
     # the failure mode _CONSUMED_CFG_KEYS exists to catch.
     _OPTIONAL_CFG_KEYS = frozenset({
+        # read via cfg.get(); absent means the trainer default applies
+        "ensemble_workers", "ensemble_start_method",
         "moon_down_amp_free", "moon_down_amp_rule", "moon_down_alt_deg",
         "moon_down_frac_max", "moon_down_ratio_transfer",
         "zodi_ceiling_rule", "zodi_ceiling_amp_free",
@@ -2086,7 +2293,8 @@ class Trainer:
 
     def _shared_train_kwargs(self, *, flux_basis_matrices, flux_geom_sc_sci,
                              flux_pixel_weight=None,
-                             calib_amplitude_weights=None):
+                             calib_amplitude_weights=None,
+                             ):
         c = self.cfg
         return dict(
             n_epochs=int(c["n_epochs"]),
@@ -2115,6 +2323,7 @@ class Trainer:
             continuum_ctx_restriction=c["continuum_ctx_restriction"],
             alpha_ctx_features=c["alpha_ctx_features"],
             flux_mse_groups=tuple(c.get("flux_mse_groups", ())),
+
             flux_amp_lambda=(dict(c["flux_amp_lambda"])
                              if isinstance(c["flux_amp_lambda"], dict)
                              else float(c["flux_amp_lambda"])),
@@ -2189,6 +2398,7 @@ class Trainer:
                 n_zodi_knots=n_zodi_knots,
                 palace_oh_suffix=palace_oh_suffix,
                 palace_diffuse_suffix=palace_diffuse_suffix,
+                group_indices=group_indices,
                 input_fits_flux=(input_fits_flux if _want_w else None),
                 pixel_weight_floor_frac=float(
                     self.cfg.get("flux_pixel_weight_floor_frac", 0.05)),
@@ -2206,18 +2416,84 @@ class Trainer:
             filtered_triplet["compress_val_idx"],
             filtered_triplet["compress_test_idx"],
         )
+        # Members are independent given their seed, so they can train
+        # concurrently.  MEASURED on this laptop (MPS): one member already uses
+        # about half the GPU, so 2 workers buy ~1.5x and 4 buy ~1.9x -- real,
+        # but far from linear, and CPU threads are irrelevant (34 s vs 35 s for
+        # 30 epochs at 8 vs 2 OMP threads).  Default stays 1 so nothing changes
+        # unless asked.
+        _n_workers = max(1, int(self.cfg.get("ensemble_workers", 1)))
         members = []
-        for seed in seeds:
+        if _n_workers > 1 and len(seeds) > 1:
+            # START METHOD -- 'spawn', and it has to be.  MEASURED: 'fork'
+            # kills the worker with BrokenProcessPool as soon as the parent has
+            # touched MPS (which it has, if any member trained in-process
+            # first), because forking a live Metal context is undefined.  Spawn
+            # costs one pickle of the shared arrays per worker, done ONCE by
+            # the initializer rather than per member.
+            #
+            # Spawn re-imports the caller's __main__, so a SCRIPT caller needs
+            # the usual `if __name__ == "__main__":` guard or it will re-run
+            # its own top level in every worker.  A notebook has no such top
+            # level and is fine.  `ensemble_start_method` overrides this.
+            import multiprocessing as _mp
+            from concurrent.futures import ProcessPoolExecutor, as_completed
+            _method = str(self.cfg.get("ensemble_start_method", "spawn"))
+            _payload = {
+                'filtered_triplet': filtered_triplet,
+                'compressors': compressors,
+                'group_indices': group_indices,
+                'geom_kwargs': geom_kwargs,
+                'split_indices': split_for_members,
+                'train_row_mask': train_row_mask,
+                'shared': shared,
+            }
+            _n_workers = min(_n_workers, len(seeds))
             if verbose:
-                print(f"\n--- Ensemble member seed={seed} ---")
-            member = train_compressed_group_mlp(
-                filtered_triplet, compressors, group_indices, geom_kwargs,
-                split_indices=split_for_members,
-                seed=int(seed),
-                train_row_mask=train_row_mask,
-                **shared,
-            )
-            members.append(member)
+                print(f"\n--- Training {len(seeds)} members on {_n_workers} "
+                      f"worker process(es) via {_method}; per-member logs "
+                      f"interleave ---")
+            _by_seed = {}
+            with ProcessPoolExecutor(
+                    max_workers=_n_workers,
+                    mp_context=_mp.get_context(_method),
+                    initializer=_ensemble_worker_init,
+                    initargs=(_payload,)) as _pool:
+                _futs = {_pool.submit(_ensemble_worker_run, int(s)): int(s)
+                         for s in seeds}
+                for _fut in as_completed(_futs):
+                    try:
+                        _s, _m = _fut.result()
+                    except Exception as _exc:
+                        raise RuntimeError(
+                            f"ensemble worker failed ({type(_exc).__name__}: "
+                            f"{_exc}). With start method {_method!r}: 'spawn' "
+                            f"needs a script caller to guard its top level "
+                            f"with `if __name__ == \"__main__\":`, and 'fork' "
+                            f"breaks once the parent has touched MPS/CUDA. "
+                            f"Set ensemble_workers=1 to train sequentially."
+                        ) from _exc
+                    _by_seed[_s] = _m
+                    if verbose:
+                        print(f"  [ensemble] seed {_s} done "
+                              f"({len(_by_seed)}/{len(seeds)})")
+            # Restore the REQUESTED order: as_completed yields by finish time,
+            # and the ensemble's member order is part of its identity (the
+            # per-member Jensen corrections are indexed by it).
+            _dev = _select_torch_device()
+            members = [_member_to_device(_by_seed[int(s)], _dev) for s in seeds]
+        else:
+            for seed in seeds:
+                if verbose:
+                    print(f"\n--- Ensemble member seed={seed} ---")
+                member = train_compressed_group_mlp(
+                    filtered_triplet, compressors, group_indices, geom_kwargs,
+                    split_indices=split_for_members,
+                    seed=int(seed),
+                    train_row_mask=train_row_mask,
+                    **shared,
+                )
+                members.append(member)
 
         first = members[0]
         mlp_artifacts = {

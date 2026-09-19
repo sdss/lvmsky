@@ -2694,9 +2694,19 @@ def main():
     )
     parser.add_argument(
         "--fit-model",
-        choices=tuple(FIT_MODEL_SUFFIXES),
-        default="baseline",
-        help="Fit implementation (default: baseline)",
+        # 2026-09-18: the non-telluric fit models are no longer offered.  The
+        # telluric fit is the supported decomposition on this branch -- it fits
+        # ~30% better full-band and every downstream path (reconstruction,
+        # wavelength cache, diagnostics) now assumes it.  The implementations
+        # are still present because the telluric classes INHERIT from them
+        # (SkyDecompPalaceAijcVNFSplitZodiLSFSpline2D -> ... ->
+        # SkyDecompLSFSurfaceIterative -> SkyDecomp), so they are shared
+        # machinery rather than an alternative path; they are simply no longer
+        # reachable from the CLI.  To reproduce a pre-2026-09-17 corpus, check
+        # out a commit from before this change.
+        choices=tuple(TELLURIC_FIT_MODELS),
+        default=PALACE_VNF_SPLIT_ZODI_FIT_MODEL,
+        help="Fit implementation (default: %(default)s)",
     )
     parser.add_argument(
         "--n-refinement-cycles",

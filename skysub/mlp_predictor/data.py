@@ -950,11 +950,9 @@ def coef_wavelengths_from_basis(
     n_zodi_spline_knots=3,
     palace_oh_suffix=None,
     palace_diffuse_suffix=None,
-    cache_path=None,
     only_indices=None,
     verbose=True,
     return_k_eff=False,
-    decomp_suffix=None,
     decomposer=None,
 ):
     """Per-coefficient wavelength centroid and B^2-weighted effective extinction.
@@ -976,11 +974,13 @@ def coef_wavelengths_from_basis(
          matters for HO2 / FeO / O2Ac (continuum group) and any other broadband
          basis functions.
 
-    Costs one reconstruction call per coefficient. Both scalars are cached to
-    `cache_path` (npz keys `wavelengths_a`, `k_eff_a`); an older cache without
-    `k_eff_a` is auto-invalidated and recomputed. Components that reconstruct
-    to zero (outside the wavelength range) leave NaN in both arrays and fall
-    back to name parsing / group defaults downstream.
+    Read straight off the decomposer's design matrix when one is available
+    (~1 s for 388 coefficients); the per-coefficient reconstruction loop is
+    only a fallback. Nothing is cached: the build is cheap, and a cache keyed
+    on the coefficient names cannot tell two decomposition bases apart.
+    Components that reconstruct to zero (outside the wavelength range) leave
+    NaN in both arrays and fall back to name parsing / group defaults
+    downstream.
 
     Returns `wavelengths_a` by default, or `(wavelengths_a, k_eff_a)` when
     `return_k_eff=True`.
@@ -988,34 +988,6 @@ def coef_wavelengths_from_basis(
     coef_names = [str(n) for n in coef_names]
     n_coef = len(coef_names)
     wave = np.asarray(wave, dtype=np.float64)
-
-    # The cache key must include the wavelength grid: the same coefficient
-    # names evaluated on a different grid give different centroids, so keying
-    # on names alone would silently return stale values after a change of input
-    # product.
-    grid_key = float(np.nansum(wave.astype(np.float64) * np.arange(1, wave.size + 1)))
-    if cache_path is not None:
-        cache_path = Path(cache_path)
-        if cache_path.exists():
-            cached = np.load(cache_path, allow_pickle=True)
-            same_names = [str(x) for x in cached['coef_names']] == coef_names
-            same_grid = ('grid_key' in cached.files
-                         and np.isclose(float(cached['grid_key']), grid_key, rtol=1e-12))
-            has_k_eff = 'k_eff_a' in cached.files
-            if same_names and same_grid and has_k_eff:
-                if verbose:
-                    print(f'Basis wavelengths + k_eff loaded from cache: {cache_path}')
-                lam_cached = np.asarray(cached['wavelengths_a'], dtype=np.float64)
-                k_cached = np.asarray(cached['k_eff_a'], dtype=np.float64)
-                return (lam_cached, k_cached) if return_k_eff else lam_cached
-            if verbose:
-                if not same_names:
-                    reason = 'coefficient names'
-                elif not same_grid:
-                    reason = 'wavelength grid'
-                else:
-                    reason = 'missing k_eff_a (older cache format)'
-                print(f'Cache {cache_path} does not match on {reason}; recomputing.')
 
     if base_dir is None:
         if '_infer_base_dir_for_reconstruction' not in globals():
@@ -1122,25 +1094,6 @@ def coef_wavelengths_from_basis(
             f2_sum = float(np.nansum(f2))
             if np.isfinite(f2_sum) and f2_sum > 0.0:
                 k_eff[j] = float(np.nansum(f2 * k_wave) / f2_sum)
-
-    if cache_path is not None:
-        cache_path.parent.mkdir(parents=True, exist_ok=True)
-        # `decomp_suffix` stamps WHICH BASIS these wavelengths describe.  The
-        # coefficient NAMES are identical across decomposition variants -- the
-        # telluric fit is also OH_000..OH_356 -- so names alone cannot tell two
-        # bases apart, and a cache copied between corpora would be accepted in
-        # silence.  It is not interchangeable: the telluric fit groups OH by
-        # (v_upper, N_upper, F_upper), and the per-stick centroids differ by a
-        # median 46.9 A (p90 288 A, max 859 A, 310/357 sticks past 2 A), which
-        # would mis-assign the per-coefficient extinction and van Rhijn
-        # geometry that `airglow_coef_extinction_k` and
-        # `airglow_van_rhijn_matrix` build from these arrays.
-        np.savez(cache_path, coef_names=np.asarray(coef_names),
-                 decomp_suffix=np.asarray(str(decomp_suffix or '')),
-                 wavelengths_a=lam_eff, k_eff_a=k_eff,
-                 grid_key=np.float64(grid_key))
-        if verbose:
-            print(f'Basis wavelengths + k_eff cached to: {cache_path}')
 
     if verbose:
         n_ok = int(np.isfinite(lam_eff).sum())
@@ -2123,11 +2076,13 @@ def load_o2_vector_if_available(decomp_fits_path, spectrum_index):
 # template in both flavours and the transmission is a per-row correction applied
 # to it, so using the plain integrals is both the physical amplitude and the
 # only choice that makes the two corpora comparable.
+# 2026-09-18: the non-telluric variant was REMOVED from this branch.  The
+# telluric fit is the only supported decomposition here -- it fits ~30% better
+# full-band, and carrying a second variant meant every reconstruction path, the
+# wavelength cache and the diagnostics all had to branch.  A corpus written by
+# the old `_lsf_surface_iterative_split_zodi` path is no longer loadable from
+# this branch; check out a commit before this one to read it.
 DECOMP_VARIANTS = {
-    'split_zodi': {
-        'suffix': '_lsf_surface_iterative_split_zodi',
-        'telluric': False,
-    },
     'telluric': {
         'suffix': '_palace_aijc_vnf_split_zodi_lsf_spline2d',
         'telluric': True,
