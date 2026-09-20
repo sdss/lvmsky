@@ -3,6 +3,7 @@ import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from astropy.io import fits
+from sky_decomp.moon_zodi_model import LSF_FWHM_TO_SIGMA
 
 required = [
     "rmse_subset_results",
@@ -155,7 +156,7 @@ for case_i, j in enumerate(worst_local):
     wave_row = wave_arr if wave_arr.ndim == 1 else np.asarray(wave_arr[rr], dtype=np.float64)
     lsf_row = lsf_sci_arr if lsf_sci_arr.ndim == 1 else np.asarray(lsf_sci_arr[rr], dtype=np.float64)
 
-    lsf_sigma = lsf_row / 2.35
+    lsf_sigma = lsf_row / LSF_FWHM_TO_SIGMA
 
     lsf_state_near = load_lsf_state_if_available(EVERY10_NEAR, rr)
     lsf_state_far = load_lsf_state_if_available(EVERY10_FAR, rr)

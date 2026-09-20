@@ -34,7 +34,6 @@
 #                 intrinsic emissivity.
 #   'residual' -- nuisance-regressed partial residual (train-fit LSQ).
 import io
-import pandas as pd
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 from scipy.stats import pearsonr, spearmanr

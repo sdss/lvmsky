@@ -68,8 +68,7 @@ from __future__ import annotations
 import copy
 import time
 from dataclasses import dataclass
-from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -85,7 +84,8 @@ from .compressor import (
     expand_scores_to_coefs,
     inverse_group_compressor,
 )
-from .data import _infer_base_dir_for_reconstruction, airglow_geometry_scale
+from .data import (_infer_base_dir_for_reconstruction, airglow_geometry_scale,
+                   make_corpus_basis_decomposer)
 from . import noise
 from .metrics import metric_row
 from .ml_utils import (
@@ -944,7 +944,17 @@ def train_compressed_group_mlp(
             _mu_fm = _center_[_lo_fm:_hi_fm]
             _sc_sci_g_np = np.asarray(flux_geom_sc_sci[:, _gidx_fm], dtype=np.float32)
             _c_true_train = coef_sci[train_idx][:, _gidx_fm].astype(np.float64)
-            _flux_true_train = _c_true_train @ _A_g.astype(np.float64)
+            # Geometry goes INSIDE the basis product, exactly as
+            # `compressed_loss` applies it: `(_em_true * _g_row) @ A`.
+            # Calibrating `scale_match` on a geometry-free flux measures a
+            # quantity the loss never evaluates.  Harmless for groups whose
+            # geometry scale is identically 1 (moon, zodi), but `continuum`
+            # is an airglow group carrying a van Rhijn scale with median
+            # 1.275 (p5-p95 1.016-1.689), so its flux term ran ~1.6x
+            # over-weighted against the other groups.
+            _flux_true_train = ((_c_true_train
+                                 * _sc_sci_g_np[train_idx].astype(np.float64))
+                                @ _A_g.astype(np.float64))
             # Weighted, so the scale-match below stays exact when the photon
             # weights are on.  They are row-normalised to mean 1, so this is a
             # small correction, not a change of units.
@@ -972,11 +982,10 @@ def train_compressed_group_mlp(
             # log((A_pred + eps)/(A_true + eps))**2 on the WAVELENGTH-INTEGRATED
             # flux, so eps decides where it stops caring: rows whose true
             # amplitude is well below eps contribute ~0.  Set from the median
-            # train amplitude of this group so it is scale-free, and computed
-            # with the geometry scale applied, exactly as the loss does.
-            _amp_true_train = ((_c_true_train
-                                * _sc_sci_g_np[train_idx].astype(np.float64))
-                               @ _A_g.astype(np.float64)).sum(axis=1)
+            # train amplitude of this group so it is scale-free.  It is the
+            # integral of the same geometry-scaled flux the pixel term uses,
+            # so integrate that rather than repeating the matmul.
+            _amp_true_train = _flux_true_train.sum(axis=1)
             _amp_pos = _amp_true_train[np.isfinite(_amp_true_train)
                                        & (_amp_true_train > 0.0)]
             _amp_med = float(np.median(_amp_pos)) if _amp_pos.size else 1.0
@@ -1510,9 +1519,7 @@ def train_compressed_group_mlp(
                     'boundary_scale_deg': _ZODI_REGIME_BOUNDARY_DEG,
                 }
                 continue
-            _lift_pc_clipped = _per_coef_lift(None)
-            _lift_pc_unclipped_check = _lift_pc_clipped.copy()  # already clipped inside helper
-            _n_clipped = 0  # helper always clips; count separately if needed
+            _lift_pc_clipped = _per_coef_lift(None)   # the helper clips internally
             jensen_corrections[_gname] = _lift_pc_clipped.astype(np.float64)
             print(f'Calibration: {_gname} per-coef lift range=[{_lift_pc_clipped.min():.3f}, '
                   f'{_lift_pc_clipped.max():.3f}] median={float(np.median(_lift_pc_clipped)):.3f} '
@@ -1960,6 +1967,7 @@ def _precompute_flux_basis_and_geometry(
     n_zodi_knots,
     palace_oh_suffix=None,
     palace_diffuse_suffix=None,
+    decomp_suffix=None,
     group_indices=None,
     input_fits_flux=None,
     pixel_weight_floor_frac=0.05,
@@ -1981,13 +1989,39 @@ def _precompute_flux_basis_and_geometry(
 
     with fits.open(str(input_fits_for_basis)) as hdul:
         wave_ref = np.asarray(hdul["WAVE"].data, dtype=np.float64)
-    model = SkyDecompLSFSurfaceIterative(
-        wave_ref, lsf_sigma=1.0, n_spline_knots=n_moon_knots,
-        base_dir=_infer_base_dir_for_reconstruction(),
-        palace_oh_suffix=palace_oh_suffix,
-        palace_diffuse_suffix=palace_diffuse_suffix,
-        split_zodi=split_zodi, n_zodi_spline_knots=n_zodi_knots,
-    )
+    if decomp_suffix:
+        # Build the basis the corpus was actually fitted with. Without this
+        # the loss maps coefficients to flux through a DIFFERENT basis than
+        # the one that produced them: for the telluric spline2d variant the
+        # OH template integrals come out a median 11.2% high (p5-p95
+        # 0.713-1.475, worst 2.93x), and lsf_sigma=1.0 A below is 50% wider
+        # than the corpus's real 0.67 A.
+        model, _basis_note = make_corpus_basis_decomposer(
+            wave_ref,
+            input_fits_for_basis=input_fits_for_basis,
+            decomp_suffix=decomp_suffix,
+            n_spline_knots=n_moon_knots,
+            split_zodi=split_zodi,
+            n_zodi_spline_knots=n_zodi_knots,
+            palace_oh_suffix=palace_oh_suffix,
+            palace_diffuse_suffix=palace_diffuse_suffix,
+        )
+        if verbose:
+            print(f"  [flux-basis] {_basis_note}")
+    else:
+        # Historical path, kept so a caller that passes no suffix gets exactly
+        # what it got before. It is WRONG for every current corpus -- see the
+        # branch above -- so pass cfg.data.decomp_suffix.
+        if verbose:
+            print("  [flux-basis] no decomp_suffix given: split-zodi basis at "
+                  "lsf_sigma=1.0 A, which matches no deployed corpus.")
+        model = SkyDecompLSFSurfaceIterative(
+            wave_ref, lsf_sigma=1.0, n_spline_knots=n_moon_knots,
+            base_dir=_infer_base_dir_for_reconstruction(),
+            palace_oh_suffix=palace_oh_suffix,
+            palace_diffuse_suffix=palace_diffuse_suffix,
+            split_zodi=split_zodi, n_zodi_spline_knots=n_zodi_knots,
+        )
     # Per-coefficient NATIVE-grid template integral, keyed BY NAME.
     # `design_names` and `_assemble_design_matrix()` are built from the same
     # block order inside `_build_static_basis`, so zipping them is the class's
@@ -2362,6 +2396,7 @@ class Trainer:
         n_zodi_knots,
         palace_oh_suffix=None,
         palace_diffuse_suffix=None,
+        decomp_suffix=None,
         train_row_mask=None,
         verbose=True,
     ):
@@ -2398,6 +2433,7 @@ class Trainer:
                 n_zodi_knots=n_zodi_knots,
                 palace_oh_suffix=palace_oh_suffix,
                 palace_diffuse_suffix=palace_diffuse_suffix,
+                decomp_suffix=decomp_suffix,
                 group_indices=group_indices,
                 input_fits_flux=(input_fits_flux if _want_w else None),
                 pixel_weight_floor_frac=float(

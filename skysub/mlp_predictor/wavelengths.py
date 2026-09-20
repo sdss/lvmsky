@@ -27,6 +27,8 @@ import numpy as np
 import pandas as pd
 from astropy.io import fits
 
+from sky_decomp.moon_zodi_model import LSF_FWHM_TO_SIGMA
+
 from .data import (
     _build_group_indices,
     assert_context_is_physical,
@@ -129,8 +131,12 @@ def build_coef_wavelengths(
             wave_ref, n_spline_knots=n_moon_knots, base_dir=_data._infer_base_dir_for_reconstruction(),
             split_zodi=split_zodi, n_zodi_spline_knots=n_zodi_knots,
             palace_oh_suffix=palace_oh_suffix,
-            palace_diffuse_suffix=palace_diffuse_suffix, telluric=_tel)
-        _decomposer.lsf_sigma = lsf_ref / 2.35
+            palace_diffuse_suffix=palace_diffuse_suffix, telluric=_tel,
+            # AT CONSTRUCTION. Assigning `.lsf_sigma` afterwards does not
+            # rebuild the design matrix, and this basis IS the design matrix:
+            # built at the 1.0 A default it put the OH centroids a median
+            # 13.3 A out (p95 48 A, max 82 A).
+            lsf_sigma=lsf_ref / LSF_FWHM_TO_SIGMA)
         _tel_note = (f' (telluric basis from representative row {_rep}, '
                      f'sci_airmass {_am[_rep]:.3f}, pwv {_tel["pwv_mm"]:g} mm)')
         if verbose:
@@ -138,7 +144,7 @@ def build_coef_wavelengths(
     result = coef_wavelengths_from_basis(
         coef_names=coef_names,
         wave=wave_ref,
-        lsf_sigma=lsf_ref / 2.35,
+        lsf_sigma=lsf_ref / LSF_FWHM_TO_SIGMA,
         n_spline_knots=n_moon_knots,
         split_zodi=split_zodi,
         n_zodi_spline_knots=n_zodi_knots,

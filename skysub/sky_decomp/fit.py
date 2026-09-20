@@ -124,6 +124,13 @@ O2_MAX = 8696.0
 T_O2_REF = 191.5
 T_O2_HALF_RANGE = 20.0
 O2_MIN_VALID_FRAC = 0.5
+
+# Smallest target RMS treated as real when the curvature penalties are divided
+# by data_scale**2.  Purely a divide-by-zero guard for an all-zero target:
+# anything above it is a legitimately faint row and is normalised, not floored.
+# Deliberately far below the 1.0 the old clamp used, which was large enough to
+# pin most real rows.
+_DATA_SCALE_MIN = 1e-30
 SUFFIXED_PMD_TABLES = frozenset({"pmd_popmodel_OH.dat", "pmd_refcont.dat"})
 LSF_KERNEL_SIZE = 11
 LSF_MIN_VALID_FRAC = 0.5
@@ -1461,7 +1468,9 @@ class SkyDecomp:
         -------
         dict with ``coef``, ``coef_err``, ``status``, ``bestfit``, ``resid``,
         ``resid_level``, ``n_good``, ``n_par``, ``chi2``, ``reduced_chi2``,
-        ``r2``, ``rms_resid``, ``qp_elapsed_sec``.
+        ``r2``, ``rms_resid``, ``qp_elapsed_sec``, plus the main solve's
+        ``data_scale_raw`` (before the 1.0 clamp), ``data_scale_used`` and
+        ``data_scale_clamped``, which are diagnostics only.
         """
         good = np.isfinite(flux) & np.isfinite(ivar) & (ivar > 0)
         y = flux[good]
@@ -1489,6 +1498,12 @@ class SkyDecomp:
         ):
             raise ValueError("unconstrained_indices must contain unique valid columns")
 
+        # Per-solve (raw, used) data_scale pairs, in call order: the main solve
+        # first, then the interline refit when one runs. Reported out so the
+        # clamp-activation rate can be measured across a corpus -- it decides
+        # how badly the brightness coupling documented below actually bites.
+        solve_scales: list[tuple[float, float]] = []
+
         def _solve_nonnegative_weighted(
             a_mat: np.ndarray,
             y_vec: np.ndarray,
@@ -1500,7 +1515,24 @@ class SkyDecomp:
         ) -> tuple[np.ndarray, str, float, np.ndarray, np.ndarray, float]:
             aw = a_mat * w_vec[:, None]
             yw = y_vec * w_vec
-            data_scale = max(float(np.sqrt(np.nanmean(yw**2))) if yw.size else 1.0, 1.0)
+            raw_data_scale = float(np.sqrt(np.nanmean(yw**2))) if yw.size else 1.0
+            # Normalise by the UNCLAMPED scale.  The old `max(raw, 1.0)` clamp
+            # was not a second-order detail: it pinned data_scale on 57% of the
+            # solves that produce the kept coefficients, and on a pinned row
+            # the DATA term stops being brightness-invariant too, so dividing
+            # the penalty by the clamped value would have left exactly those
+            # rows uncorrected.  The guard below is purely numerical -- an
+            # all-zero target, where the solve is degenerate at any scale.
+            #
+            # Removing the clamp IMPROVES conditioning rather than harming it:
+            # column norms are set by col_scale, not data_scale, so `yw` now
+            # has exactly unit RMS instead of as little as 0.3.
+            data_scale = (raw_data_scale
+                          if np.isfinite(raw_data_scale)
+                          and raw_data_scale > _DATA_SCALE_MIN
+                          else 1.0)
+            penalty_scale = data_scale ** 2
+            solve_scales.append((raw_data_scale, data_scale))
             aw = aw / data_scale
             yw = yw / data_scale
             col_scale = np.sqrt(np.sum(aw**2, axis=0))
@@ -1518,10 +1550,24 @@ class SkyDecomp:
             # derived after the data_scale division, so col_scale ~ 1/data_scale
             # and a penalty built as D/col_scale carries an extra data_scale**2.
             # The effective strength of moon_smooth_lambda / zodi_smooth_lambda
-            # therefore scales as flux**2: over a 13x brightness range the same
-            # lambda acts ~170x more strongly on the brightest row.  Left as-is
-            # because it is the deployed behaviour, but it is a trap for anyone
-            # calibrating these against a mixed-brightness sample.
+            # therefore scales as flux**2.
+            #
+            # MEASURED, 2026-09-19, 60 rows of gaia-stars-mask-telluric-chi2
+            # with FIT_PIXEL_WEIGHTS on, over the continuum solve that produces
+            # the coefficients that are kept:  lambda_eff / lambda_nominal is
+            # 1x at the median, 47x at p90 and 3240x at the maximum.  The
+            # clamp below floors data_scale at 1, so the distribution is
+            # one-sided -- lambda_nominal is not a typical strength, it is the
+            # FLOOR, and 57% of rows sit exactly on it while the brightest are
+            # regularised three orders of magnitude harder.  Since the bright
+            # rows are the moon-up rows, the moon spline is smoothed hardest
+            # where the moon signal is real and left loosest where the block is
+            # a ghost pinned at the amplitude floor.
+            #
+            # Left as-is because it is the deployed behaviour, but it is a trap
+            # for anyone calibrating these against a mixed-brightness sample.
+            # `data_scale_raw` is reported out of this method so a run can
+            # record its own distribution; see the `data_scale_*` META columns.
             if self.moon_smooth_lambda > 0.0 and moon_slice_local is not None:
                 i0 = moon_slice_local.start or 0
                 i1 = moon_slice_local.stop or i0
@@ -1531,7 +1577,8 @@ class SkyDecomp:
                 d2 = self._d2_moon if self._d2_moon.shape == (max(n_moon - 2, 0), n_moon) else _build_d2_operator(n_moon)
                 if d2.shape[0] > 0:
                     d2_scaled = d2 / col_scale[i0:i1][None, :]
-                    p_dense_local[i0:i1, i0:i1] += 2.0 * self.moon_smooth_lambda * (d2_scaled.T @ d2_scaled)
+                    _lam = self.moon_smooth_lambda / penalty_scale
+                    p_dense_local[i0:i1, i0:i1] += 2.0 * _lam * (d2_scaled.T @ d2_scaled)
 
             # Zodi-spline curvature penalty (same construction; usually a heavier lambda).
             if getattr(self, 'zodi_smooth_lambda', 0.0) > 0.0 and zodi_slice_local is not None:
@@ -1541,7 +1588,8 @@ class SkyDecomp:
                 d2z = self._d2_zodi if self._d2_zodi.shape == (max(n_zodi - 2, 0), n_zodi) else _build_d2_operator(n_zodi)
                 if d2z.shape[0] > 0:
                     d2z_scaled = d2z / col_scale[i0z:i1z][None, :]
-                    p_dense_local[i0z:i1z, i0z:i1z] += 2.0 * self.zodi_smooth_lambda * (d2z_scaled.T @ d2z_scaled)
+                    _lam_z = self.zodi_smooth_lambda / penalty_scale
+                    p_dense_local[i0z:i1z, i0z:i1z] += 2.0 * _lam_z * (d2z_scaled.T @ d2z_scaled)
 
             q_local = -(aw.T @ yw)
             p_local = sp.csc_matrix((p_dense_local + p_dense_local.T) / 2.0)
@@ -1953,6 +2001,9 @@ class SkyDecomp:
             "r2": r2,
             "rms_resid": rms_resid,
             "qp_elapsed_sec": qp_elapsed_sec,
+            "data_scale_raw": solve_scales[0][0] if solve_scales else np.nan,
+            "data_scale_used": solve_scales[0][1] if solve_scales else np.nan,
+            "data_scale_clamped": bool(solve_scales and solve_scales[0][0] < 1.0),
         }
 
     @staticmethod

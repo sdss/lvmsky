@@ -339,6 +339,13 @@ def constraint_bits(components, prior, good=None, coef_blocks=None,
     v = _integral(components.get("zodi", 0.0), good)
     info["moon_int"] = u
     info["zodi_int"] = v
+    # NB the two ABSOLUTE tests below integrate over `good`, matching the
+    # solve. Their right-hand sides are full-grid quantities, so both the
+    # solve and this test sit ~0.76% loose against the physical target -- but
+    # they agree WITH EACH OTHER, which is what makes the reported bits
+    # meaningful. Change one and you must change the other: moving only the
+    # solve to a full-grid LHS sends `frac_zodi_anchor_pinned` from 50% to 0%
+    # while the fit is unchanged. The ratio tests are immune either way.
 
     # --- moon share against the geometry bracket -------------------------
     frac = prior.get("moon_fraction")

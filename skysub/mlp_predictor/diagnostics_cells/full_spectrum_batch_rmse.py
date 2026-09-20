@@ -5,6 +5,7 @@ import plotly.graph_objects as go
 # Explicit: the variant-aware decomposer factory is newer than this cell's
 # `required` contract, so do not rely on it being in the shared namespace.
 from mlp_predictor.data import make_reconstruction_decomposer
+from sky_decomp.moon_zodi_model import LSF_FWHM_TO_SIGMA
 
 RUN_RMSE_SUBSET_EVAL = True  # Set True to execute this slower evaluation cell.
 
@@ -515,7 +516,7 @@ else:
         _lsf_state_near = _lsf_state_from_cache(_state_near, rr)
         _lsf_state_far  = _lsf_state_from_cache(_state_far,  rr)
         _lsf_state_sci  = _lsf_state_from_cache(_state_sci,  rr)
-        _lsf_sigma_fallback = lsf_row / 2.35
+        _lsf_sigma_fallback = lsf_row / LSF_FWHM_TO_SIGMA
 
         _o2_vec_near = _o2_vec_from_cache(_state_near, rr)
         _o2_vec_far  = _o2_vec_from_cache(_state_far,  rr)

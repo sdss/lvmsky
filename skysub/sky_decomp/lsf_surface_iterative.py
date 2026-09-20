@@ -322,7 +322,23 @@ def continuum_fit_weights(
     line_weight: float = 5.0e-4,
     huber_transition_sigma: float = 3.0,
 ) -> tuple[np.ndarray, dict[str, float]]:
-    """Return skyline-protected weights for a continuum-dominated solve."""
+    """Return skyline-protected weights for a continuum-dominated solve.
+
+    The Huber step decides which pixels are outliers, on the residual in
+    NOISE units, ``|r| * sqrt(ivar)``. That has to match the weighting it
+    feeds: the factor is multiplied INTO ``ivar``, so testing the RAW
+    residual instead -- as this did before 2026-09-20 -- mixes an absolute
+    outlier test with an inverse-variance weighting. The two agree only when
+    ivar is constant across a channel, and under photon weighting ivar spans
+    ~90x within one, so a bright pixel was being clipped as an outlier while
+    sitting well inside its own, larger, noise.
+
+    Weights are renormalised PER LSF CHANNEL, which makes every channel
+    contribute equally regardless of its own noise. That is not a likelihood,
+    but it protects the blue, where the moon/zodi colour separation lives:
+    normalising once per row instead costs 13.5% of the blue chi2 on dark
+    rows (measured 2026-09-20).
+    """
     wave = np.asarray(wave, dtype=float)
     residual = np.asarray(residual, dtype=float)
     ivar = np.asarray(ivar, dtype=float)
@@ -335,7 +351,15 @@ def continuum_fit_weights(
         raise ValueError("huber_transition_sigma must be positive")
 
     valid = np.isfinite(residual) & np.isfinite(ivar) & (ivar > 0.0) & ~skyline_mask
-    global_sigma = _robust_mad(residual[valid])
+    # The quantity the outlier test is applied to. SIGNED, because
+    # `_robust_mad` is taken about zero and MAD(|x|) != MAD(x); taking the
+    # absolute value here would move the threshold as well as the units. In
+    # noise units a correct noise model gives MAD ~ 1, but the MAD is still
+    # taken rather than assumed, so a miscalibrated ivar cannot turn the
+    # Huber step into a hard cut at k.
+    score = residual * np.sqrt(ivar)
+    score = np.where(np.isfinite(score), score, np.nan)
+    global_sigma = _robust_mad(score[valid])
     if not np.isfinite(global_sigma) or global_sigma <= 0.0:
         global_sigma = 1.0
 
@@ -344,12 +368,12 @@ def continuum_fit_weights(
     channel_noise: dict[str, float] = {}
     for channel, lower, upper in LSF_CHANNELS:
         channel_use = valid & _channel_mask(wave, lower, upper)
-        sigma = _robust_mad(residual[channel_use])
+        sigma = _robust_mad(score[channel_use])
         if not np.isfinite(sigma) or sigma <= 0.0:
             sigma = global_sigma
         channel_noise[channel] = float(sigma)
 
-        absolute = np.abs(residual[channel_use])
+        absolute = np.abs(score[channel_use])
         threshold = huber_transition_sigma * sigma
         huber = np.ones_like(absolute)
         outside = absolute > threshold
@@ -1653,6 +1677,13 @@ class SkyDecompLSFSurfaceIterative(SkyDecomp):
             fit.get("coef_err", np.full_like(coefficient, np.nan)),
             dtype=float,
         )
+        # Diagnostic only: the UNCLAMPED target RMS this solve saw. The moon
+        # and zodi curvature penalties act with strength lambda * data_scale**2
+        # (see `_solve_nonnegative_weighted`), so this is what says how hard
+        # the nominal lambda actually pulled on this row. Overwritten each
+        # refinement cycle, so it ends up describing the solve that produced
+        # the continuum that was kept.
+        self._data_scale_cont = float(fit.get("data_scale_raw", np.nan))
         continuum = design.T @ coefficient
         return fit, coefficient, coef_err, continuum, weights, channel_noise
 
@@ -1685,6 +1716,7 @@ class SkyDecompLSFSurfaceIterative(SkyDecomp):
             diffuse_slice=slices["diffuse"],
             zodi_slice=slices.get("zodi"),
         )
+        self._data_scale_seed = float(seed.get("data_scale_raw", np.nan))
         seed_coefficient = np.asarray(seed["coef"], dtype=float)
         seed_coef_err = np.asarray(
             seed.get("coef_err", np.full_like(seed_coefficient, np.nan)),

@@ -58,7 +58,6 @@ _min_s = np.where(np.isfinite(_min_s), _min_s, np.nan)
 # averages a bright peak with 28 shoulder knots).
 _snr_med = _med_c / _med_s
 _snr_peak = _max_c / _min_s
-_snr_med_c_over_min_s = _med_c / _min_s   # median coef vs sigma at best knot
 
 # Bin by moon state.
 _bins = [

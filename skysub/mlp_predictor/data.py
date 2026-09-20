@@ -22,9 +22,9 @@ import os
 import re
 import urllib.error
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -729,10 +729,6 @@ def read_decomp_dataset(decomp_fits_path, input_fits_path, context_columns,
 # diagnostics and the model.  Coefficients are consumed in order so each one
 # lands in exactly one group.
 # ---------------------------------------------------------------------------
-
-def _contains_any(name, needles):
-    return any(token in name for token in needles)
-
 
 # Coefficient-name schema. One-to-one with the design_names produced by
 # SkyDecomp._build_static_basis() in skysub/sky_decomp/fit.py. Every entry
@@ -1949,18 +1945,6 @@ def build_triplet_coef_dataset(
 # ==========================================================================
 
 # Reused reconstruction/prediction helpers for quick visual checks
-def _meta_row_to_dict_upper(meta_row):
-    names = list(meta_row.colnames) if hasattr(meta_row, 'colnames') else list(meta_row.dtype.names)
-    return {str(k).upper(): k for k in names}
-
-def _safe_float(x):
-    arr = np.asarray(x)
-    if arr.size == 0:
-        raise ValueError('Empty value cannot be converted to float')
-    if arr.shape != ():
-        arr = arr.ravel()[0]
-    return float(arr)
-
 
 def _infer_base_dir_for_reconstruction():
     _cwd = Path.cwd().resolve()
@@ -2249,18 +2233,26 @@ def make_reconstruction_decomposer(wave, *, n_spline_knots, base_dir,
                                    split_zodi=True, n_zodi_spline_knots=3,
                                    palace_oh_suffix=None,
                                    palace_diffuse_suffix=None,
-                                   telluric=None):
+                                   telluric=None,
+                                   lsf_sigma=1.0):
     """Build the decomposer whose basis matches how the corpus was fitted.
 
     `telluric` is the dict from `telluric_row_kwargs` (per row), or None for the
-    production split-zodi flavour.  The telluric branch mirrors
+    production split-zodi flavour.
+
+    `lsf_sigma` MUST be passed at construction to take effect: the design
+    matrix is built in the constructor and assigning `.lsf_sigma` afterwards
+    does NOT rebuild it. Leaving the 1.0 A default in place while assigning
+    the real width afterwards silently builds the basis at the wrong
+    resolution -- measured on the telluric variant as a median 13.3 A shift in
+    the OH coefficient centroids (p95 48 A, max 82 A).  The telluric branch mirrors
     decompose_parallel's constructor, including
     `roughness_fraction=1e-4` -- that is a BASIS-shaping knob on the LSF
     solution, not a fitting-only one, so it has to match.
     """
     from sky_decomp.lsf_surface_iterative import (
         LSFSurfaceIterativeConfig, SkyDecompLSFSurfaceIterative)
-    _common = dict(lsf_sigma=1.0, n_spline_knots=int(n_spline_knots),
+    _common = dict(lsf_sigma=lsf_sigma, n_spline_knots=int(n_spline_knots),
                    base_dir=base_dir, palace_oh_suffix=palace_oh_suffix,
                    palace_diffuse_suffix=palace_diffuse_suffix,
                    split_zodi=bool(split_zodi),
@@ -2273,6 +2265,97 @@ def make_reconstruction_decomposer(wave, *, n_spline_knots, base_dir,
         config=LSFSurfaceIterativeConfig(n_refinement_cycles=5,
                                          roughness_fraction=1.0e-4),
         **_common, **telluric)
+
+
+def make_corpus_basis_decomposer(wave_ref, *, input_fits_for_basis, decomp_suffix,
+                                 n_spline_knots, split_zodi, n_zodi_spline_knots,
+                                 palace_oh_suffix=None, palace_diffuse_suffix=None,
+                                 kind='sci', verbose=False):
+    """One decomposer whose basis matches how the corpus was fitted.
+
+    Anything that needs a SINGLE basis for a whole corpus -- the coefficient
+    wavelengths, the integrated-amplitude weights, the training loss's flux
+    basis -- faces the same two problems, and this is the one place they are
+    solved:
+
+    * A telluric corpus divides its design by a PER-ROW transmission, so a
+      representative row has to stand in for all of them. The median-airmass
+      row is that choice; see `telluric_representative_row` for why it is a
+      mild one.
+    * The LSF is not a constant. `make_reconstruction_decomposer` defaults to
+      `lsf_sigma=1.0` A, which is nobody's LSF; the real per-pixel width comes
+      from the input stack's LSF plane, as FWHM, so it is divided by 2.35.
+
+    Getting either wrong produces a basis that silently disagrees with the one
+    the coefficients were fitted against: for `palace-aijc-vnf-split-zodi-lsf-
+    spline2d` the OH template integrals come out a median 11.2% high, p5-p95
+    0.713-1.475, worst case 2.93x.
+
+    Returns ``(decomposer, note)``; ``note`` is a short provenance string for
+    logging. ``decomp_suffix=None`` returns the plain split-zodi decomposer,
+    which is the historical behaviour.
+    """
+    from astropy.io import fits as _fits
+    from astropy.table import Table as _Table
+
+    wave_ref = np.asarray(wave_ref, dtype=np.float64)
+    wave_ref = wave_ref if wave_ref.ndim == 1 else wave_ref[0]
+    _lsf_ext = {'sci': 'LSF_SCI', 'sky1': 'LSF_SKY_NEAR', 'near': 'LSF_SKY_NEAR',
+                'sky2': 'LSF_SKY_FAR', 'far': 'LSF_SKY_FAR'}[str(kind)]
+
+    _variant = decomp_variant_for_suffix(str(decomp_suffix or ''))
+    _is_telluric = bool(_variant is not None
+                        and DECOMP_VARIANTS[_variant]['telluric'])
+
+    with _fits.open(str(input_fits_for_basis), memmap=False) as _h:
+        _meta = _Table(_h['META'].data)
+        _lsf_plane = np.asarray(_h[_lsf_ext].data, dtype=np.float64)
+
+    _tel = None
+    _note = 'split-zodi basis'
+    _rep = None
+    if _is_telluric:
+        _rep = telluric_representative_row(input_fits_for_basis)
+        _tel = telluric_row_kwargs(_meta, _rep, str(kind), wave_ref,
+                                   _lsf_plane[_rep])
+        _am = float(np.asarray(_meta['sci_airmass'], dtype=np.float64)[_rep])
+        _note = (f'telluric basis from representative row {_rep}, '
+                 f'sci_airmass {_am:.3f}, pwv {_tel["pwv_mm"]:g} mm')
+
+    # Resolve the width BEFORE constructing: the design matrix is built in
+    # the constructor and a later assignment does not rebuild it.
+    from sky_decomp.moon_zodi_model import LSF_FWHM_TO_SIGMA
+    _lsf_ref = _lsf_plane[_rep] if _rep is not None else np.nanmedian(_lsf_plane, axis=0)
+    _sigma = np.asarray(_lsf_ref, dtype=np.float64) / LSF_FWHM_TO_SIGMA
+    _dec = make_reconstruction_decomposer(
+        wave_ref, n_spline_knots=int(n_spline_knots),
+        base_dir=_infer_base_dir_for_reconstruction(),
+        split_zodi=bool(split_zodi),
+        n_zodi_spline_knots=int(n_zodi_spline_knots),
+        palace_oh_suffix=palace_oh_suffix,
+        palace_diffuse_suffix=palace_diffuse_suffix,
+        telluric=_tel, lsf_sigma=_sigma)
+
+    _note += f', lsf_sigma median {float(np.nanmedian(_sigma)):.3f} A'
+
+    # The spline2d class renders its lines through a fitted LSF SURFACE and
+    # raises on a None state, so a caller that wants `_assemble_refined_
+    # matrices()` (rather than the static `design_matrix`) has to install one.
+    # `_nominal_state` builds it from `lsf_sigma`, which is why it is set
+    # first.
+    #
+    # APPROXIMATION, and the reason this is not simply "the corpus's basis":
+    # the nominal state is a Gaussian surface at the real median width, not
+    # the per-row 2-D M-spline surface each row was actually fitted with. It
+    # captures the telluric transmission and the correct LSF WIDTH -- the two
+    # things that were plainly wrong -- but not the per-row LSF SHAPE. A
+    # per-row basis would mean rebuilding it 14469 times.
+    if getattr(_dec, 'lsf_surface_state', None) is None and hasattr(_dec, '_nominal_state'):
+        _dec._set_lsf_state(_dec._nominal_state('corpus_basis_nominal_lsf'))
+        _note += ', nominal LSF surface'
+    if verbose:
+        print(f'  [basis] {_note}')
+    return _dec, _note
 
 
 def reconstruct_with_lsf(wave, coef, lsf, *, n_spline_knots=25, base_dir=None,
@@ -2795,7 +2878,6 @@ def sci_continuum_colour_keep_mask(
 
 
 MOON_MODEL_FEATURE_NAMES = ['moon_model_log_ratio']
-_MOON_MODEL_FLOOR = 1.0e-6
 
 # v2 cache features, added 2026-09-09 alongside the transfer ratio because they
 # come out of the same cache load and validation.  Both are PER ARM.

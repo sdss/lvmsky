@@ -20,6 +20,7 @@
 # on the every10 corpus files (fast: ~1 s per row after basis build).
 import time as _time
 from pathlib import Path
+from sky_decomp.moon_zodi_model import LSF_FWHM_TO_SIGMA
 
 required = ['filtered_triplet', 'mlp_artifacts', 'predict_sci_coefficients_default',
             'context_cols', 'build_triplet_coef_dataset',
@@ -312,7 +313,7 @@ print(f'  atlas stacks: {(2 + 2 * len(_ATLAS_COMPONENTS)) * _n_pick * _n_pix * 4
 _t0 = _time.perf_counter()
 for _i, _rr in enumerate(sel_rows):
     _lsf_row = lsf_sci_arr if lsf_sci_arr.ndim == 1 else lsf_sci_arr[int(_rr)]
-    _lsf_sigma_fb = _lsf_row / 2.35
+    _lsf_sigma_fb = _lsf_row / LSF_FWHM_TO_SIGMA
     _y_true, _c_true = _reconstruct_sci_total(coef_sci_true_atlas[_i], _rr, _lsf_sigma_fb)
     _y_pred, _c_pred = _reconstruct_sci_total(coef_sci_pred_atlas[_i], _rr, _lsf_sigma_fb)
     _y_true = _y_true
@@ -333,15 +334,12 @@ print(f'  atlas reconstruction: {_time.perf_counter() - _t0:.1f}s '
 _med   = np.nanmedian(_resid, axis=0)
 _p16   = np.nanpercentile(_resid, 16, axis=0)
 _p84   = np.nanpercentile(_resid, 84, axis=0)
-_iqr   = _p84 - _p16
 _truth_med = np.nanmedian(_truth, axis=0)
 
 # Normalise residual by the local truth median so a common frac_residual axis
 # is meaningful across the range.
 _denom = np.where(np.abs(_truth_med) > 1e-30, _truth_med, np.nan)
 _med_frac = _med   / _denom
-_p16_frac = _p16   / _denom
-_p84_frac = _p84   / _denom
 
 # ---- Moon-up / moon-down split (2026-09-10) -----------------------------
 # The two regimes are different problems, and averaging them hides both.

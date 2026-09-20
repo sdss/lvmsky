@@ -8,14 +8,7 @@ EVERY10_NEAR = f"{_e10_stem}_decomp_sky1{_e10_suffix}.fits"
 EVERY10_FAR = f"{_e10_stem}_decomp_sky2{_e10_suffix}.fits"
 EVERY10_SCI = f"{_e10_stem}_decomp_sci{_e10_suffix}.fits"
 
-# Set the row to reconstruct and inspect.
-# REQUESTED_ROW = 612
-# REQUESTED_ROW = 500
-REQUESTED_ROW = 978
-# REQUESTED_ROW = 1481
-# REQUESTED_ROW = 741 #OK
-# REQUESTED_ROW = 742
-# REQUESTED_ROW = 830
+REQUESTED_ROW = 1
 
 # Overlay the frozen physical Moon/Zodi model on the three flux panels
 # (see 5b below).  Costs ~0.25 s per arm; set False to skip it entirely.
@@ -268,7 +261,6 @@ resid_row = flux_sci_pred_row - flux_sci_true_row
 rmse_row = float(np.sqrt(np.mean(resid_row ** 2)))
 rmse_row_display = float(rmse_row * FACTOR)
 mae_row = float(np.mean(np.abs(resid_row)))
-rel_resid_row = resid_row / np.where(flux_sci_true_row != 0, flux_sci_true_row, np.nan)
 
 rmse_near_recon = float(np.sqrt(np.mean((flux_near_recon_row - flux_near_row) ** 2)))
 rmse_far_recon = float(np.sqrt(np.mean((flux_far_recon_row - flux_far_row) ** 2)))
@@ -309,6 +301,75 @@ wrmse_far_recon  = float(pixel_wrmse_per_row(
 wrmse_row_pix    = float(pixel_wrmse_per_row(
     flux_sci_pred_row,   flux_sci_true_row, _sig_sci_pix)[0])
 
+# 5c) Absolute photon chi2 for this row, per pixel.
+#
+# Two curves, and the second is what makes the first readable. The predicted
+# reconstruction's chi2 alone conflates two questions: a median of 4 looks
+# like a transfer failure until the DECOMPOSITION's own fit is shown sitting
+# at 3.9 on the same pixels under the same noise model. So the panel carries
+#
+#   chi2 recon(pred)  how well the PREDICTED coefficients describe this row
+#   chi2 recon(sci)   how well the FITTED coefficients do -- the ML floor
+#
+# Their ratio is the honest statement of what the transfer costs here.
+# Conventions match `full_spectrum_batch_rmse` so the two panels are
+# comparable: single-fibre scale by default, the shared variance floor, and
+# NO renormalisation -- the scale is absolute, and dividing by the median
+# would throw away the only thing the absolute model bought.
+CHI2_SINGLE_FIBRE = True      # per-fibre noise, not the stacked level
+CHI2_EXPTIME_S = 900.0
+CHI2_BLUE_MAX_A = 6000.0
+
+chi2_pix_pred = None
+chi2_pix_self = None
+chi2_row_pred = chi2_row_self = float("nan")
+chi2_blue_pred = chi2_blue_self = float("nan")
+try:
+    from mlp_predictor.noise import (load_absolute_sensitivity as _load_sens_abs,
+                                     photon_variance_absolute as _phot_var_abs,
+                                     floor_variance as _floor_var)
+except Exception as _exc_c2:                                   # pragma: no cover
+    print(f"  [chi2] mlp_predictor.noise unavailable ({type(_exc_c2).__name__}); "
+          f"the chi2 panel is omitted.")
+else:
+    _sens_c2 = np.asarray(_load_sens_abs(wave_row), dtype=np.float64)
+    _dwave_c2 = float(np.median(np.diff(wave_row)))
+    _nfib_c2 = None
+    if not CHI2_SINGLE_FIBRE:
+        from astropy.io import fits as _fits_c2
+        with _fits_c2.open(EVERY10_INPUT, memmap=True) as _h_c2:
+            _cols_c2 = {c.lower(): c for c in _h_c2["META"].columns.names}
+            _nf_col = next((_cols_c2[c] for c in ("fibers_sci_used", "fibers_sci")
+                            if c in _cols_c2), None)
+            if _nf_col is not None:
+                _v_c2 = float(np.asarray(_h_c2["META"].data[_nf_col])[idx_row])
+                _nfib_c2 = _v_c2 if np.isfinite(_v_c2) and _v_c2 > 0 else None
+        if _nfib_c2 is None:
+            print("  [chi2] META carries no usable fibre count; the stacked "
+                  "level is per-fibre and so an OVER-estimate.")
+    # `photon_variance_absolute` and `floor_variance` are row-wise and take a
+    # 2-D (n_row, n_wave) array; this cell has one row, so widen and squeeze.
+    _var_c2 = _floor_var(_phot_var_abs(flux_sci_true_row[None, :], _sens_c2,
+                                       exptime=CHI2_EXPTIME_S,
+                                       dwave=_dwave_c2,
+                                       n_fibres=(None if _nfib_c2 is None
+                                                 else [_nfib_c2])))[0]
+    # The mask deliberately does NOT require flux > 0: the loss keeps
+    # non-positive pixels by mapping them onto the row's median variance, and
+    # dropping them here would measure a different noise model from the one
+    # being tested.
+    _good_c2 = (np.isfinite(flux_sci_true_row) & np.isfinite(_sens_c2)
+                & (_sens_c2 > 0) & np.isfinite(_var_c2) & (_var_c2 > 0))
+    _resid_self_row = flux_sci_true_recon_row - flux_sci_true_row
+    chi2_pix_pred = np.where(_good_c2, resid_row ** 2 / _var_c2, np.nan)
+    chi2_pix_self = np.where(_good_c2, _resid_self_row ** 2 / _var_c2, np.nan)
+    _blue_c2 = _good_c2 & (wave_row < CHI2_BLUE_MAX_A)
+    chi2_row_pred = float(np.nanmean(chi2_pix_pred))
+    chi2_row_self = float(np.nanmean(chi2_pix_self))
+    if _blue_c2.any():
+        chi2_blue_pred = float(np.nanmean(chi2_pix_pred[_blue_c2]))
+        chi2_blue_self = float(np.nanmean(chi2_pix_self[_blue_c2]))
+
 print("Single-row reconstruction summary (every10, default coefficients)")
 print(f"  row index (input file) = {idx_row}")
 print(f"  row index (triplet pos) = {triplet_pos}")
@@ -329,6 +390,15 @@ print(f"  sci row pRMSE          = {rmse_row:.6g}")
 print(f"  sci row pWRMSE         = {wrmse_row_pix:.6g}")
 print(f"  sci row pRMSE (x{FACTOR:.3g} display units) = {rmse_row_display:.6g}")
 print(f"  sci row MAE            = {mae_row:.6g}")
+if chi2_pix_pred is not None:
+    _c2_scale = "single fibre" if CHI2_SINGLE_FIBRE else "median stack of this row's fibres"
+    print(f"  photon chi2/pix ({_c2_scale})")
+    print(f"    recon(pred) full / blue = {chi2_row_pred:.4g} / {chi2_blue_pred:.4g}")
+    print(f"    recon(sci)  full / blue = {chi2_row_self:.4g} / {chi2_blue_self:.4g}"
+          f"   <- the decomposition's own floor")
+    if np.isfinite(chi2_row_self) and chi2_row_self > 0:
+        print(f"    ratio pred/sci          = {chi2_row_pred / chi2_row_self:.3f}"
+              f"   (1.0 = the transfer costs nothing on this row)")
 
 # 5b) Training-density audit in regime space. This replaces the earlier
 # coef_err_sci percentile audit -- which was mostly a brightness proxy --
@@ -681,23 +751,34 @@ if _mz_overlay:
     print()
 
 
-# 6) Four-panel diagnostic plot:
+# 6) Diagnostic plot:
 #    row1: near observed vs reconstruction from near coefficients
 #    row2: far observed vs reconstruction from far coefficients
 #    row3: science true vs science prediction
-#    row4: science relative residual
+#    row4: science residual
+#    row5: per-pixel photon chi2, prediction against the decomposition's floor
+#          (omitted when the noise model could not be loaded)
+_SHOW_CHI2_PANEL = chi2_pix_pred is not None
+_CHI2_ROW = 5
+_panel_titles = [
+    "Near: observed vs reconstructed from near coefficients",
+    "Far: observed vs reconstructed from far coefficients",
+    "Science: observed / recon(sci coef) / recon(pred)",
+    "Science residual: pred - true",
+]
+_panel_heights = [0.22, 0.22, 0.30, 0.13]
+if _SHOW_CHI2_PANEL:
+    _panel_titles.append(
+        f"Photon chi2 per pixel ({'single fibre' if CHI2_SINGLE_FIBRE else 'stacked'})"
+        f" -- recon(pred) {chi2_row_pred:.3g} vs decomposition floor {chi2_row_self:.3g}")
+    _panel_heights.append(0.13)
 fig = make_subplots(
-    rows=4,
+    rows=len(_panel_titles),
     cols=1,
     shared_xaxes=True,
     vertical_spacing=0.04,
-    subplot_titles=(
-        "Near: observed vs reconstructed from near coefficients",
-        "Far: observed vs reconstructed from far coefficients",
-        "Science: observed / recon(sci coef) / recon(pred)",
-        "Science residual: (pred - true) / true",
-    ),
-    row_heights=[0.24, 0.24, 0.34, 0.18],
+    subplot_titles=tuple(_panel_titles),
+    row_heights=_panel_heights,
 )
 
 # Physical Moon/Zodi model overlays, one pair per flux panel.  Dotted so they
@@ -820,7 +901,7 @@ fig.add_trace(
 fig.add_trace(
     go.Scattergl(
         x=wave_row,
-        y=rel_resid_row,
+        y=resid_row * FACTOR,
         mode="lines",
         name="science residual",
         line=dict(color="#d62728", width=1.0),
@@ -830,11 +911,55 @@ fig.add_trace(
 )
 fig.add_hline(y=0, line=dict(color="black", width=0.8, dash="dash"), row=4, col=1)
 
+if _SHOW_CHI2_PANEL:
+    # The decomposition's own fit goes on FIRST so it draws underneath: it is
+    # the reference the prediction is read against, not a second result.
+    fig.add_trace(
+        go.Scattergl(
+            x=wave_row,
+            y=chi2_pix_self,
+            mode="lines",
+            name="chi2 recon(sci coef) -- decomposition floor",
+            line=dict(color="#7f7f7f", width=0.9),
+        ),
+        row=_CHI2_ROW,
+        col=1,
+    )
+    fig.add_trace(
+        go.Scattergl(
+            x=wave_row,
+            y=chi2_pix_pred,
+            mode="lines",
+            name="chi2 recon(pred)",
+            line=dict(color="#d62728", width=1.0),
+        ),
+        row=_CHI2_ROW,
+        col=1,
+    )
+    # chi2 = 1 is "residual consistent with the photon noise" on this scale.
+    fig.add_hline(y=1.0, line=dict(color="black", width=0.8, dash="dash"),
+                  row=_CHI2_ROW, col=1)
+
 fig.update_yaxes(type="log", title_text="Near flux", row=1, col=1)
 fig.update_yaxes(type="log", title_text="Far flux", row=2, col=1)
 fig.update_yaxes(type="log", title_text="Science flux", row=3, col=1)
-fig.update_yaxes(type="linear", title_text="(pred-true)/true", row=4, col=1)
-fig.update_xaxes(title_text="Wavelength [A]", row=4, col=1)
+fig.update_yaxes(type="linear", title_text="pred - true", row=4, col=1)
+if _SHOW_CHI2_PANEL:
+    # Log, unlike the batch panel's linear axis: that one plots a ROW MEAN,
+    # which lives inside a decade, whereas per-pixel chi2 spans several.
+    fig.update_yaxes(type="log", title_text="chi2 / pixel", row=_CHI2_ROW, col=1)
+fig.update_xaxes(title_text="Wavelength [A]", row=len(_panel_titles), col=1)
+
+if _SHOW_CHI2_PANEL:
+    _ratio_txt = (f"{chi2_row_pred / chi2_row_self:.2f}x"
+                  if np.isfinite(chi2_row_self) and chi2_row_self > 0 else "n/a")
+    _chi2_subline = (
+        f"photon chi2/pix full (blue&lt;{CHI2_BLUE_MAX_A:.0f}A): "
+        f"recon(pred) {chi2_row_pred:.3g} ({chi2_blue_pred:.3g})  ·  "
+        f"decomposition floor {chi2_row_self:.3g} ({chi2_blue_self:.3g})  ·  "
+        f"pred/floor = {_ratio_txt}<br>")
+else:
+    _chi2_subline = ""
 
 fig.update_layout(
     template="plotly_white",
@@ -846,13 +971,14 @@ fig.update_layout(
             f"{wrmse_near_recon:.3g} / {wrmse_far_recon:.3g} / "
             f"{wrmse_row_pix:.3g}  ·  sci display pRMSE = "
             f"{rmse_row_display:.3g}</sub><br>"
+            f"<sub>{_chi2_subline}</sub>"
             f"<sub>{_pct_subline}</sub>"
         ),
         font=dict(size=13),
         x=0.02, xanchor='left',
         y=0.995, yanchor='top',
     ),
-    height=1220,
+    height=1220 + (170 if _SHOW_CHI2_PANEL else 0),
     margin=dict(t=110, r=20, l=70, b=90),
     legend=dict(
         orientation="h",

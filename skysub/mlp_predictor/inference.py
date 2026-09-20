@@ -208,9 +208,6 @@ def build_triplet_from_pointings(
 #
 # The extra cost over the cache path is one `MoonZodiPhysicalModel.predict` and
 # one `geometry_amplitude_prior` per arm per row.
-MOON_MODEL_CTX_INPUTS = ("wave", "lsf_near", "lsf_far", "lsf_sci", "date_obs")
-
-
 def _moon_model_augment_direct(triplet, *, wave, lsf_near, lsf_far, lsf_sci,
                                date_obs, expnum=None, exposure_seconds=900.0,
                                verbose=True):

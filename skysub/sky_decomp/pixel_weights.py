@@ -210,6 +210,12 @@ def pixel_ivar(flux, wave, *, exptime=DEFAULT_EXPTIME_S, dwave=None,
     # Physical flux for the Poisson term; a non-positive pixel is not a
     # negative variance, it is a pixel the floor has to rescue, so take |flux|
     # and let `floor_variance` do the clipping.
+    #
+    # Taking max(flux, 0) instead -- arguably the truer Poisson statement,
+    # since a pixel measured below zero has a signal near zero rather than a
+    # large one -- was measured on 2026-09-20 and is a null: it reaches only
+    # the 2.2% of rows with >1% negative pixels (all moon-down, all blue) and
+    # moved their blue chi2 by -0.1%.
     phys = np.abs(flux) / float(flux_scale)
     var = photon_variance(phys, sens, exptime=exptime, dwave=dwave,
                           n_fibres=n_fibres, median_stack=median_stack)

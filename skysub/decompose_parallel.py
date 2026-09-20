@@ -230,10 +230,6 @@ ADAM25K_NIV_CONTINUUM_FIT_MODEL = LEGACY_ADAM25K_SPLIT_ZODI_FIT_MODEL
 PALACE_VNF_PCA30_NIV_CONTINUUM_FIT_MODEL = (
     LEGACY_PALACE_VNF_PCA30_SPLIT_ZODI_FIT_MODEL
 )
-NIV_CONTINUUM_FIT_MODELS = (
-    ADAM25K_NIV_CONTINUUM_FIT_MODEL,
-    PALACE_VNF_PCA30_NIV_CONTINUUM_FIT_MODEL,
-)
 ADAM25K_SPLIT_ZODI_FIT_MODELS = (
     ADAM25K_SPLIT_ZODI_FIT_MODEL,
     LEGACY_ADAM25K_SPLIT_ZODI_FIT_MODEL,
@@ -257,6 +253,7 @@ TELLURIC_FIT_MODELS = (
 # settings validated on the p40_p70 every10 identifiability notebook.
 SPLIT_ZODI_N_KNOTS_DEFAULT = SPLIT_ZODI_CONTINUUM_DEFAULTS["n_zodi_spline_knots"]
 SPLIT_ZODI_SMOOTH_LAMBDA_DEFAULT = SPLIT_ZODI_CONTINUUM_DEFAULTS["zodi_smooth_lambda"]
+MOON_SMOOTH_LAMBDA_DEFAULT = SPLIT_ZODI_CONTINUUM_DEFAULTS["moon_smooth_lambda"]
 SPLIT_ZODI_MOON_ALBEDO_PHASE_DEG = SPLIT_ZODI_CONTINUUM_DEFAULTS[
     "moon_albedo_fiducial_phase_deg"
 ]
@@ -810,6 +807,7 @@ def init_worker(
     n_spline_knots=MOON_N_KNOTS_DEFAULT,
     n_zodi_spline_knots=SPLIT_ZODI_N_KNOTS_DEFAULT,
     zodi_smooth_lambda=SPLIT_ZODI_SMOOTH_LAMBDA_DEFAULT,
+    moon_smooth_lambda=MOON_SMOOTH_LAMBDA_DEFAULT,
     mask_science_lines=SCIENCE_LINE_MASK_ENABLED,
     centre_on_halpha=SCIENCE_LINE_MASK_CENTRE_ON_HALPHA,
     fit_pixel_weights=FIT_PIXEL_WEIGHTS,
@@ -1047,7 +1045,7 @@ def init_worker(
             "palace_suffix": palace_suffix,
             "palace_oh_suffix": palace_oh_suffix,
             "palace_diffuse_suffix": palace_diffuse_suffix,
-            "moon_smooth_lambda": 0.1,
+            "moon_smooth_lambda": float(moon_smooth_lambda),
             "moon_interline_boost": 0.0,
             "n_spline_knots": int(n_spline_knots),
             "config": LSFSurfaceIterativeConfig(
@@ -1985,6 +1983,14 @@ def _reliability_flags(result, retried=False, retry_bound=float("nan"),
         # whose whole continuum sits on the bound.
         "shape_bound_pairs": np.int32(
             constraint_info.get("shape_bound_pairs", -1)),
+        # UNCLAMPED target RMS of the seed and final-continuum solves. The
+        # curvature penalties act at lambda * max(data_scale, 1)**2, so these
+        # two columns are what let a run report its own effective smoothing
+        # strength and its own clamp rate -- both of which move when the pixel
+        # weighting changes, which is easy to miss because the nominal lambda
+        # does not.
+        "data_scale_seed": float(getattr(decomposer, "_data_scale_seed", np.nan)),
+        "data_scale_cont": float(getattr(decomposer, "_data_scale_cont", np.nan)),
     }
 
 
@@ -2251,6 +2257,7 @@ def run(
     n_spline_knots=MOON_N_KNOTS_DEFAULT,
     n_zodi_spline_knots=SPLIT_ZODI_N_KNOTS_DEFAULT,
     zodi_smooth_lambda=SPLIT_ZODI_SMOOTH_LAMBDA_DEFAULT,
+    moon_smooth_lambda=MOON_SMOOTH_LAMBDA_DEFAULT,
     diffuse_ratio_bound_dex=SPLIT_ZODI_DIFFUSE_RATIO_BOUND_DEX,
     diffuse_ratio_nominal=SPLIT_ZODI_DIFFUSE_RATIO_NOMINAL,
     diffuse_oh_centre_log10=SPLIT_ZODI_DIFFUSE_OH_CENTRE_LOG10,
@@ -2337,6 +2344,9 @@ def run(
     if fit_model in SPLIT_ZODI_FIT_MODELS:
         print(f"  n_zodi_spline_knots={n_zodi_spline_knots}, "
               f"zodi_smooth_lambda={zodi_smooth_lambda}")
+    # Printed unconditionally: these two together decide the smoothing every
+    # row actually receives, and the pair is what a later A/B has to match.
+    print(f"  moon_smooth_lambda={moon_smooth_lambda}")
     print(f"  pin_workers={pin_workers}, diagnose_threads={diagnose_threads}")
     print(f"  base_dir={base_dir}")
 
@@ -2390,6 +2400,7 @@ def run(
             int(n_spline_knots),
             int(n_zodi_spline_knots),
             float(zodi_smooth_lambda),
+            float(moon_smooth_lambda),
             bool(mask_science_lines),
             bool(centre_on_halpha),
             bool(fit_pixel_weights),
@@ -2783,6 +2794,19 @@ def main():
         ),
     )
     parser.add_argument(
+        "--moon-smooth-lambda",
+        type=float,
+        default=MOON_SMOOTH_LAMBDA_DEFAULT,
+        help=(
+            f"Curvature penalty on Moon_bs (default: {MOON_SMOOTH_LAMBDA_DEFAULT}). "
+            "This is what EVERY row gets: the penalty is normalised by "
+            "data_scale**2, so it means the same thing on a bright row as on "
+            "a faint one. Before 2026-09-20 it acted as a per-row floor that "
+            "the brightest rows exceeded by up to ~3200x, so values tuned "
+            "against older corpora do not carry over."
+        ),
+    )
+    parser.add_argument(
         "--diffuse-ratio-bound-dex",
         type=float,
         default=SPLIT_ZODI_DIFFUSE_RATIO_BOUND_DEX,
@@ -3023,6 +3047,7 @@ def main():
             n_spline_knots=args.n_spline_knots,
             n_zodi_spline_knots=args.n_zodi_spline_knots,
             zodi_smooth_lambda=args.zodi_smooth_lambda,
+            moon_smooth_lambda=args.moon_smooth_lambda,
             diffuse_ratio_bound_dex=args.diffuse_ratio_bound_dex,
             diffuse_oh_bound_dex=args.diffuse_oh_bound_dex,
             diffuse_oh_centre_log10=args.diffuse_oh_centre_log10,
