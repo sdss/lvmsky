@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lvm-medians"
+version = "0.1.0"
+description = "Build reproducible LVM median stacks with resumable Gaia TAP caching."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "astropy>=5.3",
+  "numpy>=1.25",
+  "pyvo>=1.5",
+  "requests>=2.31",
+  "rich>=13.7",
+  "tqdm>=4.65",
+  "typer>=0.15",
+]
+
+[project.optional-dependencies]
+parquet = ["pyarrow>=12"]
+dev = ["pytest>=8", "ruff>=0.6"]
+
+[project.scripts]
+lvm-medians = "lvm_medians.cli:app"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+lvm_medians = ["data/*.vot"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
