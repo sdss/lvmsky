@@ -365,6 +365,21 @@ def _write_failures(path: Path, failures: dict[int, dict[str, Any]]) -> None:
     os.replace(temporary, path)
 
 
+def failed_sframes(
+    sframe_list: Path,
+    cache_root: Path,
+    every_nth: int = 1,
+    limit: int | None = None,
+) -> list[tuple[int, Path]]:
+    """Return only SFrames recorded in the persistent failure ledger."""
+    failures = _load_failures(cache_root / "gaia-failures.jsonl")
+    return [
+        item
+        for item in read_manifest(sframe_list, every_nth, limit)
+        if expnum_from_path(item[1]) in failures
+    ]
+
+
 def fetch_gaia(
     manifest: Path,
     cache_root: Path,
@@ -378,11 +393,16 @@ def fetch_gaia(
     passband: Path | None = None,
     every_nth: int = 1,
     limit: int | None = None,
+    retry_failed: bool = False,
     progress: Callable[[dict[str, int]], None] | None = None,
 ) -> dict[str, int]:
     if workers < 1 or retries < 0 or timeout <= 0 or maxrec < 1:
         raise ValueError("workers/timeout/maxrec must be positive and retries non-negative")
-    indexed = read_manifest(manifest, every_nth, limit)
+    indexed = (
+        failed_sframes(manifest, cache_root, every_nth, limit)
+        if retry_failed
+        else read_manifest(manifest, every_nth, limit)
+    )
     sources_dir = cache_root / "sources"
     fibers_dir = cache_root / "fibers"
     sources_dir.mkdir(parents=True, exist_ok=True)
@@ -391,6 +411,8 @@ def fetch_gaia(
     failures = _load_failures(failures_path)
     service_url = resolve_service(service)
     counts = {"total": len(indexed), "completed": 0, "cached": 0, "downloaded": 0, "failed": 0}
+    if not indexed:
+        return counts
 
     def one(item: tuple[int, Path]) -> tuple[int, str, str]:
         _, sframe = item

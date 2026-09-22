@@ -13,7 +13,7 @@ dependencies = [
   "numpy>=1.25",
   "pyvo>=1.5",
   "requests>=2.31",
-  "rich>=13.7",
+  "rich>=13.7,<14",
   "tqdm>=4.65",
   "typer>=0.15",
 ]

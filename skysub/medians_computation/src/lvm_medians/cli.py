@@ -18,7 +18,7 @@ import typer
 from tqdm import tqdm
 
 from . import __version__
-from .gaia import TAP_SERVICES, cache_status, combine_gaia_tables, fetch_gaia
+from .gaia import TAP_SERVICES, cache_status, combine_gaia_tables, failed_sframes, fetch_gaia
 from .stack import build_stack, read_manifest, scan_sframes, write_manifest
 
 
@@ -257,6 +257,9 @@ def fetch_gaia_command(
     ),
     query_workers: int = typer.Option(5, min=1, help="Parallel TAP requests."),
     retries: int = typer.Option(3, min=0, help="Retries after a network or query error."),
+    retry_failed: bool = typer.Option(
+        False, "--retry-failed", help="Process only exposures in gaia-failures.jsonl."
+    ),
     timeout: float = typer.Option(120.0, min=0.1, help="HTTP timeout in seconds."),
     maxrec: int = typer.Option(1_000_000, min=1, help="TAP MAXREC value."),
     token_env: str | None = typer.Option(
@@ -270,7 +273,12 @@ def fetch_gaia_command(
     with _tracked(ctx, "fetch-gaia") as (work_dir, logger, status):
         sframe_list = (sframe_list or work_dir / "sframes.txt").expanduser().resolve()
         cache_dir = (cache_dir or work_dir / "gaia").expanduser().resolve()
-        total = len(read_manifest(sframe_list, every_nth, limit))
+        selected = (
+            failed_sframes(sframe_list, cache_dir, every_nth, limit)
+            if retry_failed
+            else read_manifest(sframe_list, every_nth, limit)
+        )
+        total = len(selected)
         bar, callback = _progress(total, "Gaia", ctx.obj["no_progress"], status)
         try:
             token = os.environ.get(token_env) if token_env else None
@@ -288,6 +296,7 @@ def fetch_gaia_command(
                 passband=passband,
                 every_nth=every_nth,
                 limit=limit,
+                retry_failed=retry_failed,
                 progress=callback,
             )
         finally:

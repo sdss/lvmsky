@@ -109,9 +109,10 @@ lvm-medians --work-dir /tmp/lvm-medians-smoke combine-gaia \
   --overwrite
 ```
 
-`fetch-gaia` can be rerun safely: valid exposure caches are reused and only
-unresolved entries are queried again. `combine-gaia` can then rebuild a single
-table entirely offline.
+`fetch-gaia --retry-failed` reads `gaia-failures.jsonl` and processes only
+previously failed exposures. A normal rerun also reuses valid caches, but checks
+every SFrame-list entry. `combine-gaia` can then rebuild a single table entirely
+offline.
 
 ## Command reference
 
@@ -160,6 +161,7 @@ lvm-medians fetch-gaia [OPTIONS]
 | `--tap-service ALIAS_OR_URL` | `ari` | Built-in alias or a complete VO TAP base URL. |
 | `--query-workers INTEGER` | `5` | Concurrent TAP requests. |
 | `--retries INTEGER` | `3` | Retries after each network/query error. |
+| `--retry-failed` | off | Process only exposures recorded in `gaia-failures.jsonl`. |
 | `--timeout FLOAT` | `120` | HTTP timeout in seconds. |
 | `--maxrec INTEGER` | `1000000` | TAP `MAXREC` limit. |
 | `--token-env NAME` | unset | Read an optional bearer token from this environment variable. |
@@ -269,8 +271,8 @@ lvm-medians-work/
 Combined Gaia tables are written exactly to the `combine-gaia --output` path.
 Progress bars and `run-status.json` show completed, cached, combined, skipped,
 and failed counts. Detailed exceptions go to the log.
-`gaia-failures.jsonl` records unresolved TAP exposures; rerun `fetch-gaia` to
-retry them and then rerun `combine-gaia`.
+`gaia-failures.jsonl` records unresolved TAP exposures; run
+`fetch-gaia --retry-failed` and then rerun `combine-gaia`.
 
 Median products contain `WAVE`, seven flux/LSF image extensions, `META`, and
 `INPUT_STATUS`. Faint-fiber products contain `WAVE`, `FLUX`, combined `IVAR`,

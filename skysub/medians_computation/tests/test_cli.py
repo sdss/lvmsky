@@ -6,6 +6,7 @@ from astropy.table import Table
 from typer.testing import CliRunner
 
 from lvm_medians.cli import app
+from lvm_medians.gaia import failed_sframes
 from lvm_medians.stack import read_manifest
 
 
@@ -39,6 +40,23 @@ def test_scan_can_write_a_small_sample(tmp_path: Path) -> None:
     assert "SFrames in list: 2" in status.output
     assert "awaiting download: 2" in status.output
     assert "manifest" not in status.output.lower()
+
+
+def test_retry_failed_selects_only_failure_ledger_entries(tmp_path: Path) -> None:
+    inputs = []
+    for expnum in (1, 2, 3):
+        path = tmp_path / f"lvmSFrame-{expnum:08d}.fits"
+        path.touch()
+        inputs.append(path)
+    sframe_list = tmp_path / "sframes.txt"
+    sframe_list.write_text("".join(f"{path}\n" for path in inputs), encoding="utf-8")
+    cache_dir = tmp_path / "gaia"
+    cache_dir.mkdir()
+    (cache_dir / "gaia-failures.jsonl").write_text('{"expnum": 2}\n', encoding="utf-8")
+
+    selected = failed_sframes(sframe_list, cache_dir)
+
+    assert [path.name for _, path in selected] == ["lvmSFrame-00000002.fits"]
 
 
 def test_combine_gaia_writes_one_fits_table(tmp_path: Path) -> None:
