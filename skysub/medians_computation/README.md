@@ -112,7 +112,8 @@ lvm-medians --work-dir /tmp/lvm-medians-smoke combine-gaia \
 `fetch-gaia --retry-failed` reads `gaia-failures.jsonl` and processes only
 previously failed exposures. A normal rerun also reuses valid caches, but checks
 every SFrame-list entry. `combine-gaia` can then rebuild a single table entirely
-offline.
+offline. SFrames without physically calibrated flux are recorded in
+`gaia-skipped.jsonl` and are not retried as network failures.
 
 ## Command reference
 
@@ -177,6 +178,10 @@ Each successful exposure creates:
 - `gaia/fibers/lvmGAIA-fibers-EXPNUM.fits`: one row per exposure fiber with
   derived Gaia and synthetic LVM G-band measurements.
 
+The raw source cache remains valid when an SFrame has `FLUXCAL=NONE`. Such an
+exposure cannot provide a physical Gaia/LVM flux ratio, so it is recorded as
+skipped and has no derived fiber cache.
+
 Built-in TAP services:
 
 | Alias | URL |
@@ -205,7 +210,9 @@ lvm-medians combine-gaia --output PATH [OPTIONS]
 The command writes a partial table with `COMPLETE = false` and exits non-zero
 when some selected cache files are unavailable or corrupt. Details are written
 to the run log. FITS includes checksums and primary-header provenance; Parquet
-stores equivalent metadata in the table schema.
+stores equivalent metadata in the table schema. Intentionally skipped
+uncalibrated exposures are omitted from `--table fibers`, reported by
+`skipped`/`NSKIP`, and do not make the aggregate incomplete.
 
 ### `build-medians`
 
@@ -236,7 +243,9 @@ lvm-medians build-medians --output PATH [OPTIONS]
 catalog flux divided by its synthetic LVM `(FLUX + SKY)` G-band flux is at
 most `0.1` (10%). Fibers with no Gaia source are also kept; incomplete Gaia
 matches are rejected. This option and `--gaia-sigma` are mutually exclusive.
-Gaia selections apply only to `median` mode.
+Gaia selections apply only to `median` mode. SFrames whose flux is not
+convertible to physical flux-density units are recorded as `SKIP` in
+`INPUT_STATUS` and are not mixed into the median product.
 
 ### `status`
 
@@ -251,9 +260,9 @@ lvm-medians status [--sframe-list PATH] [--cache-dir PATH]
 | `-h`, `--help` |  | Show command help. |
 
 `SFrames in list` is the number selected by `scan`; `ready` is the number with
-a per-exposure Gaia cache; `awaiting download` is the number still needing a
-successful `fetch-gaia` request; and `failures` is the number currently listed
-in `gaia/gaia-failures.jsonl`.
+a per-exposure Gaia cache; `skipped` is the number without physically calibrated
+flux; `awaiting download` is the number still needing `fetch-gaia`; and
+`failures` is the number of retryable entries in `gaia/gaia-failures.jsonl`.
 
 ## Runtime files and recovery
 
@@ -264,6 +273,7 @@ lvm-medians-work/
 ├── logs/lvm-medians.log        # detailed run log
 └── gaia/
     ├── gaia-failures.jsonl     # unresolved network/query failures
+    ├── gaia-skipped.jsonl      # local inputs without calibrated physical flux
     ├── sources/                # raw per-exposure TAP results
     └── fibers/                 # derived per-exposure fiber measurements
 ```
@@ -271,8 +281,9 @@ lvm-medians-work/
 Combined Gaia tables are written exactly to the `combine-gaia --output` path.
 Progress bars and `run-status.json` show completed, cached, combined, skipped,
 and failed counts. Detailed exceptions go to the log.
-`gaia-failures.jsonl` records unresolved TAP exposures; run
-`fetch-gaia --retry-failed` and then rerun `combine-gaia`.
+`gaia-failures.jsonl` contains retryable TAP/source-cache failures; run
+`fetch-gaia --retry-failed` and then rerun `combine-gaia`. `gaia-skipped.jsonl`
+contains deterministic local incompatibilities and is reused on normal reruns.
 
 Median products contain `WAVE`, seven flux/LSF image extensions, `META`, and
 `INPUT_STATUS`. Faint-fiber products contain `WAVE`, `FLUX`, combined `IVAR`,

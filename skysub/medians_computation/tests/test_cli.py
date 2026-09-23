@@ -76,6 +76,11 @@ def test_combine_gaia_writes_one_fits_table(tmp_path: Path) -> None:
             }
         ).write(fibers_dir / f"lvmGAIA-fibers-{expnum:08d}.fits")
 
+    skipped = tmp_path / "lvmSFrame-00000003.fits"
+    skipped.touch()
+    inputs.append(skipped)
+    (cache_dir / "gaia-skipped.jsonl").write_text('{"expnum": 3}\n', encoding="utf-8")
+
     manifest = tmp_path / "sframes.txt"
     manifest.write_text("".join(f"{path}\n" for path in inputs), encoding="utf-8")
     output = tmp_path / "all-fibers.fits"
@@ -101,6 +106,7 @@ def test_combine_gaia_writes_one_fits_table(tmp_path: Path) -> None:
     with fits.open(output, checksum=True) as hdul:
         assert len(hdul["FIBERS"].data) == 4
         assert hdul[0].header["NEXP"] == 2
+        assert hdul[0].header["NSKIP"] == 1
         assert hdul[0].header["COMPLETE"]
 
     parquet = tmp_path / "all-fibers.parquet"

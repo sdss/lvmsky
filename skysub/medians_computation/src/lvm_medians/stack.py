@@ -163,11 +163,13 @@ def _expnum(path: Path, header: fits.Header) -> int:
 def _flux_scale(primary: fits.Header, image: fits.ImageHDU) -> float:
     raw = image.header.get("BUNIT", primary.get("BUNIT"))
     if raw is None:
-        raise ValueError("FLUX BUNIT is missing")
+        raise SkipExposure("FLUX BUNIT is missing")
     try:
         return float(u.Unit(raw).to(FLUX_UNIT))
     except (ValueError, TypeError) as exc:
-        raise ValueError(f"FLUX BUNIT is not convertible to {FLUX_UNIT}: {raw!r}") from exc
+        raise SkipExposure(
+            f"FLUX BUNIT is not convertible to {FLUX_UNIT}: {raw!r}"
+        ) from exc
 
 
 def _validate_wave(wave: np.ndarray) -> None:

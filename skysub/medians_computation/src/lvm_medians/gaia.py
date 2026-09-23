@@ -24,7 +24,7 @@ from astropy.io import fits
 from astropy.io.votable import parse
 from astropy.table import Table, vstack
 
-from .stack import _expnum, _flux_scale, expnum_from_path, read_manifest
+from .stack import SkipExposure, _expnum, _flux_scale, expnum_from_path, read_manifest
 
 TAP_SERVICES = {
     "ari": "https://gaia.ari.uni-heidelberg.de/tap",
@@ -408,9 +408,19 @@ def fetch_gaia(
     sources_dir.mkdir(parents=True, exist_ok=True)
     fibers_dir.mkdir(parents=True, exist_ok=True)
     failures_path = cache_root / "gaia-failures.jsonl"
+    skipped_path = cache_root / "gaia-skipped.jsonl"
     failures = _load_failures(failures_path)
+    skipped = _load_failures(skipped_path)
+    known_skips = skipped.copy()
     service_url = resolve_service(service)
-    counts = {"total": len(indexed), "completed": 0, "cached": 0, "downloaded": 0, "failed": 0}
+    counts = {
+        "total": len(indexed),
+        "completed": 0,
+        "cached": 0,
+        "downloaded": 0,
+        "skipped": 0,
+        "failed": 0,
+    }
     if not indexed:
         return counts
 
@@ -423,6 +433,8 @@ def fetch_gaia(
         source_path = sources_dir / f"lvmGAIA-sources-{expnum:08d}.fits"
         if _fiber_cache_valid(fiber_path, expnum, fiberids):
             return expnum, "cached", ""
+        if expnum in known_skips:
+            return expnum, "skipped", str(known_skips[expnum].get("error", ""))
         last_error = ""
         for attempt in range(retries + 1):
             try:
@@ -437,11 +449,8 @@ def fetch_gaia(
                     source_table = _download(
                         sframe, source_path, service_url, timeout, token, maxrec
                     )
-                table, header = derive_fiber_table(sframe, source_table, passband)
-                header["TAPURL"] = service_url
-                _atomic_table(table, fiber_path, header, "FIBERS")
-                return expnum, "downloaded", ""
-            except Exception as exc:  # noqa: BLE001 - retry the complete TAP/cache operation
+                break
+            except Exception as exc:  # noqa: BLE001 - retry only TAP/source-cache failures
                 last_error = f"{type(exc).__name__}: {exc}"
                 logging.getLogger("lvm_medians").warning(
                     "Gaia expnum=%s attempt=%s/%s error=%s",
@@ -452,7 +461,19 @@ def fetch_gaia(
                 )
                 if attempt < retries:
                     time.sleep(min(30.0, 2**attempt + random.random()))
-        return expnum, "failed", last_error
+        else:
+            return expnum, "failed", last_error
+        try:
+            table, header = derive_fiber_table(sframe, source_table, passband)
+            header["TAPURL"] = service_url
+            _atomic_table(table, fiber_path, header, "FIBERS")
+            return expnum, "downloaded", ""
+        except SkipExposure as exc:
+            error = f"{type(exc).__name__}: {exc}"
+            logging.getLogger("lvm_medians").warning(
+                "Gaia expnum=%s skipped error=%s", expnum, error
+            )
+            return expnum, "skipped", error
 
     iterator = iter(indexed)
     with ThreadPoolExecutor(max_workers=min(workers, len(indexed))) as pool:
@@ -484,10 +505,20 @@ def fetch_gaia(
                         "updated": _now(),
                     }
                     ledger_changed = True
-                elif failures.pop(expnum, None) is not None:
+                elif status == "skipped":
+                    skipped[expnum] = {
+                        "expnum": expnum,
+                        "error": error,
+                        "updated": _now(),
+                    }
+                    ledger_changed = True
+                else:
+                    ledger_changed = skipped.pop(expnum, None) is not None
+                if status != "failed" and failures.pop(expnum, None) is not None:
                     ledger_changed = True
                 if ledger_changed or not failures_path.exists():
                     _write_failures(failures_path, failures)
+                    _write_failures(skipped_path, skipped)
                 if progress:
                     progress(counts.copy())
                 submit()
@@ -524,13 +555,21 @@ def combine_gaia_tables(
         "total": len(expnums),
         "completed": 0,
         "combined": 0,
+        "skipped": 0,
         "failed": 0,
         "rows": 0,
     }
+    skipped = set(_load_failures(cache_root / "gaia-skipped.jsonl"))
     tables: list[Table] = []
     logger = logging.getLogger("lvm_medians")
     for expnum in expnums:
         path = cache_root / table_kind / f"{prefix}{expnum:08d}.fits"
+        if table_kind == "fibers" and expnum in skipped and not path.is_file():
+            counts["skipped"] += 1
+            counts["completed"] += 1
+            if progress:
+                progress(counts.copy())
+            continue
         try:
             table = _load_table(path, extension)
             if len(table) and (
@@ -561,6 +600,7 @@ def combine_gaia_tables(
         header["TABKIND"] = table_kind
         header["NEXP"] = counts["combined"]
         header["NMISSING"] = counts["failed"]
+        header["NSKIP"] = counts["skipped"]
         header["NROWS"] = len(combined)
         header["COMPLETE"] = complete
         header["INLIST"] = str(manifest.resolve())
@@ -579,6 +619,7 @@ def combine_gaia_tables(
                 "sframe_list": str(manifest.resolve()),
                 "exposures": counts["combined"],
                 "missing": counts["failed"],
+                "skipped": counts["skipped"],
                 "complete": complete,
             }
         )
@@ -607,10 +648,12 @@ def cache_status(manifest: Path, cache_root: Path) -> dict[str, int]:
         expnum_from_name(path) for path in (cache_root / "fibers").glob("lvmGAIA-fibers-*.fits")
     }
     failures = _load_failures(cache_root / "gaia-failures.jsonl")
+    skipped = _load_failures(cache_root / "gaia-skipped.jsonl")
     return {
         "sframes": len(expected),
         "ready": len(expected & cached),
-        "awaiting_download": len(expected - cached),
+        "skipped": len(expected & set(skipped)),
+        "awaiting_download": len(expected - cached - set(skipped)),
         "failures": len(expected & set(failures)),
     }
 

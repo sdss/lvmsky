@@ -435,6 +435,7 @@ def _print_status(work_dir: Path, sframe_list: Path, cache_dir: Path) -> None:
         typer.echo("Gaia cache:")
         typer.echo(f"  SFrames in list: {values['sframes']}")
         typer.echo(f"  ready: {values['ready']}")
+        typer.echo(f"  skipped (not flux calibrated): {values['skipped']}")
         typer.echo(f"  awaiting download: {values['awaiting_download']}")
         typer.echo(f"  failures: {values['failures']}")
     else:

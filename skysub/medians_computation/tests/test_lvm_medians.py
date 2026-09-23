@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import numpy as np
@@ -8,7 +9,7 @@ from astropy.table import Table
 from typer.main import get_command
 
 from lvm_medians.cli import app
-from lvm_medians.gaia import derive_fiber_table
+from lvm_medians.gaia import cache_status, derive_fiber_table, fetch_gaia
 from lvm_medians.stack import (
     build_stack,
     gaia_clean_mask,
@@ -171,3 +172,47 @@ def test_partial_build_records_bad_input(tmp_path: Path) -> None:
     with fits.open(output) as hdul:
         assert not hdul[0].header["COMPLETE"]
         assert list(hdul["INPUT_STATUS"].data["status"]) == ["OK", "ERROR"]
+
+
+def test_uncalibrated_sframe_is_skipped_without_tap_retries(tmp_path: Path) -> None:
+    sframe = tmp_path / "lvmSFrame-00000001.fits"
+    make_sframe(sframe)
+    with fits.open(sframe, mode="update") as hdul:
+        hdul[0].header["BUNIT"] = "electron / (Angstrom s)"
+        hdul[0].header["FLUXCAL"] = "NONE"
+
+    sframe_list = tmp_path / "sframes.txt"
+    sframe_list.write_text(f"{sframe}\n", encoding="utf-8")
+    cache_root = tmp_path / "gaia"
+    sources_dir = cache_root / "sources"
+    sources_dir.mkdir(parents=True)
+    (cache_root / "gaia-failures.jsonl").write_text(
+        '{"expnum": 1, "attempts": 22}\n', encoding="utf-8"
+    )
+    source_path = sources_dir / "lvmGAIA-sources-00000001.fits"
+    fits.HDUList(
+        [fits.PrimaryHDU(), fits.BinTableHDU(Table(), name="SOURCES")]
+    ).writeto(source_path)
+
+    result = fetch_gaia(
+        sframe_list, cache_root, workers=1, retries=5, retry_failed=True
+    )
+
+    assert result["skipped"] == 1
+    assert result["failed"] == 0
+    assert (cache_root / "gaia-failures.jsonl").read_text(encoding="utf-8") == ""
+    skipped = [
+        json.loads(line)
+        for line in (cache_root / "gaia-skipped.jsonl").read_text().splitlines()
+    ]
+    assert skipped[0]["expnum"] == 1
+    assert "electron / (Angstrom s)" in skipped[0]["error"]
+
+    status = cache_status(sframe_list, cache_root)
+    assert status == {
+        "sframes": 1,
+        "ready": 0,
+        "skipped": 1,
+        "awaiting_download": 0,
+        "failures": 0,
+    }
