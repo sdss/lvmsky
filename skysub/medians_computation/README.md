@@ -278,6 +278,9 @@ lvm-medians-work/
     └── fibers/                 # derived per-exposure fiber measurements
 ```
 
+Persistent CLI output files are created with mode `0644` so they are readable by
+other users while remaining writable only by their owner.
+
 Combined Gaia tables are written exactly to the `combine-gaia --output` path.
 Progress bars and `run-status.json` show completed, cached, combined, skipped,
 and failed counts. Detailed exceptions go to the log.

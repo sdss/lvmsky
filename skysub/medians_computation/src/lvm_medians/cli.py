@@ -19,7 +19,7 @@ from tqdm import tqdm
 
 from . import __version__
 from .gaia import TAP_SERVICES, cache_status, combine_gaia_tables, failed_sframes, fetch_gaia
-from .stack import build_stack, read_manifest, scan_sframes, write_manifest
+from .stack import atomic_replace, build_stack, read_manifest, scan_sframes, write_manifest
 
 
 def _now() -> str:
@@ -32,7 +32,7 @@ def _atomic_json(path: Path, value: dict[str, Any]) -> None:
         json.dump(value, fh, indent=2, sort_keys=True)
         fh.write("\n")
         temporary = Path(fh.name)
-    os.replace(temporary, path)
+    atomic_replace(temporary, path)
 
 
 class RunStatus:

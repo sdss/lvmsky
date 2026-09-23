@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import os
 import random
 import tempfile
 import threading
@@ -24,7 +23,14 @@ from astropy.io import fits
 from astropy.io.votable import parse
 from astropy.table import Table, vstack
 
-from .stack import SkipExposure, _expnum, _flux_scale, expnum_from_path, read_manifest
+from .stack import (
+    SkipExposure,
+    _expnum,
+    _flux_scale,
+    atomic_replace,
+    expnum_from_path,
+    read_manifest,
+)
 
 TAP_SERVICES = {
     "ari": "https://gaia.ari.uni-heidelberg.de/tap",
@@ -72,7 +78,7 @@ def _atomic_table(table: Table, path: Path, header: fits.Header, name: str) -> N
         fits.HDUList(
             [fits.PrimaryHDU(header=header), fits.BinTableHDU(data=table, name=name)]
         ).writeto(temporary, overwrite=True, checksum=True)
-        os.replace(temporary, path)
+        atomic_replace(temporary, path)
     finally:
         temporary.unlink(missing_ok=True)
 
@@ -362,7 +368,7 @@ def _write_failures(path: Path, failures: dict[int, dict[str, Any]]) -> None:
     with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, delete=False) as fh:
         fh.write(text)
         temporary = Path(fh.name)
-    os.replace(temporary, path)
+    atomic_replace(temporary, path)
 
 
 def failed_sframes(
@@ -629,7 +635,7 @@ def combine_gaia_tables(
             temporary = Path(handle.name)
         try:
             combined.write(temporary, format="parquet", overwrite=True)
-            os.replace(temporary, output)
+            atomic_replace(temporary, output)
         finally:
             temporary.unlink(missing_ok=True)
 

@@ -1,4 +1,5 @@
 from importlib.util import find_spec
+import stat
 from pathlib import Path
 
 from astropy.io import fits
@@ -34,6 +35,8 @@ def test_scan_can_write_a_small_sample(tmp_path: Path) -> None:
     assert result.exit_code == 0, result.output
     selected = [path.name for _, path in read_manifest(work_dir / "sframes.txt")]
     assert selected == ["lvmSFrame-00000001.fits", "lvmSFrame-00000003.fits"]
+    assert stat.S_IMODE((work_dir / "sframes.txt").stat().st_mode) == 0o644
+    assert stat.S_IMODE((work_dir / "run-status.json").stat().st_mode) == 0o644
 
     status = CliRunner().invoke(app, ["--work-dir", str(work_dir), "status"])
     assert status.exit_code == 0, status.output
