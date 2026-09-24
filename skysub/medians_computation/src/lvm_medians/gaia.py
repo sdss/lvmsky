@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import os
 import random
 import tempfile
 import threading
@@ -24,7 +23,14 @@ from astropy.io import fits
 from astropy.io.votable import parse
 from astropy.table import Table, vstack
 
-from .stack import _expnum, _flux_scale, expnum_from_path, read_manifest
+from .stack import (
+    SkipExposure,
+    _expnum,
+    _flux_scale,
+    atomic_replace,
+    expnum_from_path,
+    read_manifest,
+)
 
 TAP_SERVICES = {
     "ari": "https://gaia.ari.uni-heidelberg.de/tap",
@@ -72,7 +78,7 @@ def _atomic_table(table: Table, path: Path, header: fits.Header, name: str) -> N
         fits.HDUList(
             [fits.PrimaryHDU(header=header), fits.BinTableHDU(data=table, name=name)]
         ).writeto(temporary, overwrite=True, checksum=True)
-        os.replace(temporary, path)
+        atomic_replace(temporary, path)
     finally:
         temporary.unlink(missing_ok=True)
 
@@ -362,7 +368,22 @@ def _write_failures(path: Path, failures: dict[int, dict[str, Any]]) -> None:
     with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, delete=False) as fh:
         fh.write(text)
         temporary = Path(fh.name)
-    os.replace(temporary, path)
+    atomic_replace(temporary, path)
+
+
+def failed_sframes(
+    sframe_list: Path,
+    cache_root: Path,
+    every_nth: int = 1,
+    limit: int | None = None,
+) -> list[tuple[int, Path]]:
+    """Return only SFrames recorded in the persistent failure ledger."""
+    failures = _load_failures(cache_root / "gaia-failures.jsonl")
+    return [
+        item
+        for item in read_manifest(sframe_list, every_nth, limit)
+        if expnum_from_path(item[1]) in failures
+    ]
 
 
 def fetch_gaia(
@@ -378,19 +399,36 @@ def fetch_gaia(
     passband: Path | None = None,
     every_nth: int = 1,
     limit: int | None = None,
+    retry_failed: bool = False,
     progress: Callable[[dict[str, int]], None] | None = None,
 ) -> dict[str, int]:
     if workers < 1 or retries < 0 or timeout <= 0 or maxrec < 1:
         raise ValueError("workers/timeout/maxrec must be positive and retries non-negative")
-    indexed = read_manifest(manifest, every_nth, limit)
+    indexed = (
+        failed_sframes(manifest, cache_root, every_nth, limit)
+        if retry_failed
+        else read_manifest(manifest, every_nth, limit)
+    )
     sources_dir = cache_root / "sources"
     fibers_dir = cache_root / "fibers"
     sources_dir.mkdir(parents=True, exist_ok=True)
     fibers_dir.mkdir(parents=True, exist_ok=True)
     failures_path = cache_root / "gaia-failures.jsonl"
+    skipped_path = cache_root / "gaia-skipped.jsonl"
     failures = _load_failures(failures_path)
+    skipped = _load_failures(skipped_path)
+    known_skips = skipped.copy()
     service_url = resolve_service(service)
-    counts = {"total": len(indexed), "completed": 0, "cached": 0, "downloaded": 0, "failed": 0}
+    counts = {
+        "total": len(indexed),
+        "completed": 0,
+        "cached": 0,
+        "downloaded": 0,
+        "skipped": 0,
+        "failed": 0,
+    }
+    if not indexed:
+        return counts
 
     def one(item: tuple[int, Path]) -> tuple[int, str, str]:
         _, sframe = item
@@ -401,6 +439,8 @@ def fetch_gaia(
         source_path = sources_dir / f"lvmGAIA-sources-{expnum:08d}.fits"
         if _fiber_cache_valid(fiber_path, expnum, fiberids):
             return expnum, "cached", ""
+        if expnum in known_skips:
+            return expnum, "skipped", str(known_skips[expnum].get("error", ""))
         last_error = ""
         for attempt in range(retries + 1):
             try:
@@ -415,11 +455,8 @@ def fetch_gaia(
                     source_table = _download(
                         sframe, source_path, service_url, timeout, token, maxrec
                     )
-                table, header = derive_fiber_table(sframe, source_table, passband)
-                header["TAPURL"] = service_url
-                _atomic_table(table, fiber_path, header, "FIBERS")
-                return expnum, "downloaded", ""
-            except Exception as exc:  # noqa: BLE001 - retry the complete TAP/cache operation
+                break
+            except Exception as exc:  # noqa: BLE001 - retry only TAP/source-cache failures
                 last_error = f"{type(exc).__name__}: {exc}"
                 logging.getLogger("lvm_medians").warning(
                     "Gaia expnum=%s attempt=%s/%s error=%s",
@@ -430,7 +467,19 @@ def fetch_gaia(
                 )
                 if attempt < retries:
                     time.sleep(min(30.0, 2**attempt + random.random()))
-        return expnum, "failed", last_error
+        else:
+            return expnum, "failed", last_error
+        try:
+            table, header = derive_fiber_table(sframe, source_table, passband)
+            header["TAPURL"] = service_url
+            _atomic_table(table, fiber_path, header, "FIBERS")
+            return expnum, "downloaded", ""
+        except SkipExposure as exc:
+            error = f"{type(exc).__name__}: {exc}"
+            logging.getLogger("lvm_medians").warning(
+                "Gaia expnum=%s skipped error=%s", expnum, error
+            )
+            return expnum, "skipped", error
 
     iterator = iter(indexed)
     with ThreadPoolExecutor(max_workers=min(workers, len(indexed))) as pool:
@@ -462,10 +511,20 @@ def fetch_gaia(
                         "updated": _now(),
                     }
                     ledger_changed = True
-                elif failures.pop(expnum, None) is not None:
+                elif status == "skipped":
+                    skipped[expnum] = {
+                        "expnum": expnum,
+                        "error": error,
+                        "updated": _now(),
+                    }
+                    ledger_changed = True
+                else:
+                    ledger_changed = skipped.pop(expnum, None) is not None
+                if status != "failed" and failures.pop(expnum, None) is not None:
                     ledger_changed = True
                 if ledger_changed or not failures_path.exists():
                     _write_failures(failures_path, failures)
+                    _write_failures(skipped_path, skipped)
                 if progress:
                     progress(counts.copy())
                 submit()
@@ -502,13 +561,21 @@ def combine_gaia_tables(
         "total": len(expnums),
         "completed": 0,
         "combined": 0,
+        "skipped": 0,
         "failed": 0,
         "rows": 0,
     }
+    skipped = set(_load_failures(cache_root / "gaia-skipped.jsonl"))
     tables: list[Table] = []
     logger = logging.getLogger("lvm_medians")
     for expnum in expnums:
         path = cache_root / table_kind / f"{prefix}{expnum:08d}.fits"
+        if table_kind == "fibers" and expnum in skipped and not path.is_file():
+            counts["skipped"] += 1
+            counts["completed"] += 1
+            if progress:
+                progress(counts.copy())
+            continue
         try:
             table = _load_table(path, extension)
             if len(table) and (
@@ -539,6 +606,7 @@ def combine_gaia_tables(
         header["TABKIND"] = table_kind
         header["NEXP"] = counts["combined"]
         header["NMISSING"] = counts["failed"]
+        header["NSKIP"] = counts["skipped"]
         header["NROWS"] = len(combined)
         header["COMPLETE"] = complete
         header["INLIST"] = str(manifest.resolve())
@@ -557,6 +625,7 @@ def combine_gaia_tables(
                 "sframe_list": str(manifest.resolve()),
                 "exposures": counts["combined"],
                 "missing": counts["failed"],
+                "skipped": counts["skipped"],
                 "complete": complete,
             }
         )
@@ -566,7 +635,7 @@ def combine_gaia_tables(
             temporary = Path(handle.name)
         try:
             combined.write(temporary, format="parquet", overwrite=True)
-            os.replace(temporary, output)
+            atomic_replace(temporary, output)
         finally:
             temporary.unlink(missing_ok=True)
 
@@ -585,10 +654,12 @@ def cache_status(manifest: Path, cache_root: Path) -> dict[str, int]:
         expnum_from_name(path) for path in (cache_root / "fibers").glob("lvmGAIA-fibers-*.fits")
     }
     failures = _load_failures(cache_root / "gaia-failures.jsonl")
+    skipped = _load_failures(cache_root / "gaia-skipped.jsonl")
     return {
         "sframes": len(expected),
         "ready": len(expected & cached),
-        "awaiting_download": len(expected - cached),
+        "skipped": len(expected & set(skipped)),
+        "awaiting_download": len(expected - cached - set(skipped)),
         "failures": len(expected & set(failures)),
     }
 

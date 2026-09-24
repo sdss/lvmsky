@@ -42,12 +42,18 @@ class SkipExposure(Exception):
     """An input is valid but cannot contribute to the requested stack."""
 
 
+def atomic_replace(temporary: Path, destination: Path) -> None:
+    """Publish an atomic output with normal world-readable file permissions."""
+    temporary.chmod(0o644)
+    os.replace(temporary, destination)
+
+
 def atomic_text(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, delete=False) as fh:
         fh.write(text)
         temporary = Path(fh.name)
-    os.replace(temporary, path)
+    atomic_replace(temporary, path)
 
 
 def scan_sframes(root: Path, progress: Callable[[int], None] | None = None) -> list[Path]:
@@ -163,11 +169,13 @@ def _expnum(path: Path, header: fits.Header) -> int:
 def _flux_scale(primary: fits.Header, image: fits.ImageHDU) -> float:
     raw = image.header.get("BUNIT", primary.get("BUNIT"))
     if raw is None:
-        raise ValueError("FLUX BUNIT is missing")
+        raise SkipExposure("FLUX BUNIT is missing")
     try:
         return float(u.Unit(raw).to(FLUX_UNIT))
     except (ValueError, TypeError) as exc:
-        raise ValueError(f"FLUX BUNIT is not convertible to {FLUX_UNIT}: {raw!r}") from exc
+        raise SkipExposure(
+            f"FLUX BUNIT is not convertible to {FLUX_UNIT}: {raw!r}"
+        ) from exc
 
 
 def _validate_wave(wave: np.ndarray) -> None:
@@ -518,7 +526,7 @@ def _atomic_fits(hdus: fits.HDUList, output: Path, overwrite: bool) -> None:
         temporary = Path(fh.name)
     try:
         hdus.writeto(temporary, overwrite=True, checksum=True)
-        os.replace(temporary, output)
+        atomic_replace(temporary, output)
     finally:
         temporary.unlink(missing_ok=True)
 
