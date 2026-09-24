@@ -2015,17 +2015,20 @@ def load_o2_vector_if_available(decomp_fits_path, spectrum_index):
     if not path.exists():
         return None
     try:
-        with fits.open(str(path)) as hdul:
+        # memmap + single-row slice: VECTOR_O2 is 1.85 GB on a full-corpus
+        # decomposition, and materialising the whole plane to return one row
+        # made a 45-call diagnostic read ~83 GB.
+        with fits.open(str(path), memmap=True) as hdul:
             if 'VECTOR_O2' not in {h.name for h in hdul}:
                 return None
-            data = np.asarray(hdul['VECTOR_O2'].data, dtype=np.float64)
+            _plane = hdul['VECTOR_O2'].data
+            if np.ndim(_plane) != 2 or int(spectrum_index) >= _plane.shape[0]:
+                return None
+            row = np.asarray(_plane[int(spectrum_index)], dtype=np.float64)
     except (KeyError, IndexError, ValueError) as exc:
         print(f'  VECTOR_O2 unavailable in {path.name} row {spectrum_index}: '
               f'{type(exc).__name__}: {exc}')
         return None
-    if data.ndim != 2 or int(spectrum_index) >= data.shape[0]:
-        return None
-    row = data[int(spectrum_index)]
     if not np.isfinite(row).any() or float(np.nansum(np.abs(row))) == 0.0:
         return None
     return row

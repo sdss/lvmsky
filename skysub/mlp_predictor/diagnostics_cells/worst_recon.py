@@ -4,6 +4,11 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from astropy.io import fits
 from sky_decomp.moon_zodi_model import LSF_FWHM_TO_SIGMA
+from sky_decomp.result_io import (load_lsf_surface_cubes,
+                                  lsf_surface_state_from_cubes)
+from mlp_predictor.data import make_telluric_row_lookup
+
+from pathlib import Path
 
 required = [
     "rmse_subset_results",
@@ -23,7 +28,12 @@ if missing:
     raise RuntimeError("Run the batch RMSE subset cell first. Missing: " + ", ".join(missing))
 
 # Telluric variant: see full_spectrum_batch_rmse for why the basis is per row.
-_telluric_for = globals().get('TELLURIC_ROW_FOR')
+# Telluric transmission is looked up BY ROW, so it has to come from the file
+# these row indices address.  The shared TELLURIC_ROW_FOR is bound to
+# `input_fits_for_basis` (the every10 stack), and the batch-RMSE cell now hands
+# us corpus rows -- feeding those to it raises IndexError, or silently returns
+# another exposure's transmission if the index happens to be in range.  Bound
+# below, once EVERY10_INPUT has been resolved from rmse_subset_results.
 
 n_worst = 15
 row_pos = np.asarray(rmse_subset_results["row_positions"], dtype=int)
@@ -88,15 +98,29 @@ else:
 #     from COEF_ERR on the fly).
 try:
     weighted_rmse_per_row  # noqa: F821 -- defined by the WRMSE-helper cell
-    _e10_wrmse_src = globals().get("e10_triplet_plot", globals().get("e10_triplet"))
-    if _e10_wrmse_src is None:
-        raise NameError("no e10 triplet available for sWRMSE_coef lookup")
-    _coef_true_subset = np.asarray(_e10_wrmse_src["coef_sci"][row_pos], dtype=np.float64)
-    _sigma_raw = _e10_wrmse_src.get("coef_err_sci", None)
-    if _sigma_raw is None:
-        _sigma_subset = np.full_like(_coef_true_subset, np.nan)
+    # `row_pos` indexes whatever table the batch-RMSE cell selected from.
+    # Since 2026-09-23 that is `filtered_triplet` (it no longer builds an e10
+    # triplet at all), so prefer the true coefficients it already sliced, then
+    # filtered_triplet, and only then a legacy e10 triplet.
+    if ("coef_sci_sel" in globals()
+            and np.asarray(coef_sci_sel).shape[0] == sci_rmse.shape[0]):
+        _coef_true_subset = np.asarray(coef_sci_sel, dtype=np.float64)
+        _sigma_subset = (np.asarray(coef_err_sci_all, dtype=np.float64)[row_pos]
+                         if "coef_err_sci_all" in globals()
+                         else np.full_like(_coef_true_subset, np.nan))
     else:
-        _sigma_subset = np.asarray(_sigma_raw[row_pos], dtype=np.float64)
+        _e10_wrmse_src = globals().get("e10_triplet_plot",
+                                       globals().get("e10_triplet",
+                                                     globals().get("filtered_triplet")))
+        if _e10_wrmse_src is None:
+            raise NameError("no triplet available for sWRMSE_coef lookup")
+        _coef_true_subset = np.asarray(_e10_wrmse_src["coef_sci"][row_pos],
+                                       dtype=np.float64)
+        _sigma_raw = _e10_wrmse_src.get("coef_err_sci", None)
+        if _sigma_raw is None:
+            _sigma_subset = np.full_like(_coef_true_subset, np.nan)
+        else:
+            _sigma_subset = np.asarray(_sigma_raw[row_pos], dtype=np.float64)
     _gidx_map = (_group_indices_compress if "_group_indices_compress" in globals()
                  else group_indices_sf)
     wrmse_coef_subset = weighted_rmse_per_row(
@@ -123,19 +147,54 @@ else:
     sci_wrmse_pix  = np.full_like(sci_rmse, np.nan)
     print("(pixel pWRMSE unavailable: run the batch RMSE eval cell first)")
 
+# Follow the files `row_indices` actually came from.  Since 2026-09-23 the
+# batch-RMSE cell scores the FULL held-out split off the corpus stack, so its
+# indices are corpus rows; opening an every10 stack and indexing it with them
+# would silently return a different spectrum per row (every10 row 493 is
+# corpus row 4930).  Fall back to every10 only for a results dict written
+# before the paths were recorded.
 _e10_stem = f"{DECOMP_DATA_ROOT}/{DECOMP_STEM}_every10"
 _e10_suffix = _DECOMP_SUFFIX
-EVERY10_INPUT = f"{_e10_stem}.fits"
-EVERY10_NEAR = f"{_e10_stem}_decomp_sky1{_e10_suffix}.fits"
-EVERY10_FAR = f"{_e10_stem}_decomp_sky2{_e10_suffix}.fits"
-EVERY10_SCI = f"{_e10_stem}_decomp_sci{_e10_suffix}.fits"
+_src = rmse_subset_results if "rmse_subset_results" in globals() else {}
+EVERY10_INPUT = _src.get("source_input", f"{_e10_stem}.fits")
+EVERY10_NEAR = _src.get("source_near", f"{_e10_stem}_decomp_sky1{_e10_suffix}.fits")
+EVERY10_FAR = _src.get("source_far", f"{_e10_stem}_decomp_sky2{_e10_suffix}.fits")
+EVERY10_SCI = _src.get("source_sci", f"{_e10_stem}_decomp_sci{_e10_suffix}.fits")
+print(f"  worst-recon reads {Path(EVERY10_INPUT).name} "
+      f"(the file the batch-RMSE row indices belong to)")
+if globals().get('TELLURIC_ROW_FOR') is not None:
+    _telluric_for = make_telluric_row_lookup(EVERY10_INPUT, verbose=False)
+# LSF cubes once per arm: load_lsf_state_if_available re-reads LSF_COEF +
+# LSF_KNOTS + LSF_META (~80 MB on a corpus file) on every call, and this cell
+# makes three per plotted row.
+_lsf_cubes_by_path = {}
+for _p in (EVERY10_NEAR, EVERY10_FAR, EVERY10_SCI):
+    try:
+        _lsf_cubes_by_path[_p] = load_lsf_surface_cubes(_p)
+    except (KeyError, OSError, ValueError):
+        _lsf_cubes_by_path[_p] = None
 
-with fits.open(EVERY10_INPUT) as hdul:
-    flux_near_all = np.asarray(hdul["FLUX_SKY_NEAR"].data, dtype=np.float64)
-    flux_far_all = np.asarray(hdul["FLUX_SKY_FAR"].data, dtype=np.float64)
-    flux_sci_all = np.asarray(hdul["FLUX_SCI"].data, dtype=np.float64)
+
+def _lsf_state_for(path, row):
+    _c = _lsf_cubes_by_path.get(path)
+    if _c is None:
+        return load_lsf_state_if_available(path, row)
+    try:
+        return lsf_surface_state_from_cubes(_c, int(row))
+    except (KeyError, IndexError, ValueError):
+        return None
+
+# Selected rows only: the corpus FLUX planes are 925 MB each and this cell
+# touches at most a few dozen rows.  Indexed by position in `row_idx` below.
+with fits.open(EVERY10_INPUT, memmap=True) as hdul:
+    flux_near_all = np.asarray(hdul["FLUX_SKY_NEAR"].data[row_idx], dtype=np.float64)
+    flux_far_all = np.asarray(hdul["FLUX_SKY_FAR"].data[row_idx], dtype=np.float64)
+    flux_sci_all = np.asarray(hdul["FLUX_SCI"].data[row_idx], dtype=np.float64)
     wave_arr = np.asarray(hdul["WAVE"].data, dtype=np.float64)
-    lsf_sci_arr = np.asarray(hdul["LSF_SCI"].data, dtype=np.float64)
+    _lsf_full = hdul["LSF_SCI"].data
+    lsf_sci_arr = (np.asarray(_lsf_full, dtype=np.float64)
+                   if np.ndim(_lsf_full) == 1
+                   else np.asarray(_lsf_full[row_idx], dtype=np.float64))
 
 base_dir_guess = _infer_base_dir_for_reconstruction()
 
@@ -154,13 +213,16 @@ fig = make_subplots(
 for case_i, j in enumerate(worst_local):
     rr = int(row_idx[j])
     wave_row = wave_arr if wave_arr.ndim == 1 else np.asarray(wave_arr[rr], dtype=np.float64)
-    lsf_row = lsf_sci_arr if lsf_sci_arr.ndim == 1 else np.asarray(lsf_sci_arr[rr], dtype=np.float64)
+    # NB the flux / LSF arrays above were loaded as data[row_idx], so they are
+    # addressed by POSITION j, while the decomposition lookups below still take
+    # the file row rr.
+    lsf_row = lsf_sci_arr if lsf_sci_arr.ndim == 1 else np.asarray(lsf_sci_arr[j], dtype=np.float64)
 
     lsf_sigma = lsf_row / LSF_FWHM_TO_SIGMA
 
-    lsf_state_near = load_lsf_state_if_available(EVERY10_NEAR, rr)
-    lsf_state_far = load_lsf_state_if_available(EVERY10_FAR, rr)
-    lsf_state_sci = load_lsf_state_if_available(EVERY10_SCI, rr)
+    lsf_state_near = _lsf_state_for(EVERY10_NEAR, rr)
+    lsf_state_far = _lsf_state_for(EVERY10_FAR, rr)
+    lsf_state_sci = _lsf_state_for(EVERY10_SCI, rr)
 
     lsf_arg_near = lsf_state_near if lsf_state_near is not None else lsf_sigma
     lsf_arg_far = lsf_state_far if lsf_state_far is not None else lsf_sigma
@@ -189,9 +251,9 @@ for case_i, j in enumerate(worst_local):
         telluric=(None if _telluric_for is None else _telluric_for('sci', rr)),
     )
 
-    near_obs = np.asarray(flux_near_all[rr], dtype=np.float64) * FACTOR
-    far_obs = np.asarray(flux_far_all[rr], dtype=np.float64) * FACTOR
-    sci_obs = np.asarray(flux_sci_all[rr], dtype=np.float64) * FACTOR
+    near_obs = np.asarray(flux_near_all[j], dtype=np.float64) * FACTOR
+    far_obs = np.asarray(flux_far_all[j], dtype=np.float64) * FACTOR
+    sci_obs = np.asarray(flux_sci_all[j], dtype=np.float64) * FACTOR
 
     near_rec = np.asarray(comps_near["total"], dtype=np.float64)
     far_rec = np.asarray(comps_far["total"], dtype=np.float64)

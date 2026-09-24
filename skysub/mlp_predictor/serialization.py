@@ -9,13 +9,17 @@ knob the inference path needs.  This module writes those objects to a single
 compatible with :func:`mlp_predictor.trainer.predict_sci_coefficients_default`
 and :func:`mlp_predictor.inference.predict_sky_from_minimal_inputs`.
 
-Only inference-necessary state is persisted; training-time bookkeeping
-(``train_idx``/``val_idx``/``test_idx``, history, blend_history, best epoch)
-is intentionally dropped so the saved file stays small and doesn't leak the
-training split.
+Inference-necessary state is persisted, plus the per-member training
+history (loss and blend-alpha per epoch, best epoch, best val loss) so a
+saved run can be replotted and compared later without a retrain.  The
+train/val/test ROW INDICES are still dropped: they are the only part that
+would leak the split, and the notebook reproduces them deterministically
+from ``(obstime_mjd, moon_phase, seed=42)`` anyway.
 """
 
 from __future__ import annotations
+
+from collections.abc import Mapping
 
 from pathlib import Path
 from typing import Mapping, Any
@@ -98,6 +102,30 @@ def save_ensemble(ensemble_artifacts: Mapping[str, Any], out_path: str | Path) -
         # only whether each rule was ENABLED, which is not enough to apply it.
         "moon_down_amp_rule": first.get("moon_down_amp_rule"),
         "zodi_ceiling_rule":  first.get("zodi_ceiling_rule"),
+        # Per-member training history (2026-09-23), for `diag.training_history()`
+        # and any later post-hoc comparison of runs.
+        #
+        # This does NOT bump FORMAT_VERSION.  The version gate exists to refuse
+        # files missing state that would silently MIS-PREDICT (that is what v1
+        # -> v2 was about); history cannot change a prediction, so a file
+        # without it is still a correct predictor and must stay loadable --
+        # bumping would strand every ensemble trained before today.  The loader
+        # therefore treats these keys as optional.
+        #
+        # Size: n_epochs x (2 losses + one alpha per group) x n_members, i.e.
+        # ~300 x 8 x 10 floats ~ 200 kB against a 57 MB archive.
+        "member_history": [list(m.get("history") or []) for m in members],
+        "member_blend_history": [list(m.get("blend_history") or [])
+                                 for m in members],
+        # All-or-nothing: the loader indexes these by member position, so a
+        # partially populated list would silently attach one member's best
+        # epoch to another.  Empty is unambiguous; a short list is not.
+        "best_epochs": ([int(m["best_epoch"]) for m in members]
+                        if all(m.get("best_epoch") is not None for m in members)
+                        else []),
+        "best_val_losses": ([float(m["best_val_loss"]) for m in members]
+                            if all(m.get("best_val_loss") is not None
+                                   for m in members) else []),
     }
     out_path = Path(out_path).expanduser().resolve()
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -133,7 +161,11 @@ def _build_model_from_config(cfg: Mapping[str, Any], *, n_input_score: int,
         continuum_head_extra_dims=tuple(int(v) for v in cfg["continuum_head_extra_dims"]),
         continuum_branch_dims=tuple(int(v) for v in cfg["continuum_branch_dims"]),
         moon_zodi_coupling_dims=tuple(int(v) for v in cfg["moon_zodi_coupling_dims"]),
-        blend_init_alpha=float(cfg["blend_init_alpha"]),
+        # Scalar or per-group mapping; a restored ensemble must rebuild the
+        # SAME model or its alphas start somewhere the training never saw.
+        blend_init_alpha=(dict(cfg["blend_init_alpha"])
+                          if isinstance(cfg["blend_init_alpha"], Mapping)
+                          else float(cfg["blend_init_alpha"])),
         alpha_ctx_features=cfg["alpha_ctx_features"],
         zodi_ctx_restriction=cfg["zodi_ctx_restriction"],
         continuum_ctx_restriction=cfg["continuum_ctx_restriction"],
@@ -208,6 +240,19 @@ def load_ensemble(path: str | Path, *, device: str | None = None,
                   "(measured: moon amplitude MAD 2.5%, blue chi2 3%). Retrain "
                   "to regain exactness.")
         _member_jc = [payload["jensen_corrections"]] * _n_members
+    # Training history is optional: files written before 2026-09-23 have none,
+    # and their predictions are unaffected by that.  Say so once rather than
+    # letting `diag.training_history()` fail with a KeyError further downstream.
+    _hist = payload.get("member_history")
+    _bhist = payload.get("member_blend_history")
+    if not _hist:
+        print("[load_ensemble] NOTE: this file predates persisted training "
+              "history (2026-09-23); per-epoch loss curves are unavailable "
+              "(predictions are unaffected). Retrain to record them.")
+    _hist = list(_hist) if _hist else [[]] * _n_members
+    _bhist = list(_bhist) if _bhist else [[]] * _n_members
+    _best_ep = list(payload.get("best_epochs") or [])
+    _best_vl = list(payload.get("best_val_losses") or [])
     for _i_member, sd in enumerate(payload["member_state_dicts"]):
         model = _build_model_from_config(
             cfg,
@@ -236,6 +281,12 @@ def load_ensemble(path: str | Path, *, device: str | None = None,
             "coef_names": list(payload["coef_names"]),
             "ctx_names":  ctx_names,
             "config": cfg,
+            "history": _hist[_i_member] if _i_member < len(_hist) else [],
+            "blend_history": _bhist[_i_member] if _i_member < len(_bhist) else [],
+            "best_epoch": (_best_ep[_i_member]
+                           if _i_member < len(_best_ep) else None),
+            "best_val_loss": (_best_vl[_i_member]
+                              if _i_member < len(_best_vl) else None),
         })
 
     print(f"[load_ensemble] restored {len(members)}-member ensemble from {path} "
@@ -254,6 +305,11 @@ def load_ensemble(path: str | Path, *, device: str | None = None,
         "coef_names": list(payload["coef_names"]),
         "ctx_names":  ctx_names,
         "config": cfg,
+        # Same keys the trainer puts on a live artifact, so the history
+        # diagnostic does not care whether the ensemble was trained in this
+        # session or restored from disk.
+        "best_epochs": _best_ep,
+        "best_val_losses": _best_vl,
     }
 
 

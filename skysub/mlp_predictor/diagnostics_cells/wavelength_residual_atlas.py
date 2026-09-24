@@ -49,188 +49,6 @@ EVERY10_FAR   = f'{_e10_stem}_decomp_sky2{_e10_suffix}.fits'
 EVERY10_SCI   = f'{_e10_stem}_decomp_sci{_e10_suffix}.fits'
 
 # Build aligned e10 triplet (matches full_spectrum_batch_rmse).
-e10_triplet = build_triplet_coef_dataset(
-    input_fits_path=EVERY10_INPUT,
-    sky_near_decomp_fits_path=EVERY10_NEAR,
-    sky_far_decomp_fits_path=EVERY10_FAR,
-    sci_decomp_fits_path=EVERY10_SCI,
-    context_columns=context_cols,
-    return_chi2=True,
-)
-if '_augment_triplet_with_ecliptic' in globals():
-    _augment_triplet_with_ecliptic(e10_triplet, meta_fits_path=EVERY10_INPUT)
-if '_augment_triplet_with_physics_priors' in globals():
-    _augment_triplet_with_physics_priors(e10_triplet)
-    # MOON-MODEL-CTX-V1: must match the training-time ctx layout, or
-    # ctx_names will not line up with the trained ensemble.
-    if (globals().get('USE_MOON_MODEL_FEATURE', False)
-            and '_augment_triplet_with_moon_model' in globals()):
-        _augment_triplet_with_moon_model(e10_triplet, _e10_stem)
-
-_e10_n0 = int(e10_triplet['n_rows'])
-if _e10_n0 == 0:
-    raise RuntimeError('No aligned rows in e10_triplet')
-
-# Apply LMC/SMC field exclusion (do NOT apply the kappa filters -- the atlas
-# wants a realistic sample, tail included).
-_keep = np.ones(_e10_n0, dtype=bool)
-if 'sci_ra' in e10_triplet and 'sci_dec' in e10_triplet:
-    _sci_ra = np.asarray(e10_triplet['sci_ra'], dtype=np.float64)
-    _sci_dec = np.asarray(e10_triplet['sci_dec'], dtype=np.float64)
-    for _region in (LMC_EXCLUSION, SMC_EXCLUSION):
-        _sep = _angular_separation_deg_vec(
-            _sci_ra, _sci_dec, _region['ra_deg'], _region['dec_deg'])
-        _keep &= ~(np.isfinite(_sep) & (_sep <= float(_region['radius_deg'])))
-
-_avail = np.where(_keep)[0]
-_rng = np.random.default_rng(rng_seed_atlas)
-_n_pick = int(min(n_sample_atlas, _avail.size))
-sel_pos = _rng.choice(_avail, size=_n_pick, replace=False)
-print(f'  atlas sample: n = {_n_pick} of {_avail.size} available every10 rows')
-
-# Drop rows whose DECOMPOSITION failed, using the same hard cap the training
-# corpus applies (data.apply_triplet_filters chi2_max).  This is a correctness
-# gate, not the tail-trimming the header warns against: the e10 corpus contains
-# rows with reduced_chi2 of order 1e30 (row 89 on the new-oh corpus), whose
-# "truth" spectrum is a broken QP solve.  Scoring the model against those is
-# meaningless, and because the sample is drawn with a fixed seed such a row sits
-# in every run, dominating any mean-based statistic.  The kappa/percentile
-# filters are still deliberately NOT applied.
-#
-# The gate is applied AFTER the draw, not before: `_rng.choice` indexes into
-# `_avail`, so shrinking the pool would resample every row and break
-# comparability with earlier runs.  Filtering the drawn sample instead keeps the
-# survivors a strict subset of the rows previous runs used.
-ATLAS_CHI2_MAX = 10.0
-_chi2_keys = ('chi2_near', 'chi2_far', 'chi2_sci')
-if all(_k in e10_triplet for _k in _chi2_keys):
-    _chi2_max_arm = np.nanmax(np.vstack(
-        [np.asarray(e10_triplet[_k], dtype=np.float64) for _k in _chi2_keys]), axis=0)
-    _chi2_ok_sel = (np.isfinite(_chi2_max_arm[sel_pos])
-                    & (_chi2_max_arm[sel_pos] <= ATLAS_CHI2_MAX))
-    _n_bad = int((~_chi2_ok_sel).sum())
-    if _n_bad:
-        print(f'  atlas chi2 gate (max-arm reduced_chi2 <= {ATLAS_CHI2_MAX:g}): '
-              f'dropped {_n_bad} failed-decomposition row(s) from the sample '
-              f'(worst chi2 = {np.nanmax(_chi2_max_arm[sel_pos][~_chi2_ok_sel]):.4g}, '
-              f'at ' + str(canonical_row_labels(
-                  EVERY10_INPUT,
-                  [int(np.asarray(e10_triplet["row_index"])[sel_pos][~_chi2_ok_sel][
-                      np.nanargmax(_chi2_max_arm[sel_pos][~_chi2_ok_sel])])],
-                  corpus_meta_fits=f'{DECOMP_DATA_ROOT}/{DECOMP_STEM}_meta_only.fits'
-              )['label'][0]) + ')')
-        sel_pos = sel_pos[_chi2_ok_sel]
-        _n_pick = int(sel_pos.size)
-        print(f'  atlas sample after gate: n = {_n_pick}')
-    else:
-        print(f'  atlas chi2 gate: all {_n_pick} sampled rows pass '
-              f'(max-arm reduced_chi2 <= {ATLAS_CHI2_MAX:g})')
-else:
-    _chi2_max_arm = None
-    print('  atlas chi2 gate: SKIPPED (triplet carries no chi2; '
-          'build with return_chi2=True)')
-
-# Moon/zodi role-reversal gate, applied to the drawn sample for the same reason
-# and in the same way as the chi2 gate above: a reversed row's moon
-# coefficients describe zodiacal light, so the per-component attribution below
-# would credit the wrong family.  Filtering after the draw keeps the survivors a
-# strict subset of the rows earlier runs used.
-with fits.open(EVERY10_INPUT) as _hdul_rev:
-    _wave_rev = np.asarray(_hdul_rev['WAVE'].data, dtype=np.float64)
-_wave_rev = _wave_rev if _wave_rev.ndim == 1 else _wave_rev[0]
-_rev_keep_sel = split_zodi_reversal_keep_mask(
-    {'near': EVERY10_NEAR, 'far': EVERY10_FAR, 'sci': EVERY10_SCI},
-    np.asarray(e10_triplet['row_index'], dtype=np.int64)[sel_pos],
-    _wave_rev, label='atlas')
-if not bool(np.all(_rev_keep_sel)):
-    sel_pos = sel_pos[_rev_keep_sel]
-    _n_pick = int(sel_pos.size)
-    print(f'  atlas sample after reversal gate: n = {_n_pick}')
-
-# Science-continuum colour gate, same placement and rationale: where the
-# science fibre's continuum colour disagrees with both sky arms, the Moon_bs
-# spline has absorbed field continuum, so the per-component attribution below
-# would charge the moon for something that is not sky.
-_col_keep_sel = sci_continuum_colour_keep_mask(
-    EVERY10_INPUT,
-    np.asarray(e10_triplet['row_index'], dtype=np.int64)[sel_pos],
-    label='atlas')
-if not bool(np.all(_col_keep_sel)):
-    sel_pos = sel_pos[_col_keep_sel]
-    _n_pick = int(sel_pos.size)
-    print(f'  atlas sample after science-continuum colour gate: n = {_n_pick}')
-
-# Diffuse-zeroed gate: a collapsed diffuse block makes the per-component
-# attribution below meaningless for that row -- the continuum's share of the
-# residual is computed against a truth of ~0.
-_dz_keep_sel = diffuse_zeroed_keep_mask(
-    {'near': np.asarray(e10_triplet['coef_near'])[sel_pos],
-     'far': np.asarray(e10_triplet['coef_far'])[sel_pos],
-     'sci': np.asarray(e10_triplet['coef_sci'])[sel_pos]},
-    e10_triplet['coef_names'], label='atlas')
-if not bool(np.all(_dz_keep_sel)):
-    sel_pos = sel_pos[_dz_keep_sel]
-    _n_pick = int(sel_pos.size)
-    print(f'  atlas sample after diffuse-zeroed gate: n = {_n_pick}')
-
-sel_rows = np.asarray(e10_triplet['row_index'], dtype=np.int64)[sel_pos]
-# sel_rows index the every10 arrays; labels must use the canonical identity
-# because every10 row N != corpus row N (measured: every10 493 is corpus 4930).
-_row_ident = canonical_row_labels(
-    EVERY10_INPUT, sel_rows,
-    corpus_meta_fits=f'{DECOMP_DATA_ROOT}/{DECOMP_STEM}_meta_only.fits')
-_row_label = list(_row_ident['label'])
-
-# ML predictions for these rows.
-coef_sci_pred_atlas = predict_sci_coefficients_default(
-    mlp_artifacts,
-    coef_near_phys=np.asarray(e10_triplet['coef_near'][sel_pos], dtype=np.float32),
-    coef_far_phys=np.asarray( e10_triplet['coef_far'][sel_pos],  dtype=np.float32),
-    ctx_near_phys=np.asarray( e10_triplet['ctx_near'][sel_pos],  dtype=np.float32),
-    ctx_far_phys=np.asarray(  e10_triplet['ctx_far'][sel_pos],   dtype=np.float32),
-    ctx_sci_phys=np.asarray(  e10_triplet['ctx_sci'][sel_pos],   dtype=np.float32),
-).astype(np.float32)
-coef_sci_true_atlas = np.asarray(e10_triplet['coef_sci'][sel_pos], dtype=np.float32)
-
-# Load wavelength grid + LSF ref from the input FITS (matches the recon cell).
-with fits.open(EVERY10_INPUT) as hdul:
-    wave_arr = np.asarray(hdul['WAVE'].data, dtype=np.float64)
-    lsf_sci_arr = np.asarray(hdul['LSF_SCI'].data, dtype=np.float64)
-
-_wave_ref_recon = wave_arr if wave_arr.ndim == 1 else wave_arr[int(sel_rows[0])]
-base_dir_guess = _infer_base_dir_for_reconstruction()
-
-from mlp_predictor.data import make_reconstruction_decomposer
-_telluric_for = globals().get('TELLURIC_ROW_FOR')
-_lsf_model = SkyDecompLSFSurfaceIterative(
-    _wave_ref_recon, lsf_sigma=1.0, n_spline_knots=N_MOON_KNOTS,
-    base_dir=base_dir_guess,
-    split_zodi=SPLIT_ZODI, n_zodi_spline_knots=N_ZODI_KNOTS,
-)
-
-
-def _precache_decomp_state(decomp_path):
-    _state = {'path': Path(decomp_path), 'has_lsf': False, 'o2_cube': None}
-    if not _state['path'].exists():
-        return _state
-    try:
-        with fits.open(str(_state['path']), memmap=False) as _hdul_dec:
-            _names = {h.name for h in _hdul_dec}
-            _state['has_lsf'] = all(_e in _names for _e in ('LSF_COEF', 'LSF_KNOTS', 'LSF_META'))
-            if 'VECTOR_O2' in _names:
-                _data = np.asarray(_hdul_dec['VECTOR_O2'].data, dtype=np.float64)
-                if _data.ndim == 2:
-                    _state['o2_cube'] = _data
-    except (KeyError, IndexError, ValueError) as _exc:
-        print(f'  precache failed for {_state["path"].name}: {_exc}')
-    return _state
-
-
-_state_sci = _precache_decomp_state(EVERY10_SCI)
-
-
-# Reconstruction components -> ML coefficient groups (§3.2).  'oh' and 'o2'
-# both belong to the mesospheric group; the rest are one-to-one.
 _ATLAS_COMPONENTS = {
     'moon':                 ('moon',),
     'zodi':                 ('zodi',),
@@ -252,81 +70,303 @@ def _group_components(_comps):
     return _out
 
 
-def _reconstruct_sci_total(coef_row, row_idx, lsf_sigma_fallback):
-    """Return (total_flux, {group: component_flux}) for one row."""
-    _lsf_state = None
-    if _state_sci['has_lsf']:
-        try:
-            _lsf_state = load_lsf_surface_state(str(_state_sci['path']), int(row_idx))
-        except (KeyError, IndexError, ValueError):
-            _lsf_state = None
-    _o2 = None
-    if _state_sci['o2_cube'] is not None and int(row_idx) < _state_sci['o2_cube'].shape[0]:
-        _o2_row = _state_sci['o2_cube'][int(row_idx)]
-        if np.isfinite(_o2_row).any() and float(np.nansum(np.abs(_o2_row))) > 0.0:
-            _o2 = _o2_row
-    # Telluric variant: the basis is per row, so rebuild instead of reusing the
-    # hoisted model.  See full_spectrum_batch_rmse for the reasoning.
-    _tel = (None if _telluric_for is None
-            else _telluric_for('sci', int(row_idx)))
-    _mdl = (_lsf_model if _tel is None else make_reconstruction_decomposer(
-        _lsf_model.wave, n_spline_knots=N_MOON_KNOTS, base_dir=base_dir_guess,
-        split_zodi=SPLIT_ZODI, n_zodi_spline_knots=N_ZODI_KNOTS, telluric=_tel))
-    if isinstance(_lsf_state, LSFSurfaceState):
-        _mdl._set_lsf_state(_lsf_state)
-        _mats = _mdl._assemble_refined_matrices()
-        if _o2 is not None:
-            _mats['o2'] = np.asarray(_o2, float).ravel()[None, :]
-        _comps = _mdl._components_from_coef(np.asarray(coef_row, float).ravel(), _mats)
+
+# --- Reuse the batch-RMSE reconstructions when they are available ----------
+# `full_spectrum_batch_rmse` reconstructs the same rows with the same basis,
+# LSF state, O2 vector and telluric, and since 2026-09-23 it hands the
+# per-component result over in this cell's own layout and units.  Reusing it
+# is not only cheaper -- it is the only way the two cells describe the SAME
+# rows.  Before, this cell drew from the ungated every10 pool while the batch
+# cell scored the held-out split, so their residuals were never comparable.
+#
+# Set batch_recon_for_atlas = None, or ATLAS_HANDOFF_ROWS = 0 in the batch
+# cell, to force this cell to reconstruct its own sample again.
+_handoff = globals().get('batch_recon_for_atlas')
+_USE_HANDOFF = bool(_handoff) and _handoff.get('sel_rows') is not None
+if _USE_HANDOFF:
+    if tuple(_handoff['components']) != tuple(_ATLAS_COMPONENTS):
+        raise RuntimeError(
+            "batch_recon_for_atlas was built with components "
+            f"{tuple(_handoff['components'])} but this cell expects "
+            f"{tuple(_ATLAS_COMPONENTS)}; the two definitions have drifted.")
+    # The batch cell selects out of filtered_triplet, so its positions index
+    # that table -- `e10_triplet` below is a name, not a claim about every10.
+    e10_triplet = filtered_triplet
+    sel_pos = np.asarray(_handoff['sel_pos'], dtype=int)
+    sel_rows = np.asarray(_handoff['sel_rows'], dtype=int)
+    _n_pick = int(sel_rows.size)
+    _wave_ref_recon = np.asarray(_handoff['wave'], dtype=np.float64)
+    wave_arr = _wave_ref_recon
+    _resid = _handoff['resid']
+    _truth = _handoff['truth']
+    _resid_comp = dict(_handoff['resid_comp'])
+    _truth_comp = dict(_handoff['truth_comp'])
+    _chi2_max_arm = None
+    _k_chi2 = ('chi2_near', 'chi2_far', 'chi2_sci')
+    if all(_k in filtered_triplet for _k in _k_chi2):
+        _chi2_max_arm = np.nanmax(np.vstack(
+            [np.asarray(filtered_triplet[_k], dtype=np.float64)
+             for _k in _k_chi2]), axis=0)
+    print(f"  [atlas] reusing the batch-RMSE reconstructions: {_n_pick} rows "
+          f"of the '{_handoff['split']}' split, no re-reconstruction")
+else:
+    e10_triplet = build_triplet_coef_dataset(
+        input_fits_path=EVERY10_INPUT,
+        sky_near_decomp_fits_path=EVERY10_NEAR,
+        sky_far_decomp_fits_path=EVERY10_FAR,
+        sci_decomp_fits_path=EVERY10_SCI,
+        context_columns=context_cols,
+        return_chi2=True,
+    )
+    if '_augment_triplet_with_ecliptic' in globals():
+        _augment_triplet_with_ecliptic(e10_triplet, meta_fits_path=EVERY10_INPUT)
+    if '_augment_triplet_with_physics_priors' in globals():
+        _augment_triplet_with_physics_priors(e10_triplet)
+        # MOON-MODEL-CTX-V1: must match the training-time ctx layout, or
+        # ctx_names will not line up with the trained ensemble.
+        if (globals().get('USE_MOON_MODEL_FEATURE', False)
+                and '_augment_triplet_with_moon_model' in globals()):
+            _augment_triplet_with_moon_model(e10_triplet, _e10_stem)
+
+    _e10_n0 = int(e10_triplet['n_rows'])
+    if _e10_n0 == 0:
+        raise RuntimeError('No aligned rows in e10_triplet')
+
+    # Apply LMC/SMC field exclusion (do NOT apply the kappa filters -- the atlas
+    # wants a realistic sample, tail included).
+    _keep = np.ones(_e10_n0, dtype=bool)
+    if 'sci_ra' in e10_triplet and 'sci_dec' in e10_triplet:
+        _sci_ra = np.asarray(e10_triplet['sci_ra'], dtype=np.float64)
+        _sci_dec = np.asarray(e10_triplet['sci_dec'], dtype=np.float64)
+        for _region in (LMC_EXCLUSION, SMC_EXCLUSION):
+            _sep = _angular_separation_deg_vec(
+                _sci_ra, _sci_dec, _region['ra_deg'], _region['dec_deg'])
+            _keep &= ~(np.isfinite(_sep) & (_sep <= float(_region['radius_deg'])))
+
+    _avail = np.where(_keep)[0]
+    _rng = np.random.default_rng(rng_seed_atlas)
+    _n_pick = int(min(n_sample_atlas, _avail.size))
+    sel_pos = _rng.choice(_avail, size=_n_pick, replace=False)
+    print(f'  atlas sample: n = {_n_pick} of {_avail.size} available every10 rows')
+
+    # Drop rows whose DECOMPOSITION failed, using the same hard cap the training
+    # corpus applies (data.apply_triplet_filters chi2_max).  This is a correctness
+    # gate, not the tail-trimming the header warns against: the e10 corpus contains
+    # rows with reduced_chi2 of order 1e30 (row 89 on the new-oh corpus), whose
+    # "truth" spectrum is a broken QP solve.  Scoring the model against those is
+    # meaningless, and because the sample is drawn with a fixed seed such a row sits
+    # in every run, dominating any mean-based statistic.  The kappa/percentile
+    # filters are still deliberately NOT applied.
+    #
+    # The gate is applied AFTER the draw, not before: `_rng.choice` indexes into
+    # `_avail`, so shrinking the pool would resample every row and break
+    # comparability with earlier runs.  Filtering the drawn sample instead keeps the
+    # survivors a strict subset of the rows previous runs used.
+    ATLAS_CHI2_MAX = 10.0
+    _chi2_keys = ('chi2_near', 'chi2_far', 'chi2_sci')
+    if all(_k in e10_triplet for _k in _chi2_keys):
+        _chi2_max_arm = np.nanmax(np.vstack(
+            [np.asarray(e10_triplet[_k], dtype=np.float64) for _k in _chi2_keys]), axis=0)
+        _chi2_ok_sel = (np.isfinite(_chi2_max_arm[sel_pos])
+                        & (_chi2_max_arm[sel_pos] <= ATLAS_CHI2_MAX))
+        _n_bad = int((~_chi2_ok_sel).sum())
+        if _n_bad:
+            print(f'  atlas chi2 gate (max-arm reduced_chi2 <= {ATLAS_CHI2_MAX:g}): '
+                  f'dropped {_n_bad} failed-decomposition row(s) from the sample '
+                  f'(worst chi2 = {np.nanmax(_chi2_max_arm[sel_pos][~_chi2_ok_sel]):.4g}, '
+                  f'at ' + str(canonical_row_labels(
+                      EVERY10_INPUT,
+                      [int(np.asarray(e10_triplet["row_index"])[sel_pos][~_chi2_ok_sel][
+                          np.nanargmax(_chi2_max_arm[sel_pos][~_chi2_ok_sel])])],
+                      corpus_meta_fits=f'{DECOMP_DATA_ROOT}/{DECOMP_STEM}_meta_only.fits'
+                  )['label'][0]) + ')')
+            sel_pos = sel_pos[_chi2_ok_sel]
+            _n_pick = int(sel_pos.size)
+            print(f'  atlas sample after gate: n = {_n_pick}')
+        else:
+            print(f'  atlas chi2 gate: all {_n_pick} sampled rows pass '
+                  f'(max-arm reduced_chi2 <= {ATLAS_CHI2_MAX:g})')
     else:
-        # Rare fallback.
-        _comps = reconstruct_with_lsf(
-            wave=_mdl.wave, coef=coef_row, lsf=lsf_sigma_fallback,
-            n_spline_knots=N_MOON_KNOTS, base_dir=base_dir_guess, o2_vector=_o2,
-            split_zodi=SPLIT_ZODI, n_zodi_spline_knots=N_ZODI_KNOTS,
-            telluric=_tel)
-    _by_group = _group_components(_comps)
-    _total = np.zeros_like(next(iter(_by_group.values())), dtype=np.float64)
-    for _v in _by_group.values():
-        _total = _total + _v
-    return np.asarray(_total, dtype=np.float64), _by_group
+        _chi2_max_arm = None
+        print('  atlas chi2 gate: SKIPPED (triplet carries no chi2; '
+              'build with return_chi2=True)')
+
+    # Moon/zodi role-reversal gate, applied to the drawn sample for the same reason
+    # and in the same way as the chi2 gate above: a reversed row's moon
+    # coefficients describe zodiacal light, so the per-component attribution below
+    # would credit the wrong family.  Filtering after the draw keeps the survivors a
+    # strict subset of the rows earlier runs used.
+    with fits.open(EVERY10_INPUT) as _hdul_rev:
+        _wave_rev = np.asarray(_hdul_rev['WAVE'].data, dtype=np.float64)
+    _wave_rev = _wave_rev if _wave_rev.ndim == 1 else _wave_rev[0]
+    _rev_keep_sel = split_zodi_reversal_keep_mask(
+        {'near': EVERY10_NEAR, 'far': EVERY10_FAR, 'sci': EVERY10_SCI},
+        np.asarray(e10_triplet['row_index'], dtype=np.int64)[sel_pos],
+        _wave_rev, label='atlas')
+    if not bool(np.all(_rev_keep_sel)):
+        sel_pos = sel_pos[_rev_keep_sel]
+        _n_pick = int(sel_pos.size)
+        print(f'  atlas sample after reversal gate: n = {_n_pick}')
+
+    # Science-continuum colour gate, same placement and rationale: where the
+    # science fibre's continuum colour disagrees with both sky arms, the Moon_bs
+    # spline has absorbed field continuum, so the per-component attribution below
+    # would charge the moon for something that is not sky.
+    _col_keep_sel = sci_continuum_colour_keep_mask(
+        EVERY10_INPUT,
+        np.asarray(e10_triplet['row_index'], dtype=np.int64)[sel_pos],
+        label='atlas')
+    if not bool(np.all(_col_keep_sel)):
+        sel_pos = sel_pos[_col_keep_sel]
+        _n_pick = int(sel_pos.size)
+        print(f'  atlas sample after science-continuum colour gate: n = {_n_pick}')
+
+    # Diffuse-zeroed gate: a collapsed diffuse block makes the per-component
+    # attribution below meaningless for that row -- the continuum's share of the
+    # residual is computed against a truth of ~0.
+    _dz_keep_sel = diffuse_zeroed_keep_mask(
+        {'near': np.asarray(e10_triplet['coef_near'])[sel_pos],
+         'far': np.asarray(e10_triplet['coef_far'])[sel_pos],
+         'sci': np.asarray(e10_triplet['coef_sci'])[sel_pos]},
+        e10_triplet['coef_names'], label='atlas')
+    if not bool(np.all(_dz_keep_sel)):
+        sel_pos = sel_pos[_dz_keep_sel]
+        _n_pick = int(sel_pos.size)
+        print(f'  atlas sample after diffuse-zeroed gate: n = {_n_pick}')
+
+    sel_rows = np.asarray(e10_triplet['row_index'], dtype=np.int64)[sel_pos]
+    # sel_rows index the every10 arrays; labels must use the canonical identity
+    # because every10 row N != corpus row N (measured: every10 493 is corpus 4930).
+    _row_ident = canonical_row_labels(
+        EVERY10_INPUT, sel_rows,
+        corpus_meta_fits=f'{DECOMP_DATA_ROOT}/{DECOMP_STEM}_meta_only.fits')
+    _row_label = list(_row_ident['label'])
+
+    # ML predictions for these rows.
+    coef_sci_pred_atlas = predict_sci_coefficients_default(
+        mlp_artifacts,
+        coef_near_phys=np.asarray(e10_triplet['coef_near'][sel_pos], dtype=np.float32),
+        coef_far_phys=np.asarray( e10_triplet['coef_far'][sel_pos],  dtype=np.float32),
+        ctx_near_phys=np.asarray( e10_triplet['ctx_near'][sel_pos],  dtype=np.float32),
+        ctx_far_phys=np.asarray(  e10_triplet['ctx_far'][sel_pos],   dtype=np.float32),
+        ctx_sci_phys=np.asarray(  e10_triplet['ctx_sci'][sel_pos],   dtype=np.float32),
+    ).astype(np.float32)
+    coef_sci_true_atlas = np.asarray(e10_triplet['coef_sci'][sel_pos], dtype=np.float32)
+
+    # Load wavelength grid + LSF ref from the input FITS (matches the recon cell).
+    with fits.open(EVERY10_INPUT) as hdul:
+        wave_arr = np.asarray(hdul['WAVE'].data, dtype=np.float64)
+        lsf_sci_arr = np.asarray(hdul['LSF_SCI'].data, dtype=np.float64)
+
+    _wave_ref_recon = wave_arr if wave_arr.ndim == 1 else wave_arr[int(sel_rows[0])]
+    base_dir_guess = _infer_base_dir_for_reconstruction()
+
+    from mlp_predictor.data import make_reconstruction_decomposer
+    _telluric_for = globals().get('TELLURIC_ROW_FOR')
+    _lsf_model = SkyDecompLSFSurfaceIterative(
+        _wave_ref_recon, lsf_sigma=1.0, n_spline_knots=N_MOON_KNOTS,
+        base_dir=base_dir_guess,
+        split_zodi=SPLIT_ZODI, n_zodi_spline_knots=N_ZODI_KNOTS,
+    )
 
 
-# Reconstruct N rows: shape (n_pick, n_pix).
-_n_pix = _wave_ref_recon.size
-# float32 like the per-component stacks below: these feed medians and
-# percentiles for display, and float64 doubles the largest allocation in the
-# cell for no visible difference.
-_resid = np.full((_n_pick, _n_pix), np.nan, dtype=np.float32)
-_truth = np.full((_n_pick, _n_pix), np.nan, dtype=np.float32)
+    def _precache_decomp_state(decomp_path):
+        _state = {'path': Path(decomp_path), 'has_lsf': False, 'o2_cube': None}
+        if not _state['path'].exists():
+            return _state
+        try:
+            with fits.open(str(_state['path']), memmap=False) as _hdul_dec:
+                _names = {h.name for h in _hdul_dec}
+                _state['has_lsf'] = all(_e in _names for _e in ('LSF_COEF', 'LSF_KNOTS', 'LSF_META'))
+                if 'VECTOR_O2' in _names:
+                    _data = np.asarray(_hdul_dec['VECTOR_O2'].data, dtype=np.float64)
+                    if _data.ndim == 2:
+                        _state['o2_cube'] = _data
+        except (KeyError, IndexError, ValueError) as _exc:
+            print(f'  precache failed for {_state["path"].name}: {_exc}')
+        return _state
 
-# Per-component residual + truth stacks (float32: 2 x 6 groups x ~200 rows x
-# n_pix ~ 120 MB).  The truth stack is what lets the table report each group's
-# error in ITS OWN units, not just its share of the total flux.
-_resid_comp = {_g: np.full((_n_pick, _n_pix), np.nan, dtype=np.float32)
-               for _g in _ATLAS_COMPONENTS}
-_truth_comp = {_g: np.full((_n_pick, _n_pix), np.nan, dtype=np.float32)
-               for _g in _ATLAS_COMPONENTS}
-print(f'  atlas stacks: {(2 + 2 * len(_ATLAS_COMPONENTS)) * _n_pick * _n_pix * 4 / 1e6:.0f} MB '
-      f'for {_n_pick} rows x {_n_pix} pixels')
 
-_t0 = _time.perf_counter()
-for _i, _rr in enumerate(sel_rows):
-    _lsf_row = lsf_sci_arr if lsf_sci_arr.ndim == 1 else lsf_sci_arr[int(_rr)]
-    _lsf_sigma_fb = _lsf_row / LSF_FWHM_TO_SIGMA
-    _y_true, _c_true = _reconstruct_sci_total(coef_sci_true_atlas[_i], _rr, _lsf_sigma_fb)
-    _y_pred, _c_pred = _reconstruct_sci_total(coef_sci_pred_atlas[_i], _rr, _lsf_sigma_fb)
-    _y_true = _y_true
-    _y_pred = _y_pred
-    _resid[_i, :] = _y_pred - _y_true
-    _truth[_i, :] = _y_true
-    for _g in _ATLAS_COMPONENTS:
-        _resid_comp[_g][_i, :] = (_c_pred[_g] - _c_true[_g])
-        _truth_comp[_g][_i, :] = _c_true[_g]
-    if _i and _i % 50 == 0:
-        print(f'  reconstructed {_i}/{_n_pick} rows ({_time.perf_counter() - _t0:.1f}s)')
-print(f'  atlas reconstruction: {_time.perf_counter() - _t0:.1f}s '
-      f'({_n_pick} rows x 2 spectra)')
+    _state_sci = _precache_decomp_state(EVERY10_SCI)
+
+
+    # Reconstruction components -> ML coefficient groups (§3.2).  'oh' and 'o2'
+    # both belong to the mesospheric group; the rest are one-to-one.
+    def _reconstruct_sci_total(coef_row, row_idx, lsf_sigma_fallback):
+        """Return (total_flux, {group: component_flux}) for one row."""
+        _lsf_state = None
+        if _state_sci['has_lsf']:
+            try:
+                _lsf_state = load_lsf_surface_state(str(_state_sci['path']), int(row_idx))
+            except (KeyError, IndexError, ValueError):
+                _lsf_state = None
+        _o2 = None
+        if _state_sci['o2_cube'] is not None and int(row_idx) < _state_sci['o2_cube'].shape[0]:
+            _o2_row = _state_sci['o2_cube'][int(row_idx)]
+            if np.isfinite(_o2_row).any() and float(np.nansum(np.abs(_o2_row))) > 0.0:
+                _o2 = _o2_row
+        # Telluric variant: the basis is per row, so rebuild instead of reusing the
+        # hoisted model.  See full_spectrum_batch_rmse for the reasoning.
+        _tel = (None if _telluric_for is None
+                else _telluric_for('sci', int(row_idx)))
+        _mdl = (_lsf_model if _tel is None else make_reconstruction_decomposer(
+            _lsf_model.wave, n_spline_knots=N_MOON_KNOTS, base_dir=base_dir_guess,
+            split_zodi=SPLIT_ZODI, n_zodi_spline_knots=N_ZODI_KNOTS, telluric=_tel))
+        if isinstance(_lsf_state, LSFSurfaceState):
+            _mdl._set_lsf_state(_lsf_state)
+            _mats = _mdl._assemble_refined_matrices()
+            if _o2 is not None:
+                _mats['o2'] = np.asarray(_o2, float).ravel()[None, :]
+            _comps = _mdl._components_from_coef(np.asarray(coef_row, float).ravel(), _mats)
+        else:
+            # Rare fallback.
+            _comps = reconstruct_with_lsf(
+                wave=_mdl.wave, coef=coef_row, lsf=lsf_sigma_fallback,
+                n_spline_knots=N_MOON_KNOTS, base_dir=base_dir_guess, o2_vector=_o2,
+                split_zodi=SPLIT_ZODI, n_zodi_spline_knots=N_ZODI_KNOTS,
+                telluric=_tel)
+        _by_group = _group_components(_comps)
+        _total = np.zeros_like(next(iter(_by_group.values())), dtype=np.float64)
+        for _v in _by_group.values():
+            _total = _total + _v
+        return np.asarray(_total, dtype=np.float64), _by_group
+
+
+    # Reconstruct N rows: shape (n_pick, n_pix).
+    _n_pix = _wave_ref_recon.size
+    # float32 like the per-component stacks below: these feed medians and
+    # percentiles for display, and float64 doubles the largest allocation in the
+    # cell for no visible difference.
+    _resid = np.full((_n_pick, _n_pix), np.nan, dtype=np.float32)
+    _truth = np.full((_n_pick, _n_pix), np.nan, dtype=np.float32)
+
+    # Per-component residual + truth stacks (float32: 2 x 6 groups x ~200 rows x
+    # n_pix ~ 120 MB).  The truth stack is what lets the table report each group's
+    # error in ITS OWN units, not just its share of the total flux.
+    _resid_comp = {_g: np.full((_n_pick, _n_pix), np.nan, dtype=np.float32)
+                   for _g in _ATLAS_COMPONENTS}
+    _truth_comp = {_g: np.full((_n_pick, _n_pix), np.nan, dtype=np.float32)
+                   for _g in _ATLAS_COMPONENTS}
+    print(f'  atlas stacks: {(2 + 2 * len(_ATLAS_COMPONENTS)) * _n_pick * _n_pix * 4 / 1e6:.0f} MB '
+          f'for {_n_pick} rows x {_n_pix} pixels')
+
+    _t0 = _time.perf_counter()
+    for _i, _rr in enumerate(sel_rows):
+        _lsf_row = lsf_sci_arr if lsf_sci_arr.ndim == 1 else lsf_sci_arr[int(_rr)]
+        _lsf_sigma_fb = _lsf_row / LSF_FWHM_TO_SIGMA
+        _y_true, _c_true = _reconstruct_sci_total(coef_sci_true_atlas[_i], _rr, _lsf_sigma_fb)
+        _y_pred, _c_pred = _reconstruct_sci_total(coef_sci_pred_atlas[_i], _rr, _lsf_sigma_fb)
+        _y_true = _y_true
+        _y_pred = _y_pred
+        _resid[_i, :] = _y_pred - _y_true
+        _truth[_i, :] = _y_true
+        for _g in _ATLAS_COMPONENTS:
+            _resid_comp[_g][_i, :] = (_c_pred[_g] - _c_true[_g])
+            _truth_comp[_g][_i, :] = _c_true[_g]
+        if _i and _i % 50 == 0:
+            print(f'  reconstructed {_i}/{_n_pick} rows ({_time.perf_counter() - _t0:.1f}s)')
+    print(f'  atlas reconstruction: {_time.perf_counter() - _t0:.1f}s '
+          f'({_n_pick} rows x 2 spectra)')
 
 # Aggregate residuals per pixel -- over ALL rows first.  The per-wavelength
 # tables further down consume these, so they keep their meaning; the moon

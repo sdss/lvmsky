@@ -164,19 +164,51 @@ def build_lsf_hdus(states):
     ]
 
 
-def load_lsf_surface_state(filename: str | Path, spectrum_index: int = 0):
-    """Load one compact LSF state from an extended decomposition FITS."""
-    from astropy.io import fits
+def load_lsf_surface_cubes(filename: str | Path):
+    """Read the three LSF HDUs once, for repeated per-row state construction.
 
-    from .lsf_surface_iterative import LSF_STATE_SCHEMA_VERSION, LSFSurfaceState
+    :func:`load_lsf_surface_state` reads LSF_COEF, LSF_KNOTS and LSF_META in
+    full on every call.  That is fine for a handful of rows, but a diagnostic
+    that walks thousands of them pays it thousands of times -- on a full-corpus
+    decomposition those three HDUs are ~30 + 4 + 48 MB, so a 2900-row x 3-arm
+    sweep would read of order half a terabyte to extract a few MB of state.
+    Read them once with this and pass the result to
+    :func:`lsf_surface_state_from_cubes`.
+    """
+    from astropy.io import fits
 
     with fits.open(filename, memmap=False) as hdul:
         for name in LSF_HDU_NAMES:
             if name not in hdul:
                 raise KeyError(f"Missing {name} extension in {filename}")
-        coefficient_cube = np.asarray(hdul["LSF_COEF"].data, dtype=float)
-        knot_cube = np.asarray(hdul["LSF_KNOTS"].data, dtype=float)
-        meta = hdul["LSF_META"].data
+        # LSF_META stays a FITS_rec: astropy decodes TFORM 'L' columns to bool
+        # on access, and np.asarray() would hand back the raw int8 FITS
+        # logicals instead -- where 'F' is 70, i.e. TRUTHY.  That silently
+        # defeats the `available` check below, so a row with no fitted LSF
+        # would return a garbage state instead of raising.  Safe to use after
+        # the close because memmap=False has already read it into memory.
+        return (np.asarray(hdul["LSF_COEF"].data, dtype=float),
+                np.asarray(hdul["LSF_KNOTS"].data, dtype=float),
+                hdul["LSF_META"].data)
+
+
+def load_lsf_surface_state(filename: str | Path, spectrum_index: int = 0):
+    """Load one compact LSF state from an extended decomposition FITS."""
+    coefficient_cube, knot_cube, meta = load_lsf_surface_cubes(filename)
+    return lsf_surface_state_from_cubes(
+        (coefficient_cube, knot_cube, meta), spectrum_index)
+
+
+def lsf_surface_state_from_cubes(cubes, spectrum_index: int = 0):
+    """Build one :class:`LSFSurfaceState` from cubes already in memory.
+
+    ``cubes`` is the ``(coefficient_cube, knot_cube, meta)`` tuple returned by
+    :func:`load_lsf_surface_cubes`.  Same result as
+    :func:`load_lsf_surface_state`, without the re-read.
+    """
+    from .lsf_surface_iterative import LSF_STATE_SCHEMA_VERSION, LSFSurfaceState
+
+    coefficient_cube, knot_cube, meta = cubes
 
     if coefficient_cube.ndim != 4 or knot_cube.ndim != 3:
         raise ValueError("Stored LSF coefficient or knot arrays have invalid shapes")

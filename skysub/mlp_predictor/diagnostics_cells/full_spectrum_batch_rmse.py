@@ -4,7 +4,14 @@ import pandas as pd
 import plotly.graph_objects as go
 # Explicit: the variant-aware decomposer factory is newer than this cell's
 # `required` contract, so do not rely on it being in the shared namespace.
-from mlp_predictor.data import make_reconstruction_decomposer
+import time as _time
+
+from sky_decomp.result_io import (load_lsf_surface_cubes,
+                                  lsf_surface_state_from_cubes)
+
+from mlp_predictor import cell_parallel as _cell_parallel
+from mlp_predictor.data import (make_reconstruction_decomposer,
+                                make_telluric_row_lookup)
 from sky_decomp.moon_zodi_model import LSF_FWHM_TO_SIGMA
 
 RUN_RMSE_SUBSET_EVAL = True  # Set True to execute this slower evaluation cell.
@@ -29,15 +36,30 @@ if not RUN_RMSE_SUBSET_EVAL:
     print("Cell 19 skipped. Set RUN_RMSE_SUBSET_EVAL = True to run the random-subset RMSE evaluation.")
 else:
     # Use the same file inputs as the reconstruction diagnostic cell.
-    _e10_stem = f"{DECOMP_DATA_ROOT}/{DECOMP_STEM}_every10"
-    _e10_suffix = _DECOMP_SUFFIX  # inherited from cell 6
-    EVERY10_INPUT = f"{_e10_stem}.fits"
-    EVERY10_NEAR = f"{_e10_stem}_decomp_sky1{_e10_suffix}.fits"
-    EVERY10_FAR = f"{_e10_stem}_decomp_sky2{_e10_suffix}.fits"
-    EVERY10_SCI = f"{_e10_stem}_decomp_sci{_e10_suffix}.fits"
+    # FULL-CORPUS inputs (2026-09-23).  This cell used to read the every10
+    # products -- a 1-in-10 subsample of the stack.  Intersected with the
+    # held-out split those leave only 299 of the 2900 validation+test rows, so
+    # it scored a tenth of the sample it claimed to.  The corpus files carry
+    # every row.  Their size (28 GB per arm) costs nothing here because nothing
+    # reads a whole plane: flux, VECTOR_O2 and FLUX_SIGMA_TOTAL are sliced to
+    # the selected rows, and the LSF cubes are read once rather than per row.
+    _eval_stem = f"{DECOMP_DATA_ROOT}/{DECOMP_STEM}"
+    _eval_suffix = _DECOMP_SUFFIX  # inherited from cell 6
+    EVAL_INPUT = f"{_eval_stem}.fits"
+    EVAL_NEAR = f"{_eval_stem}_decomp_sky1{_eval_suffix}.fits"
+    EVAL_FAR = f"{_eval_stem}_decomp_sky2{_eval_suffix}.fits"
+    EVAL_SCI = f"{_eval_stem}_decomp_sci{_eval_suffix}.fits"
 
-    n_sample = 100
+    # None = every held-out row that passes the gates.  An integer caps it, and
+    # the cap is drawn phase-stratified as before.  Overridden by the `size=`
+    # kwarg of Diagnostics.full_spectrum_batch_rmse, which rewrites this
+    # literal; edit there, not here.
+    n_sample = None
     rng_seed = 42
+    # Reconstruction workers.  The loop below is ~0.3 s/row of numpy in a
+    # per-row model whose state is mutated in place, so it parallelises cleanly
+    # across processes and not at all across threads.  1 forces the serial path.
+    n_workers = 8
 
     # Cap on the number of per-row LINES drawn in the residual figure.
     # Overridden by the `stroked=` kwarg of Diagnostics.full_spectrum_batch_rmse,
@@ -54,239 +76,187 @@ else:
     # histograms -- both computed from ALL rows -- are what the eye reads.
     MAX_RESID_LINES = 60
 
-    # 1) Build aligned triplet rows, keeping chi2 so we can apply the same
-    #    quality gates the training set went through.
-    e10_triplet = build_triplet_coef_dataset(
-        input_fits_path=EVERY10_INPUT,
-        sky_near_decomp_fits_path=EVERY10_NEAR,
-        sky_far_decomp_fits_path=EVERY10_FAR,
-        sci_decomp_fits_path=EVERY10_SCI,
-        context_columns=context_cols,
-        return_chi2=True,
-    )
-    # ECLIPTIC-CTX-V1: match training-time ctx layout on the e10 triplet.
-    if '_augment_triplet_with_ecliptic' in globals():
-        _augment_triplet_with_ecliptic(e10_triplet, meta_fits_path=EVERY10_INPUT)
-    # PHYSICS-PRIORS-CTX-V1: same augment on the e10 triplet.
-    if '_augment_triplet_with_physics_priors' in globals():
-        _augment_triplet_with_physics_priors(e10_triplet)
-        # MOON-MODEL-CTX-V1: must match the training-time ctx layout, or
-        # ctx_names will not line up with the trained ensemble.
-        if (globals().get('USE_MOON_MODEL_FEATURE', False)
-                and '_augment_triplet_with_moon_model' in globals()):
-            _augment_triplet_with_moon_model(e10_triplet, _e10_stem)
+    # Rows whose PER-COMPONENT reconstruction is kept for wavelength_residual_
+    # atlas to reuse.  The atlas needs six component spectra x (pred, true) per
+    # row, which is 0.6 MB/row on top of what this cell already keeps -- 1.7 GB
+    # if we kept all 2900.  Its output is aggregate curves that converge long
+    # before that (it sampled 500 rows when it did its own reconstruction), so
+    # cap the handoff and spend the memory on the RMSE statistics instead,
+    # which do use every row.  0 disables the handoff and the atlas falls back
+    # to reconstructing its own sample.
+    ATLAS_HANDOFF_ROWS = 600
 
-    row_index_e10 = np.asarray(e10_triplet["row_index"], dtype=np.int64)
-    _e10_n0 = int(e10_triplet["n_rows"])
-    if _e10_n0 == 0:
-        raise RuntimeError("No aligned rows available in e10_triplet")
+    # Must match _ATLAS_COMPONENTS in wavelength_residual_atlas.py -- the atlas
+    # indexes the handoff by these exact keys, so a mismatch raises rather than
+    # silently mis-attributing.
+    _ATLAS_COMPONENTS = {
+        'moon':                 ('moon',),
+        'zodi':                 ('zodi',),
+        'mesospheric (OH+O2)':  ('oh', 'o2'),
+        'continuum (diffuse)':  ('diffuse',),
+        'atomic':               ('atom',),
+        'ionospheric (ORC)':    ('orc',),
+    }
 
-    # 1a) Apply chi2 gating and LMC/SMC field exclusion BEFORE the random
-    #     subsample, so the reconstructions we score are drawn from tiles
-    #     that pass the same data-quality gates the training set went
-    #     through.  Hard coefficient bounds and kappa-sigma clipping are
-    #     intentionally NOT applied here -- those are training-time filters
-    #     on the target that would remove the model's hardest true cases
-    #     from the evaluation set.
-    _e10_keep = np.ones(_e10_n0, dtype=bool)
+    def _group_components(_comps):
+        """Sum the raw recon components into the six ML groups."""
+        return {_g: sum((np.asarray(_comps.get(_k, 0.0), dtype=np.float64)
+                         for _k in _keys), start=np.float64(0.0))
+                for _g, _keys in _ATLAS_COMPONENTS.items()}
 
-    if "sci_ra" in e10_triplet and "sci_dec" in e10_triplet:
-        _sci_ra = np.asarray(e10_triplet["sci_ra"], dtype=np.float64)
-        _sci_dec = np.asarray(e10_triplet["sci_dec"], dtype=np.float64)
-        _field_mask = np.ones(_e10_n0, dtype=bool)
-        for _region in (LMC_EXCLUSION, SMC_EXCLUSION):
-            _sep = _angular_separation_deg_vec(
-                _sci_ra, _sci_dec,
-                _region["ra_deg"], _region["dec_deg"])
-            _inside = np.isfinite(_sep) & (_sep <= float(_region["radius_deg"]))
-            print(
-                f"  every10 field exclusion around {_region['name']}: "
-                f"excluded {int(_inside.sum())}/{_e10_n0}"
-            )
-            _field_mask &= ~_inside
-        _e10_keep &= _field_mask
-    else:
-        print("  every10 field exclusion skipped: no sci_ra/sci_dec in triplet.")
-
-    if all(_k in e10_triplet for _k in ("chi2_near", "chi2_far", "chi2_sci")):
-        # 2026-08-19: use max (not nanmax) so any-arm-NaN chi2 propagates
-        # NaN and disqualifies the whole observation via the isfinite gate.
-        _chi2_combined = np.max(
-            np.column_stack([
-                np.asarray(e10_triplet["chi2_near"], dtype=np.float64),
-                np.asarray(e10_triplet["chi2_far"], dtype=np.float64),
-                np.asarray(e10_triplet["chi2_sci"], dtype=np.float64),
-            ]),
-            axis=1,
-        )
-        _chi2_finite = _chi2_combined[np.isfinite(_chi2_combined)]
-        _chi2_hi = (float(np.nanpercentile(_chi2_finite, 90.0))
-                    if _chi2_finite.size else np.inf)
-        _chi2_upper = min(10.0, _chi2_hi)
-        _chi2_mask = (np.isfinite(_chi2_combined)
-                      & (_chi2_combined >= 0.0)
-                      & (_chi2_combined <= _chi2_upper))
-        print(
-            f"  every10 chi2 filter (qmax=90% -> {_chi2_hi:.3g}, "
-            f"upper={_chi2_upper:.3g}): "
-            f"kept {int(_chi2_mask.sum())}/{_e10_n0}"
-        )
-        _e10_keep &= _chi2_mask
-    else:
-        print("  every10 chi2 filter skipped: chi2 columns not in triplet.")
-
-    # Moon/zodi role-reversal gate.  Grouped with the chi2 gate above, not with
-    # the training-time target filters: a reversed row's moon coefficients
-    # describe zodiacal light, so scoring against them measures nothing and the
-    # row appears as a spurious moon-panel outlier that was never trained on.
-    with fits.open(EVERY10_INPUT) as _hw:
-        _e10_wave = np.asarray(_hw["WAVE"].data, dtype=float)
-        _e10_wave = _e10_wave if _e10_wave.ndim == 1 else _e10_wave[0]
-    _e10_keep &= split_zodi_reversal_keep_mask(
-        {"near": EVERY10_NEAR, "far": EVERY10_FAR, "sci": EVERY10_SCI},
-        row_index_e10, _e10_wave, label="every10")
-
-    # Science-continuum colour gate.  Same reason as the reversal gate above:
-    # a row whose science fibre carries continuum the sky basis cannot
-    # represent has that continuum absorbed by the Moon_bs spline, so its moon
-    # target is contaminated and scoring against it measures nothing.  Without
-    # this the verification sample keeps rows the training corpus now drops,
-    # which is exactly the mismatch that made every10 row 493 (expnum 41932)
-    # look like a moon-prediction failure when the prediction was correct and
-    # the target was not.
-    _e10_keep &= sci_continuum_colour_keep_mask(
-        EVERY10_INPUT, row_index_e10, label="every10")
-
-    # Diffuse-zeroed gate.  Same reason again: where the QP collapsed the whole
-    # diffuse block to ~0 in an arm, that row's continuum target is an artefact
-    # and scoring against it measures nothing -- those rows alone put the
-    # continuum p95 log-error at 8 dex.  On gaia-stars-mask all 64 surviving
-    # such rows come from two nights, and one of them landed entirely in the
-    # test split, enriching it 6.3x (4.12% against 0.65% corpus-wide), so
-    # leaving them in makes the continuum diagnostic unrepresentative.
-    _e10_keep &= diffuse_zeroed_keep_mask(
-        {"near": e10_triplet["coef_near"], "far": e10_triplet["coef_far"],
-         "sci": e10_triplet["coef_sci"]},
-        e10_triplet["coef_names"], label="every10")
-
-    _e10_valid_pos = np.flatnonzero(_e10_keep)
-    n_rows = int(_e10_valid_pos.size)
-    print(
-        f"  every10 rows passing chi2 + field + reversal + colour + diffuse gates: "
-        f"{n_rows}/{_e10_n0} ({100.0 * n_rows / max(_e10_n0, 1):.1f}%)"
-    )
+    # 1) Select the rows to score straight from `filtered_triplet`.
+    #
+    # No triplet rebuild and no re-gating: `filtered_triplet` IS the gated
+    # corpus (chi2, field, reversal, colour, diffuse-zeroed and the kappa
+    # filters were all applied in the data-load cell), and the split indices
+    # address it directly.  The every10 path had to redo the gates because it
+    # built its own ungated triplet; that is gone, and with it the risk of the
+    # two gate chains drifting apart.
+    _EVAL_SPLIT = 'heldout'   # 'heldout' (val+test) | 'test' | 'val' | 'all'
+    _n_ft = int(np.asarray(filtered_triplet["coef_sci"]).shape[0])
+    _split_pos = {
+        'heldout': lambda: np.concatenate([np.asarray(val_idx, dtype=int),
+                                           np.asarray(test_idx, dtype=int)]),
+        'val':     lambda: np.asarray(val_idx, dtype=int),
+        'test':    lambda: np.asarray(test_idx, dtype=int),
+        'all':     lambda: np.arange(_n_ft, dtype=int),
+    }[_EVAL_SPLIT]()
+    _eval_pos_all = np.unique(np.asarray(_split_pos, dtype=int))
+    n_rows = int(_eval_pos_all.size)
+    print(f"  scoring the '{_EVAL_SPLIT}' split: {n_rows}/{_n_ft} filtered "
+          f"corpus rows"
+          + ("  <- TRAINING ROWS INCLUDED; the RMSE below is optimistic"
+             if _EVAL_SPLIT == 'all' else ""))
     if n_rows == 0:
-        raise RuntimeError(
-            "No aligned rows survive chi2/field filtering; relax thresholds.")
+        raise RuntimeError(f"The '{_EVAL_SPLIT}' split is empty.")
 
-    n_use = int(min(n_sample, n_rows))
+    n_use = n_rows if n_sample is None else int(min(int(n_sample), n_rows))
     rng = np.random.default_rng(rng_seed)
+    _moon_phase_ft = _moon_phase_deg_from_ctx(filtered_triplet)
+    if n_use >= n_rows:
+        # Taking everything: no draw to stratify, so the result stops being a
+        # function of `seed`.
+        sel_ft = np.sort(_eval_pos_all)
+        print(f"  using ALL {n_use} rows of the split (no subsampling)")
+    else:
+        # Stratify the cap by lunar phase so a subsample still spans dark ->
+        # bright roughly uniformly (matches split_indices_by_moon_phase).  A
+        # plain choice would inherit whichever phase quantiles happen to hold
+        # more rows, and sci_pred_vs_true would then describe that region
+        # rather than deployment conditions.
+        _valid_phase = _moon_phase_ft[_eval_pos_all]
+        if not np.isfinite(_valid_phase).all():
+            raise RuntimeError('Non-finite moon_phase in the split rows; '
+                               'cannot stratify by lunar phase.')
+        _n_phase_bins = int(min(10, n_use))
+        _phase_edges = np.quantile(_valid_phase,
+                                   np.linspace(0.0, 1.0, _n_phase_bins + 1))
+        _phase_edges[0], _phase_edges[-1] = -np.inf, np.inf
+        _bin_id = np.digitize(_valid_phase, _phase_edges[1:-1], right=False)
+        # Round-robin quota, +1s scattered so no bin is systematically favored.
+        _quota = np.full(_n_phase_bins, n_use // _n_phase_bins, dtype=int)
+        _quota[:n_use - int(_quota.sum())] += 1
+        rng.shuffle(_quota)
+        _picked = []
+        for _b in range(_n_phase_bins):
+            _in_bin = _eval_pos_all[_bin_id == _b]
+            _take = int(min(_quota[_b], _in_bin.size))
+            if _take > 0:
+                _picked.append(rng.choice(_in_bin, size=_take, replace=False))
+        _selected = (np.concatenate(_picked).astype(int)
+                     if _picked else np.array([], dtype=int))
+        _shortfall = n_use - _selected.size
+        if _shortfall > 0:
+            _remaining = np.setdiff1d(_eval_pos_all, _selected)
+            if _remaining.size >= _shortfall:
+                _selected = np.concatenate(
+                    [_selected, rng.choice(_remaining, size=_shortfall,
+                                           replace=False)])
+        sel_ft = np.sort(_selected)
+    # Positions in `filtered_triplet` and the corresponding CORPUS FITS rows.
+    # These are corpus rows now, not every10 rows -- consumers must not index
+    # an every10 file with them, which is why `rmse_subset_results` records the
+    # files they belong to.
+    sel_pos = sel_ft
+    sel_rows = np.asarray(filtered_triplet["row_index"], dtype=int)[sel_ft]
+    n_use = int(sel_ft.size)
 
-    # Stratify the draw by lunar phase so the diagnostic set spans dark -> bright
-    # roughly uniformly (matches split_indices_by_moon_phase in §8.1). A plain
-    # rng.choice over _e10_valid_pos would inherit the phase distribution of the
-    # dataset -- weighted toward whichever quantiles happen to hold more filtered
-    # rows -- and the sci_pred_vs_true RMSE would then be dominated by that
-    # region rather than being representative of deployment conditions.
-    _e10_moon_phase = _moon_phase_deg_from_ctx(e10_triplet)
-    _valid_phase = _e10_moon_phase[_e10_valid_pos]
-    if not np.isfinite(_valid_phase).all():
-        raise RuntimeError('Non-finite moon_phase in the valid every10 rows; '
-                           'cannot stratify by lunar phase.')
-
-    _n_phase_bins = int(min(10, n_use))
-    _phase_edges = np.quantile(_valid_phase,
-                               np.linspace(0.0, 1.0, _n_phase_bins + 1))
-    _phase_edges[0], _phase_edges[-1] = -np.inf, np.inf
-    _bin_id = np.digitize(_valid_phase, _phase_edges[1:-1], right=False)
-
-    # Round-robin quota with the +1s scattered randomly so no bin is systematically favored.
-    _quota = np.full(_n_phase_bins, n_use // _n_phase_bins, dtype=int)
-    _quota[:n_use - int(_quota.sum())] += 1
-    rng.shuffle(_quota)
-
-    _picked = []
-    for _b in range(_n_phase_bins):
-        _in_bin = _e10_valid_pos[_bin_id == _b]
-        _take = int(min(_quota[_b], _in_bin.size))
-        if _take > 0:
-            _picked.append(rng.choice(_in_bin, size=_take, replace=False))
-    _selected = (np.concatenate(_picked).astype(int)
-                 if _picked else np.array([], dtype=int))
-
-    # If any bin was smaller than its quota, backfill from the remaining pool.
-    _shortfall = n_use - _selected.size
-    if _shortfall > 0:
-        _remaining = np.setdiff1d(_e10_valid_pos, _selected, assume_unique=False)
-        if _remaining.size >= _shortfall:
-            _selected = np.concatenate(
-                [_selected, rng.choice(_remaining, size=_shortfall, replace=False)])
-
-    sel_pos = np.sort(_selected)
-    sel_rows = row_index_e10[sel_pos]
-
-    # Canonical row identity for every label and tooltip below.  `sel_rows` are
-    # EVERY10 file rows, and every10 row N is a different spectrum from row N of
-    # the full-corpus tables (measured: every10 493 is corpus 4930), so a bare
-    # every10 number cannot be looked up in a decomposition FITS.  `expnum` is
-    # unique in every META and identical for the same spectrum across
-    # selections, so it is what makes these labels universally resolvable.
-    _row_ident = canonical_row_labels(
-        EVERY10_INPUT, sel_rows,
-        corpus_meta_fits=f'{DECOMP_DATA_ROOT}/{DECOMP_STEM}_meta_only.fits')
+    _row_ident = canonical_row_labels(EVAL_INPUT, sel_rows)
     _row_label = list(_row_ident['label'])
-    print(f'  row identity: labels carry expnum + full-corpus row; '
-          f'{int((_row_ident["corpus_row"] >= 0).sum())}/{len(_row_label)} '
-          f'resolved against {DECOMP_STEM}_meta_only.fits')
+    print(f'  row identity: labels carry expnum + corpus row')
 
-    _sel_phases = _e10_moon_phase[sel_pos]
-    print(f"  phase-stratified sample: n_use={n_use} across {_n_phase_bins} "
-          f"quantile bins; phase deg quartiles (min / 25 / 50 / 75 / max) = "
+    _sel_phases = _moon_phase_ft[sel_ft]
+    _phase_how = ("every row of the split, unstratified"
+                  if n_use >= n_rows
+                  else f"stratified across {_n_phase_bins} quantile bins")
+    print(f"  sample: n_use={n_use}, {_phase_how}; "
+          f"phase deg quartiles (min / 25 / 50 / 75 / max) = "
           f"{float(np.min(_sel_phases)):.1f} / "
           f"{float(np.percentile(_sel_phases, 25)):.1f} / "
           f"{float(np.percentile(_sel_phases, 50)):.1f} / "
           f"{float(np.percentile(_sel_phases, 75)):.1f} / "
           f"{float(np.max(_sel_phases)):.1f}")
 
-    # 2) Load observed spectra, wavelength grid, and LSF from the same input file.
-    with fits.open(EVERY10_INPUT) as hdul:
-        # float32, as stored on disk.  These are whole 1447 x 12401 planes and
-        # promoting four of them to float64 costs 576 MB against 288 MB for no
-        # gain: every row is cast to float64 individually inside the loop
-        # below, which is where the arithmetic happens.
-        flux_near_all = np.asarray(hdul["FLUX_SKY_NEAR"].data, dtype=np.float32)
-        flux_far_all = np.asarray(hdul["FLUX_SKY_FAR"].data, dtype=np.float32)
-        flux_sci_all = np.asarray(hdul["FLUX_SCI"].data, dtype=np.float32)
+    # Rows whose per-component reconstruction we keep for the atlas: a
+    # systematic every-k sample of the selection.  Evenly spaced rather than
+    # random so it is reproducible without a seed and cannot cluster.
+    if int(ATLAS_HANDOFF_ROWS) > 0 and n_use > 0:
+        _atlas_take = (np.arange(n_use) if n_use <= int(ATLAS_HANDOFF_ROWS)
+                       else np.unique(np.linspace(0, n_use - 1,
+                                                  int(ATLAS_HANDOFF_ROWS)
+                                                  ).astype(int)))
+    else:
+        _atlas_take = np.array([], dtype=int)
+    _atlas_keep = np.zeros(n_use, dtype=bool)
+    _atlas_keep[_atlas_take] = True
+    if _atlas_take.size:
+        print(f"  atlas handoff: keeping per-component reconstructions for "
+              f"{_atlas_take.size}/{n_use} rows "
+              f"({_atlas_take.size * 12401 * 6 * 2 * 4 / 1e6:.0f} MB)")
+
+    # 2) Observed spectra, wavelength grid and LSF -- SELECTED ROWS ONLY.
+    #    A whole FLUX plane of the corpus stack is 925 MB; three of them would
+    #    be 2.8 GB for rows we mostly do not touch.  Fancy-indexing the memmap
+    #    reads just the rows we need, and they are then addressed by position
+    #    in the selection (`i`), not by corpus row (`rr`).
+    _t_load0 = _time.perf_counter()
+    with fits.open(EVAL_INPUT, memmap=True) as hdul:
+        flux_near_sel = np.asarray(hdul["FLUX_SKY_NEAR"].data[sel_rows],
+                                   dtype=np.float32)
+        flux_far_sel = np.asarray(hdul["FLUX_SKY_FAR"].data[sel_rows],
+                                  dtype=np.float32)
+        flux_sci_sel = np.asarray(hdul["FLUX_SCI"].data[sel_rows],
+                                  dtype=np.float32)
         wave_arr = np.asarray(hdul["WAVE"].data, dtype=np.float64)
-        lsf_sci_arr = np.asarray(hdul["LSF_SCI"].data, dtype=np.float32)
-        # expnum per every10 row for the per-line hover tooltip on the residual figure.
-        _expnum_all = None
+        _lsf_sci_full = hdul["LSF_SCI"].data
+        lsf_sci_sel = (np.asarray(_lsf_sci_full, dtype=np.float32)
+                       if np.ndim(_lsf_sci_full) == 1
+                       else np.asarray(_lsf_sci_full[sel_rows], dtype=np.float32))
+        _expnum_sel = None
         if "META" in hdul:
-            _meta_e10 = Table(hdul["META"].data)
-            _meta_up_e10 = {c.upper(): c for c in _meta_e10.colnames}
+            _meta_ev = Table(hdul["META"].data)
+            _meta_up_ev = {c.upper(): c for c in _meta_ev.colnames}
             _expnum_col = next(
-                (_meta_up_e10[k] for k in ("EXPNUM", "EXP_NUM", "EXPOSURE")
-                 if k in _meta_up_e10), None)
+                (_meta_up_ev[k] for k in ("EXPNUM", "EXP_NUM", "EXPOSURE")
+                 if k in _meta_up_ev), None)
             if _expnum_col is not None:
-                _expnum_all = np.asarray(_meta_e10[_expnum_col])
+                _expnum_sel = np.asarray(_meta_ev[_expnum_col])[sel_rows]
+    print(f"  observed spectra: {n_use} rows x 3 arms loaded in "
+          f"{_time.perf_counter() - _t_load0:.1f} s "
+          f"({3 * flux_sci_sel.nbytes / 1e6:.0f} MB)")
 
-    n_spec = int(flux_sci_all.shape[0])
-    if np.any(sel_rows < 0) or np.any(sel_rows >= n_spec):
-        raise ValueError("Selected row index is outside the valid range of EVERY10_INPUT")
-
-    # 3) Predict SCI coefficients for sampled rows.
+    # 3) Predict SCI coefficients for the selected rows.
+    coef_near_sel = np.asarray(coef_near_all[sel_ft], dtype=np.float64)
+    coef_far_sel = np.asarray(coef_far_all[sel_ft], dtype=np.float64)
+    coef_sci_sel = np.asarray(coef_sci_all[sel_ft], dtype=np.float64)
     coef_sci_pred = predict_sci_coefficients_default(
         mlp_artifacts,
-        coef_near_phys=e10_triplet["coef_near"][sel_pos],
-        coef_far_phys=e10_triplet["coef_far"][sel_pos],
-        ctx_near_phys=e10_triplet["ctx_near"][sel_pos],
-        ctx_far_phys=e10_triplet["ctx_far"][sel_pos],
-        ctx_sci_phys=e10_triplet["ctx_sci"][sel_pos],
+        coef_near_phys=coef_near_all[sel_ft],
+        coef_far_phys=coef_far_all[sel_ft],
+        ctx_near_phys=ctx_near_all[sel_ft],
+        ctx_far_phys=ctx_far_all[sel_ft],
+        ctx_sci_phys=ctx_sci_all[sel_ft],
     ).astype(np.float64)
-
-    coef_near_sel = np.asarray(e10_triplet["coef_near"][sel_pos], dtype=np.float64)
-    coef_far_sel = np.asarray(e10_triplet["coef_far"][sel_pos], dtype=np.float64)
-    coef_sci_sel = np.asarray(e10_triplet["coef_sci"][sel_pos], dtype=np.float64)
 
     # 4) Reconstruct and compute per-row RMSE + pixel-space WRMSE.
     base_dir_guess = _infer_base_dir_for_reconstruction()
@@ -300,9 +270,11 @@ else:
     # Try to load per-pixel sigma HDUs from the decomposition FITS files
     # up-front (fast path when new decompositions land).  Falls back to
     # on-the-fly propagation via coef_err inside the loop when absent.
-    _pix_sigma_near_all = load_pixel_sigma_if_available(EVERY10_NEAR)
-    _pix_sigma_far_all  = load_pixel_sigma_if_available(EVERY10_FAR)
-    _pix_sigma_sci_all  = load_pixel_sigma_if_available(EVERY10_SCI)
+    # Selected rows only: a full FLUX_SIGMA_TOTAL plane is 1.85 GB per arm.
+    # Indexed by position in the selection from here on, not by corpus row.
+    _pix_sigma_near_all = load_pixel_sigma_if_available(EVAL_NEAR, sel_rows)
+    _pix_sigma_far_all  = load_pixel_sigma_if_available(EVAL_FAR, sel_rows)
+    _pix_sigma_sci_all  = load_pixel_sigma_if_available(EVAL_SCI, sel_rows)
     _pix_sigma_source = {
         arm: ("FITS HDU" if arr is not None else "coef_err propagation")
         for arm, arr in (("near", _pix_sigma_near_all),
@@ -315,18 +287,12 @@ else:
     # Grab coef_err arrays for the fallback path (may be all-NaN when the
     # decomposition FITS lacks a COEF_ERR HDU; the WRMSE helper falls back
     # to floor-only weighting so nothing breaks).
-    _e10_coef_err_near = (np.asarray(e10_triplet.get("coef_err_near",
-                                     np.full_like(coef_near_sel, np.nan)),
-                                     dtype=np.float64)[sel_pos]
-                          if _pix_sigma_near_all is None else None)
-    _e10_coef_err_far  = (np.asarray(e10_triplet.get("coef_err_far",
-                                     np.full_like(coef_far_sel, np.nan)),
-                                     dtype=np.float64)[sel_pos]
-                          if _pix_sigma_far_all is None else None)
-    _e10_coef_err_sci  = (np.asarray(e10_triplet.get("coef_err_sci",
-                                     np.full_like(coef_sci_pred, np.nan)),
-                                     dtype=np.float64)[sel_pos]
-                          if _pix_sigma_sci_all is None else None)
+    _cerr_near_sel = (np.asarray(coef_err_near_all, dtype=np.float64)[sel_ft]
+                      if _pix_sigma_near_all is None else None)
+    _cerr_far_sel  = (np.asarray(coef_err_far_all, dtype=np.float64)[sel_ft]
+                      if _pix_sigma_far_all is None else None)
+    _cerr_sci_sel  = (np.asarray(coef_err_sci_all, dtype=np.float64)[sel_ft]
+                      if _pix_sigma_sci_all is None else None)
     sci_resid_rows = []
     sci_wave_rows = []
     sci_obs_rows = []          # observed sci flux, for the photon chi2 below
@@ -355,7 +321,6 @@ else:
     #     rebuilt SkyDecompLSFSurfaceIterative (basis + solar-reference + moon spline)
     #     3 x n_use times and re-read VECTOR_O2 on every call, both of which dominated
     #     the runtime. See §12 (2026-08-11 batch-RMSE cell reconstruction hoisted).
-    import time as _time
     _t_recon0 = _time.perf_counter()
     _wave_ref_recon = (wave_arr if wave_arr.ndim == 1
                        else np.asarray(wave_arr[int(sel_rows[0])], dtype=np.float64))
@@ -373,7 +338,14 @@ else:
     # unlike the split-zodi basis it cannot be hoisted -- and because the
     # telluric corpus stores its LSF as a continuous M-spline density, which the
     # iterative class cannot read at all.  Rebuilding per row costs ~0.17 s.
-    _telluric_for = globals().get('TELLURIC_ROW_FOR')
+    # Telluric transmission must be looked up in the file whose rows we are
+    # indexing.  The shared `TELLURIC_ROW_FOR` is bound to
+    # `input_fits_for_basis`, i.e. the EVERY10 stack (1867 rows), so feeding it
+    # a corpus row raises IndexError at best and returns another exposure's
+    # transmission at worst.  Build this cell's own lookup against EVAL_INPUT.
+    _telluric_for = None
+    if globals().get('TELLURIC_ROW_FOR') is not None:
+        _telluric_for = make_telluric_row_lookup(EVAL_INPUT, verbose=False)
     _model_cache = {}
 
     def _model_for(telluric):
@@ -396,11 +368,12 @@ else:
               'rebuilt per row (per-row DRP transmission), ~0.17 s/row/arm.')
 
     def _precache_decomp_state(decomp_path):
-        state = {"path": Path(decomp_path), "has_lsf": False, "o2_cube": None}
+        state = {"path": Path(decomp_path), "has_lsf": False, "o2_cube": None,
+                 "lsf_cubes": None}
         if not state["path"].exists():
             return state
         try:
-            with fits.open(str(state["path"]), memmap=False) as _hdul_dec:
+            with fits.open(str(state["path"]), memmap=True) as _hdul_dec:
                 _ext_names = {h.name for h in _hdul_dec}
                 state["has_lsf"] = all(_e in _ext_names
                                        for _e in ("LSF_COEF", "LSF_KNOTS", "LSF_META"))
@@ -425,18 +398,26 @@ else:
                             f"LSF_SCI sigma because the per-row LSF would be "
                             f"silently wrong on all other rows."
                         )
+                if state["has_lsf"]:
+                    # Read LSF_COEF / LSF_KNOTS / LSF_META ONCE.  The per-row
+                    # loader re-reads all three on every call (~80 MB on a
+                    # corpus file), which at 2900 rows x 3 arms would be of
+                    # order half a terabyte of I/O to extract a few MB.
+                    state["lsf_cubes"] = load_lsf_surface_cubes(str(state["path"]))
                 if "VECTOR_O2" in _ext_names:
-                    _data = np.asarray(_hdul_dec["VECTOR_O2"].data, dtype=np.float64)
-                    if _data.ndim == 2:
-                        state["o2_cube"] = _data
+                    _o2 = _hdul_dec["VECTOR_O2"].data
+                    if np.ndim(_o2) == 2:
+                        # Selected rows only: the full cube is 1.85 GB per arm.
+                        state["o2_cube"] = np.asarray(_o2[sel_rows],
+                                                      dtype=np.float64)
         except (KeyError, IndexError, ValueError) as _exc:
             print(f"  precache failed for {state['path'].name}: "
                   f"{type(_exc).__name__}: {_exc}")
         return state
 
-    _state_near = _precache_decomp_state(EVERY10_NEAR)
-    _state_far  = _precache_decomp_state(EVERY10_FAR)
-    _state_sci  = _precache_decomp_state(EVERY10_SCI)
+    _state_near = _precache_decomp_state(EVAL_NEAR)
+    _state_far  = _precache_decomp_state(EVAL_FAR)
+    _state_sci  = _precache_decomp_state(EVAL_SCI)
     print(f"  precache: has_lsf near/far/sci = "
           f"{_state_near['has_lsf']}/{_state_far['has_lsf']}/{_state_sci['has_lsf']}, "
           f"VECTOR_O2 near/far/sci = "
@@ -445,20 +426,23 @@ else:
           f"{_state_sci['o2_cube'] is not None}")
 
     def _lsf_state_from_cache(state_dict, row_idx):
-        if not state_dict["has_lsf"]:
+        """Build one row's LSF state from the cubes read at precache time."""
+        if not state_dict["has_lsf"] or state_dict["lsf_cubes"] is None:
             return None
         try:
-            return load_lsf_surface_state(str(state_dict["path"]), int(row_idx))
+            return lsf_surface_state_from_cubes(state_dict["lsf_cubes"],
+                                                int(row_idx))
         except (KeyError, IndexError, ValueError) as _exc:
             print(f"  LSF surface state unavailable in {state_dict['path'].name} "
                   f"row {int(row_idx)}: {type(_exc).__name__}: {_exc}")
             return None
 
-    def _o2_vec_from_cache(state_dict, row_idx):
+    def _o2_vec_from_cache(state_dict, sel_i):
+        """VECTOR_O2 for selection position `sel_i` (the cube holds only those)."""
         cube = state_dict["o2_cube"]
-        if cube is None or int(row_idx) >= cube.shape[0]:
+        if cube is None or int(sel_i) >= cube.shape[0]:
             return None
-        row = cube[int(row_idx)]
+        row = cube[int(sel_i)]
         if not np.isfinite(row).any() or float(np.nansum(np.abs(row))) == 0.0:
             return None
         return row
@@ -500,37 +484,38 @@ else:
     print(f"  recon setup: {_time.perf_counter() - _t_recon0:.2f} s "
           f"(one-time basis build + FITS precache)")
 
-    _t_loop0 = _time.perf_counter()
-    for i, r in enumerate(sel_rows):
+    # The per-row work, factored out of the loop so it can run over a
+    # process pool.  It closes over the hoisted model cache, the FITS
+    # precache and the telluric lookup; `cell_parallel` forks, so the child
+    # inherits all of that instead of rebuilding or shipping it.
+    def _row_work(i):
+        r = sel_rows[i]
         rr = int(r)
         wave_row = wave_arr if wave_arr.ndim == 1 else np.asarray(wave_arr[rr], dtype=np.float64)
-        # Cast in BOTH branches: lsf_sci_arr is float32 on disk, and the
+        # Cast in BOTH branches: lsf_sci_sel is float32 on disk, and the
         # 1-D branch would otherwise leak float32 into _lsf_sigma_fallback.
-        lsf_row = np.asarray(lsf_sci_arr if lsf_sci_arr.ndim == 1
-                             else lsf_sci_arr[rr], dtype=np.float64)
+        lsf_row = np.asarray(lsf_sci_sel if lsf_sci_sel.ndim == 1
+                             else lsf_sci_sel[i], dtype=np.float64)
 
-        flux_near_true = np.asarray(flux_near_all[rr], dtype=np.float64)
-        flux_far_true = np.asarray(flux_far_all[rr], dtype=np.float64)
-        flux_sci_true = np.asarray(flux_sci_all[rr], dtype=np.float64)
+        flux_near_true = np.asarray(flux_near_sel[i], dtype=np.float64)
+        flux_far_true = np.asarray(flux_far_sel[i], dtype=np.float64)
+        flux_sci_true = np.asarray(flux_sci_sel[i], dtype=np.float64)
 
         _lsf_state_near = _lsf_state_from_cache(_state_near, rr)
         _lsf_state_far  = _lsf_state_from_cache(_state_far,  rr)
         _lsf_state_sci  = _lsf_state_from_cache(_state_sci,  rr)
         _lsf_sigma_fallback = lsf_row / LSF_FWHM_TO_SIGMA
 
-        _o2_vec_near = _o2_vec_from_cache(_state_near, rr)
-        _o2_vec_far  = _o2_vec_from_cache(_state_far,  rr)
-        _o2_vec_sci  = _o2_vec_from_cache(_state_sci,  rr)
+        _o2_vec_near = _o2_vec_from_cache(_state_near, i)
+        _o2_vec_far  = _o2_vec_from_cache(_state_far,  i)
+        _o2_vec_sci  = _o2_vec_from_cache(_state_sci,  i)
 
         # For each arm, only ask the reconstructor for sigma when the
         # loaded FITS sigma is absent; otherwise the propagator call would
         # duplicate work already done by the pipeline.
-        _cerr_near_row = (_e10_coef_err_near[i]
-                          if _e10_coef_err_near is not None else None)
-        _cerr_far_row  = (_e10_coef_err_far[i]
-                          if _e10_coef_err_far is not None else None)
-        _cerr_sci_row  = (_e10_coef_err_sci[i]
-                          if _e10_coef_err_sci is not None else None)
+        _cerr_near_row = (_cerr_near_sel[i] if _cerr_near_sel is not None else None)
+        _cerr_far_row  = (_cerr_far_sel[i] if _cerr_far_sel is not None else None)
+        _cerr_sci_row  = (_cerr_sci_sel[i] if _cerr_sci_sel is not None else None)
 
         # Per-arm telluric: each arm has its OWN source airmass (the sky lines
         # are attenuated along that arm's line of sight) while the DRP
@@ -558,14 +543,19 @@ else:
 
         # nanmean so isolated NaN pixels (~1 pixel/row on ~40% of every10) don't
         # poison the pRMSE; a whole-row veto lives with the chi2/field filter above.
-        near_rmse[i] = float(np.sqrt(np.nanmean((flux_near_recon - flux_near_true) ** 2)))
-        far_rmse[i] = float(np.sqrt(np.nanmean((flux_far_recon - flux_far_true) ** 2)))
+        _o_near_rmse = float(np.sqrt(np.nanmean((flux_near_recon - flux_near_true) ** 2)))
+        _o_far_rmse = float(np.sqrt(np.nanmean((flux_far_recon - flux_far_true) ** 2)))
 
         sci_resid = flux_sci_pred - flux_sci_true
-        sci_rmse[i] = float(np.sqrt(np.nanmean(sci_resid ** 2)))
-        sci_resid_rows.append(np.asarray(sci_resid, dtype=np.float64))
-        sci_wave_rows.append(np.asarray(wave_row, dtype=np.float64))
-        sci_obs_rows.append(np.asarray(flux_sci_true, dtype=np.float64))
+        _o_sci_rmse = float(np.sqrt(np.nanmean(sci_resid ** 2)))
+        # float32 from here on: at 2900 rows the eight per-row stacks
+        # are 2.3 GB in float64 and half that in float32, and they feed
+        # medians, percentiles and plots -- 7 significant digits is far
+        # more than any of those resolve.  The arithmetic above is all
+        # float64; only the stored copy is narrowed.
+        _o_resid = np.asarray(sci_resid, dtype=np.float32)
+        _o_wave = np.asarray(wave_row, dtype=np.float32)
+        _o_obs = np.asarray(flux_sci_true, dtype=np.float32)
 
         # Reconstruct the sci-arm spectrum from the FITTED sci coefficients so
         # per-component residuals (pred - recon(sci_true)) can be separated in
@@ -583,29 +573,37 @@ else:
         _ddiffuse = (np.asarray(comps_sci["diffuse"], dtype=np.float64)
                      - np.asarray(comps_sci_true_batch["diffuse"], dtype=np.float64)) / FACTOR
         _dlines   = (_lines_sum(comps_sci) - _lines_sum(comps_sci_true_batch)) / FACTOR
+        # Per-component handoff for the atlas, in the RECONSTRUCTION's own
+        # units -- NOT divided by FACTOR, because that is the convention
+        # wavelength_residual_atlas works in.  (The batch statistics below
+        # divide; these deliberately do not.)
+        if _atlas_keep[i]:
+            _gp = _group_components(comps_sci)
+            _gt = _group_components(comps_sci_true_batch)
+            _o_cpred = {_g: _gp[_g].astype(np.float32) for _g in _ATLAS_COMPONENTS}
+            _o_ctrue = {_g: _gt[_g].astype(np.float32) for _g in _ATLAS_COMPONENTS}
+        else:
+            _o_cpred = _o_ctrue = None
+
         # Same reconstruction path, same LSF state, same O2 vector as the
         # prediction above -- only the coefficients differ (fitted, not
         # predicted) -- so the two chi2 distributions below differ ONLY by the
         # coefficient error and are directly comparable.
-        sci_selfres_rows.append(
-            (np.asarray(comps_sci_true_batch["total"], dtype=np.float64) / FACTOR
-             - flux_sci_true).astype(np.float32))
-        sci_moon_resid_rows.append(_dmoon)
-        sci_zodi_resid_rows.append(_dzodi)
-        sci_diffuse_resid_rows.append(_ddiffuse)
-        sci_lines_resid_rows.append(_dlines)
+        _o_selfres = (
+            np.asarray(comps_sci_true_batch["total"], dtype=np.float64) / FACTOR
+            - flux_sci_true).astype(np.float32)
 
         # Pixel-space WRMSE: prefer the FITS-side sigma if present, else use
         # the propagator output from _fast_reconstruct.  All three sources
         # deliver the same LSF-aware sigma; the fallback of last resort is
         # the median-floor path inside pixel_wrmse_per_row.
-        _sig_near_row = (_pix_sigma_near_all[int(sel_pos[i])] * FACTOR
+        _sig_near_row = (_pix_sigma_near_all[i] * FACTOR
                          if _pix_sigma_near_all is not None
                          else comps_near.get("sigma_total"))
-        _sig_far_row  = (_pix_sigma_far_all[int(sel_pos[i])] * FACTOR
+        _sig_far_row  = (_pix_sigma_far_all[i] * FACTOR
                          if _pix_sigma_far_all is not None
                          else comps_far.get("sigma_total"))
-        _sig_sci_row  = (_pix_sigma_sci_all[int(sel_pos[i])] * FACTOR
+        _sig_sci_row  = (_pix_sigma_sci_all[i] * FACTOR
                          if _pix_sigma_sci_all is not None
                          else comps_sci.get("sigma_total"))
         # comps_*['sigma_total'] comes out in native units; the flux_* arrays
@@ -618,15 +616,100 @@ else:
         if _pix_sigma_sci_all is None and _sig_sci_row is not None:
             _sig_sci_row = np.asarray(_sig_sci_row) / FACTOR
 
-        near_wrmse[i] = float(pixel_wrmse_per_row(
+        _o_near_wrmse = float(pixel_wrmse_per_row(
             flux_near_recon, flux_near_true, _sig_near_row)[0])
-        far_wrmse[i]  = float(pixel_wrmse_per_row(
+        _o_far_wrmse  = float(pixel_wrmse_per_row(
             flux_far_recon,  flux_far_true,  _sig_far_row)[0])
-        sci_wrmse[i]  = float(pixel_wrmse_per_row(
+        _o_sci_wrmse  = float(pixel_wrmse_per_row(
             flux_sci_pred,   flux_sci_true,  _sig_sci_row)[0])
+
+        return (_o_near_rmse, _o_far_rmse, _o_sci_rmse,
+                _o_near_wrmse, _o_far_wrmse, _o_sci_wrmse,
+                _o_resid, _o_wave, _o_obs, _o_selfres,
+                _dmoon.astype(np.float32), _dzodi.astype(np.float32),
+                _ddiffuse.astype(np.float32), _dlines.astype(np.float32),
+                _o_cpred, _o_ctrue)
+
+    _t_loop0 = _time.perf_counter()
+    _atlas_cpred, _atlas_ctrue = [], []
+    _rows_out = _cell_parallel.map_indexed(
+        _row_work, range(n_use), n_workers=n_workers, label="recon")
+    for i, _o in enumerate(_rows_out):
+        (near_rmse[i], far_rmse[i], sci_rmse[i],
+         near_wrmse[i], far_wrmse[i], sci_wrmse[i]) = _o[:6]
+        sci_resid_rows.append(_o[6])
+        sci_wave_rows.append(_o[7])
+        sci_obs_rows.append(_o[8])
+        sci_selfres_rows.append(_o[9])
+        sci_moon_resid_rows.append(_o[10])
+        sci_zodi_resid_rows.append(_o[11])
+        sci_diffuse_resid_rows.append(_o[12])
+        sci_lines_resid_rows.append(_o[13])
+        if _o[14] is not None:
+            _atlas_cpred.append(_o[14])
+            _atlas_ctrue.append(_o[15])
 
     print(f"  recon loop:  {_time.perf_counter() - _t_loop0:.2f} s "
           f"({n_use} rows x 3 arms = {3 * n_use} reconstructions with hoisted basis)")
+
+    # --- Handoff for wavelength_residual_atlas ------------------------------
+    # Stacked in the atlas's own layout and units so it can drop them straight
+    # into _resid / _truth / _resid_comp / _truth_comp and skip reconstructing
+    # its own sample.  Reconstructing twice was not just wasted time: the atlas
+    # drew from the ungated every10 pool, so the two cells described DIFFERENT
+    # row populations and their residuals were never comparable.
+    batch_recon_for_atlas = None
+    if _atlas_cpred:
+        _ak = np.flatnonzero(_atlas_keep)
+        _comp_pred = {_g: np.vstack([_c[_g] for _c in _atlas_cpred])
+                      for _g in _ATLAS_COMPONENTS}
+        _comp_true = {_g: np.vstack([_c[_g] for _c in _atlas_ctrue])
+                      for _g in _ATLAS_COMPONENTS}
+        _tot_pred = sum(_comp_pred.values())
+        _tot_true = sum(_comp_true.values())
+        batch_recon_for_atlas = {
+            # Positions into filtered_triplet, and the corpus FITS rows.
+            'sel_pos': sel_pos[_ak],
+            'sel_rows': sel_rows[_ak],
+            'wave': np.asarray(wave_arr, dtype=np.float64),
+            'resid': (_tot_pred - _tot_true).astype(np.float32),
+            'truth': _tot_true.astype(np.float32),
+            'resid_comp': {_g: (_comp_pred[_g] - _comp_true[_g]).astype(np.float32)
+                           for _g in _ATLAS_COMPONENTS},
+            'truth_comp': {_g: _comp_true[_g] for _g in _ATLAS_COMPONENTS},
+            'components': tuple(_ATLAS_COMPONENTS),
+            'split': _EVAL_SPLIT,
+            'source_input': EVAL_INPUT,
+        }
+        # Self-check on a few rows: the handoff must reproduce the
+        # per-component residuals this cell keeps for its OWN figure, which
+        # are computed on a separate line and in FACTOR-DIVIDED units.  The
+        # two conventions are the classic way a handoff like this goes quietly
+        # wrong, so check rather than trust -- it costs microseconds.
+        _chk = np.unique(np.linspace(0, _ak.size - 1, min(3, _ak.size)).astype(int))
+        for _cname, _clist in (('moon', sci_moon_resid_rows),
+                               ('zodi', sci_zodi_resid_rows),
+                               ('continuum (diffuse)', sci_diffuse_resid_rows)):
+            for _c in _chk:
+                _mine = np.asarray(_clist[int(_ak[_c])], dtype=np.float64) * FACTOR
+                _theirs = np.asarray(batch_recon_for_atlas['resid_comp'][_cname][_c],
+                                     dtype=np.float64)
+                _scale = float(np.sqrt(np.nanmean(_theirs ** 2))) or 1.0
+                _dev = float(np.nanmax(np.abs(_mine - _theirs))) / _scale
+                if not _dev < 1e-4:
+                    raise RuntimeError(
+                        f"atlas handoff disagrees with this cell's own "
+                        f"{_cname} residual on row {int(_ak[_c])}: max "
+                        f"relative deviation {_dev:.3g}. The handoff is stored "
+                        f"in reconstruction units and the figure arrays in "
+                        f"FACTOR-divided units -- check that convention first.")
+        print(f"  atlas handoff self-check: components agree with this cell's "
+              f"own residuals to <1e-4 relative on {_chk.size} probed row(s)")
+        print(f"  atlas handoff ready: {_ak.size} rows x "
+              f"{len(_ATLAS_COMPONENTS)} components "
+              f"({(_tot_pred.nbytes * 2 + sum(a.nbytes for a in _comp_pred.values()) * 2) / 1e6:.0f} MB)")
+        del _comp_pred, _comp_true, _tot_pred, _tot_true, _atlas_cpred, _atlas_ctrue
+
 
     def _rmse_stats(arr):
         x = np.asarray(arr, dtype=np.float64)
@@ -668,7 +751,9 @@ else:
     for c in ["mean", "median", "std", "min", "p05", "p95", "max"]:
         summary_disp_df[c] = summary_disp_df[c] * FACTOR
 
-    print(f"Random per-row pRMSE / pWRMSE evaluation on {n_use} spectra from every10 inputs (seed={rng_seed})")
+    print(f"Per-row pRMSE / pWRMSE on {n_use} {_EVAL_SPLIT} spectra from "
+          f"every10 inputs"
+          + ("" if n_sample is None else f" (phase-stratified draw, seed={rng_seed})"))
     print("Per-row pixel-space pRMSE / pWRMSE stats in physical flux units:")
     print(summary_df.to_string(index=False, float_format=lambda v: f"{v:.6g}"))
     print("")
@@ -702,6 +787,72 @@ else:
         for w in sci_wave_rows[1:]
     )
 
+    # Exposure assumed for every photon-noise quantity in this cell (the
+    # sigma band below and the chi2 panels further down).  META carries no
+    # exposure time, so 900 s -- the LVM standard science exposure and the
+    # trainer's `flux_exptime_s` default -- is assumed.  A wrong value scales
+    # the noise linearly, so keep it equal to the trainer's or neither the
+    # band nor the chi2 is comparable to the loss.
+    CHI2_EXPTIME_S = 900.0
+
+    # ---- +/-1 sigma SINGLE-FIBRE photon noise, as a background band -------
+    # The reference every residual panel should be read against: a residual
+    # inside this band is consistent with the noise of ONE fibre, which is the
+    # bar the decomposition is held to elsewhere (the chi2 panel below uses
+    # the same convention and the same floor, so the two are comparable).
+    #
+    # It is the SINGLE-FIBRE level deliberately, not the stacked level: these
+    # are median stacks of tens to hundreds of fibres, so the true noise is
+    # well below this and the band is a generous reference rather than a
+    # detection threshold. The stacked band would sit ~sqrt(N_eff) lower.
+    #
+    # Per-pixel sigma varies row to row through the observed flux, so the band
+    # is the MEDIAN over the plotted rows -- a typical row, not an envelope.
+    #
+    # Scale, measured on the 1082 filtered test rows of
+    # gaia-stars-mask-telluric-chi2 (median sigma = 0.116 in FACTOR units).
+    # The band is COMPARABLE TO OR WIDER THAN the residual envelope, so it
+    # reads as a wide grey region that most of the strokes sit inside:
+    #
+    #   row 1   pred - observed          band / p68|r| = 0.80
+    #   rows 2-5  pred - recon(sci coef) band / p68|r| = 1.52
+    #
+    # That is the message, not a defect: on a typical pixel the transfer
+    # error is already below the noise of a single fibre, and rows 2-5 are
+    # further inside it than row 1 because row 1 also carries the
+    # decomposition's own residual (band / p68 = 1.11 for that alone).
+    # Judge excursions OUT of the band, not the bulk inside it.
+    #
+    # Do NOT calibrate expectations against the RMS envelope drawn on the
+    # same panel: RMS across rows is carried by a few bad rows and runs far
+    # above both, which is the envelope's job and not this band's.
+    _sig1_band = None          # per-pixel, FACTOR units, or None
+    _sig1_scalar = None        # median over pixels, for the histogram panels
+    try:
+        from mlp_predictor.noise import (
+            load_absolute_sensitivity as _sig_sens,
+            photon_variance_absolute as _sig_var,
+            floor_variance as _sig_floor)
+    except Exception as _exc_sig:
+        print(f"  [sigma band] mlp_predictor.noise unavailable "
+              f"({type(_exc_sig).__name__}); the panels get no noise band.")
+    else:
+        if same_grid and sci_obs_rows:
+            _s_obs = np.vstack(sci_obs_rows)
+            _s_sens = np.asarray(_sig_sens(wave_ref), dtype=np.float64)
+            _s_var = _sig_floor(_sig_var(
+                _s_obs, _s_sens, exptime=CHI2_EXPTIME_S,
+                dwave=float(np.median(np.diff(wave_ref))), n_fibres=None))
+            _sig1_band = (np.median(np.sqrt(_s_var), axis=0) * FACTOR)
+            _sig1_scalar = float(np.median(_sig1_band))
+            print(f"  [sigma band] +/-1 sigma single-fibre noise: median "
+                  f"{_sig1_scalar:.4g} (FACTOR units), "
+                  f"p5-p95 {np.percentile(_sig1_band, 5):.4g}-"
+                  f"{np.percentile(_sig1_band, 95):.4g} across the grid.")
+        elif sci_obs_rows:
+            print("  [sigma band] rows are not on a common wavelength grid; "
+                  "the band is omitted from the spectrum panels.")
+
     fig_resid = _make_subplots_resid(
         rows=5, cols=2,
         shared_xaxes=False,
@@ -728,10 +879,10 @@ else:
         fig_resid.update_xaxes(matches="x", row=_r, col=1)
 
     def _expnum_str(i):
-        if _expnum_all is None:
+        if _expnum_sel is None:
             return ""
         try:
-            _e = int(_expnum_all[int(sel_rows[i])])
+            _e = int(_expnum_sel[i])
         except (IndexError, ValueError, TypeError):
             return ""
         return f" | expnum {_e}"
@@ -774,6 +925,29 @@ else:
         (99.73, "rgba( 90, 90, 90, 0.75)", "dot"),
     ]
     for _row_i, (_pname, _arr) in enumerate(_panels, start=1):
+        # Added BEFORE the strokes so plotly draws it underneath: it is a
+        # reference, not data.
+        if _sig1_band is not None:
+            fig_resid.add_trace(
+                go.Scatter(
+                    x=wave_ref, y=-_sig1_band,
+                    mode="lines", line=dict(width=0),
+                    hoverinfo="skip", showlegend=False,
+                ),
+                row=_row_i, col=1,
+            )
+            fig_resid.add_trace(
+                go.Scatter(
+                    x=wave_ref, y=_sig1_band,
+                    mode="lines", line=dict(width=0),
+                    fill="tonexty", fillcolor="rgba(130,130,130,0.22)",
+                    name="±1σ single fibre",
+                    hovertemplate=("λ=%{x:.1f} Å<br>±1σ single fibre="
+                                   "%{y:.4g}<extra></extra>"),
+                    showlegend=bool(_row_i == 1),
+                ),
+                row=_row_i, col=1,
+            )
         if same_grid:
             for i in _line_idx:
                 i = int(i)
@@ -874,6 +1048,20 @@ else:
                 ),
                 row=_row_i, col=2,
             )
+            # Same reference on the histogram: a row whose MEDIAN residual
+            # falls inside this band is, on a typical pixel, within one
+            # fibre's noise.  Most rows land inside, so it is the ones
+            # OUTSIDE that the panel is for -- a median over ~12k pixels
+            # would beat single-fibre noise by ~sqrt(n) if the errors were
+            # independent, so being inside is a weak statement and being
+            # outside is a strong one.
+            if _sig1_scalar is not None:
+                fig_resid.add_vrect(
+                    x0=-_sig1_scalar, x1=_sig1_scalar,
+                    fillcolor="rgba(130,130,130,0.22)",
+                    line_width=0, layer="below",
+                    row=_row_i, col=2,
+                )
             _row_median = float(np.median(_med_per_row))
             fig_resid.add_vline(
                 x=_row_median,
@@ -964,12 +1152,7 @@ else:
     # the DECOMPOSITION's own residual, which was fitted to the stack.
     CHI2_SINGLE_FIBRE = True
     #
-    # META carries no exposure time, so 900 s -- the LVM standard science
-    # exposure and the trainer's `flux_exptime_s` default -- is assumed here
-    # too.  A wrong exposure time scales the reduced chi2 linearly, so keep
-    # this equal to the trainer's value or the panel stops being comparable
-    # to the loss.
-    CHI2_EXPTIME_S = 900.0
+    # CHI2_EXPTIME_S is set once, above, where the sigma band first needs it.
     #
     # Blue cut for the second panel.  Redward of this the OH forest dominates
     # the pixel budget, so a full-band chi2 is largely a statement about OH
@@ -1348,8 +1531,16 @@ else:
     rmse_subset_results = {
         "row_positions": sel_pos,
         "row_indices": sel_rows,
-        # every10 rows above; the canonical identity below is what labels and
-        # tooltips must use so a number is resolvable in the corpus tables.
+        # CORPUS rows since 2026-09-23 (they were every10 rows before), and the
+        # files they index.  A consumer that opens its own every10 stack and
+        # indexes it with these gets a different spectrum per row -- the exact
+        # failure canonical_row_labels exists to document -- so the paths
+        # travel with the indices rather than being assumed.
+        "source_input": EVAL_INPUT,
+        "source_near": EVAL_NEAR,
+        "source_far": EVAL_FAR,
+        "source_sci": EVAL_SCI,
+        "split": _EVAL_SPLIT,
         "row_ident": _row_ident,
         "row_labels": _row_label,
         "near_rmse": near_rmse,

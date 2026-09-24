@@ -67,6 +67,7 @@ from __future__ import annotations
 
 import copy
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -1127,7 +1128,8 @@ def train_compressed_group_mlp(
         continuum_head_extra_dims=tuple(int(v) for v in continuum_head_extra_dims),
         continuum_branch_dims=tuple(int(v) for v in continuum_branch_dims),
         moon_zodi_coupling_dims=tuple(int(v) for v in moon_zodi_coupling_dims),
-        blend_init_alpha=float(blend_init_alpha),
+        blend_init_alpha=(dict(blend_init_alpha) if isinstance(blend_init_alpha, Mapping)
+                          else float(blend_init_alpha)),
         alpha_ctx_features=alpha_ctx_features,
         zodi_ctx_restriction=zodi_ctx_restriction,
         continuum_ctx_restriction=continuum_ctx_restriction,
@@ -1320,9 +1322,49 @@ def train_compressed_group_mlp(
             loss = loss + float(group_loss_weight[g]) * (w_row * _per_row).mean()
         return loss / max(len(pred_dict), 1)
 
+    # Science context of the validation rows, sliced once: the alpha snapshot
+    # below runs every epoch.
+    _alpha_ctx_va = _va_tensors[4][:, model.alpha_ctx_idx]
+
     def _snapshot_alpha():
-        return {str(g): float(model.blend_alpha_direct[str(g)].item())
-                for g in group_score_dims}
+        """Per-group near-arm blend alpha AS THE FORWARD PASS USES IT.
+
+        2026-09-23 fix.  `moon`, `zodi` and `continuum` never read
+        `blend_alpha_direct` -- `model.forward` takes their alpha from
+        `alpha_predictors[g]` instead -- so that parameter gets no gradient and
+        sits at its init for the whole run.  Reporting it meant every run
+        printed `delta alpha = +0.000` for exactly the three groups whose blend
+        is most interesting, and the training-history plot drew them as three
+        flat lines.
+
+        They were learning the whole time.  Measured on the 1.3.2 ensemble over
+        the 1429 validation rows, effective medians against a 0.85 init:
+        moon 0.923, zodi 0.884, continuum 0.869, all with real context
+        dependence (the moon predictor reaches |w| = 1.90 on `moon_up_smooth`
+        from a zero init -- lean harder on the near arm when the moon is up).
+
+        The ctx alpha is per row, so this records the median over the
+        validation rows, with the p16/p84 spread under `<group>_p16`/`_p84`.
+        Groups that really do use `blend_alpha_direct` (mesospheric,
+        ionospheric, atomic) are reported unchanged and carry no spread keys.
+        """
+        out = {}
+        with torch.no_grad():
+            for g in group_score_dims:
+                g = str(g)
+                if g in model.alpha_predictors:
+                    # numpy percentiles: torch.quantile is not available on
+                    # every backend, and 1429 values x 3 groups is free.
+                    _a = torch.sigmoid(
+                        model.alpha_predictors[g](_alpha_ctx_va)
+                    ).detach().cpu().numpy().ravel()
+                    _p16, _p50, _p84 = np.percentile(_a, [16.0, 50.0, 84.0])
+                    out[g] = float(_p50)
+                    out[f'{g}_p16'] = float(_p16)
+                    out[f'{g}_p84'] = float(_p84)
+                else:
+                    out[g] = float(model.blend_alpha_direct[g].item())
+        return out
 
     history = []
     blend_history = []
@@ -1391,10 +1433,13 @@ def train_compressed_group_mlp(
         model.load_state_dict(best_state)
 
     _final_blend = _snapshot_alpha()
-    print(f"Learned per-group near-arm blend alpha at best epoch: "
+    print(f"Learned per-group near-arm blend alpha at best epoch "
+          f"(ctx groups {tuple(model.alpha_predictors)}: median over val rows): "
           + '  '.join(f'{_g}={_final_blend[_g]:.3f}' for _g in group_score_dims))
     _deltas = [f'{_g}={_final_blend[_g] - _init_blend[_g]:+.3f}' for _g in group_score_dims]
-    print(f'  init alpha={float(blend_init_alpha):.3f} (uniform)  |  delta alpha at best epoch: '
+    _a0_txt = ('per group' if isinstance(blend_init_alpha, Mapping)
+               else f'{float(blend_init_alpha):.3f} (uniform)')
+    print(f'  init alpha={_a0_txt}  |  delta alpha at best epoch: '
           + '  '.join(_deltas))
 
     # --- Fit per-group empirical mean-bias calibration on train + val rows ---
@@ -1446,6 +1491,61 @@ def train_compressed_group_mlp(
     )
     _calib_true_phys = np.asarray(coef_sci, dtype=np.float64)[_calib_idx]
 
+    # --- Rows whose amplitude an inference-time RULE replaces ----------------
+    # 2026-09-23.  `predict_sci_coefficients_default` overwrites the moon
+    # amplitude on moon-down rows from the near arm's moon/zodi ratio, so the
+    # network's raw moon there is discarded at inference.  It must not enter
+    # the calibration mean either, and until now it did.
+    #
+    # Measured on the 1.3.2 corpus, blue-band moon flux over the calib rows:
+    #
+    #     pre-lift, all rows      +0.244%
+    #     pre-lift, moon-UP only  +0.011%   <- carries ~all the blue flux
+    #     pre-lift, moon-down    +129%      <- raw, and thrown away at inference
+    #
+    # The moon-down rows dragged the fitted lift to 0.99745, and because the
+    # lift is one factor per coefficient applied to EVERY row, that -0.24%
+    # landed on the moon-up rows that were already unbiased: +0.011% ->
+    # -0.232%.  The moon is ~80% of the blue flux, so this showed up as a
+    # coherent negative bias in the reconstructed sky -- wavelength_residual_
+    # atlas mean_bias_frac -0.248 / -0.227 / -0.142% (blue/mid/NIR).  Fitting
+    # on moon-up rows only gives lift 0.99964 and atlas bias +0.032 / -0.041 /
+    # -0.040%, i.e. as good as dropping the lift entirely while keeping it for
+    # the rows it legitimately applies to.
+    #
+    # The same defect was present on 1.2.1 and SILENT: there the moon-down
+    # excess (+74%) happened to cancel the moon-up deficit (-0.155%), so the
+    # fitted lift came out 0.99974, a no-op.  That was luck, not correctness.
+    #
+    # The ZODI ceiling is deliberately NOT excluded.  It CLIPS rather than
+    # replaces, so the raw prediction on gated rows is already close to the
+    # truth (+0.069% on 1.3.2, against the moon's +129%) and its lift moves
+    # the zodi amplitude by only +0.030%; excluding its 54% of rows would
+    # halve the calibration sample for no measured gain.  Measured on both
+    # corpora 2026-09-23.  The plumbing below is per-group, so adding 'zodi'
+    # to `_calib_rule_free` is all it would take if that ever changes.
+    _CALIB_MIN_RULE_FREE_ROWS = 200
+    _calib_rule_free: dict[str, np.ndarray] = {}
+    if _moon_down_rule is not None and _moon_down is not None:
+        _keep_moon = ~np.asarray(_moon_down, dtype=bool)[_calib_idx]
+        _n_keep = int(_keep_moon.sum())
+        if _n_keep >= _CALIB_MIN_RULE_FREE_ROWS:
+            _calib_rule_free['moon'] = _keep_moon
+            print(f'Calibration: moon lift fitted on the {_n_keep}/'
+                  f'{_keep_moon.size} calib rows whose amplitude the moon-down '
+                  f'rule does NOT replace.')
+        else:
+            print(f'Calibration: only {_n_keep} moon-up calib rows '
+                  f'(< {_CALIB_MIN_RULE_FREE_ROWS}); moon lift falls back to '
+                  f'all rows, including rule-determined ones.')
+
+    def _calib_rows_for(_gname, _mask=None):
+        """Row mask for group ``_gname``, intersected with any rule exclusion."""
+        _rf = _calib_rule_free.get(_gname)
+        if _rf is None:
+            return _mask
+        return _rf if _mask is None else (_mask & _rf)
+
     _CALIB_LIFT_CLIP = (0.5, 2.0)  # sanity bounds; outside indicates a broken group
     # 2026-08-19: moon uses a per-coefficient lift; every other group uses the historical
     # scalar lift.  Rationale: cell 27 shows the moon residual has a spectral tilt bias
@@ -1473,8 +1573,11 @@ def train_compressed_group_mlp(
         _gidx = np.asarray(_comp['coef_indices'], dtype=int)
         if _gname in _PER_COEF_LIFT_GROUPS:
             _pc_clip = _MOON_LIFT_CLIP if _gname == 'moon' else _ZODI_LIFT_CLIP
-            def _per_coef_lift(_mask=None):
-                # Per-coef lift on the specified row mask; falls back to global if mask is None.
+            def _per_coef_lift(_mask=None, _gname=_gname):
+                # Per-coef lift on the specified row mask; falls back to global
+                # if mask is None.  Rows whose amplitude an inference rule
+                # replaces are removed first -- see `_calib_rule_free` above.
+                _mask = _calib_rows_for(_gname, _mask)
                 if _mask is None:
                     _mt = np.mean(_calib_true_phys[:, _gidx], axis=0).astype(np.float64)
                     _mp = np.mean(_calib_pred_phys_naive[:, _gidx], axis=0).astype(np.float64)
@@ -1564,13 +1667,17 @@ def train_compressed_group_mlp(
             _w_try = np.asarray(_calib_amp_w, dtype=np.float64)[_gidx]
             if np.any(np.isfinite(_w_try) & (_w_try > 0.0)):
                 _w_g = np.where(np.isfinite(_w_try), np.clip(_w_try, 0.0, None), 0.0)
+        _rows = _calib_rows_for(_gname)
+        _true_g = (_calib_true_phys if _rows is None else _calib_true_phys[_rows])
+        _pred_g = (_calib_pred_phys_naive if _rows is None
+                   else _calib_pred_phys_naive[_rows])
         if _w_g is None:
-            _mean_true = float(np.mean(_calib_true_phys[:, _gidx]))
-            _mean_pred = float(np.mean(_calib_pred_phys_naive[:, _gidx]))
+            _mean_true = float(np.mean(_true_g[:, _gidx]))
+            _mean_pred = float(np.mean(_pred_g[:, _gidx]))
             _lift_basis = 'mean coefficient (no basis weights)'
         else:
-            _mean_true = float(np.mean(_calib_true_phys[:, _gidx] @ _w_g))
-            _mean_pred = float(np.mean(_calib_pred_phys_naive[:, _gidx] @ _w_g))
+            _mean_true = float(np.mean(_true_g[:, _gidx] @ _w_g))
+            _mean_pred = float(np.mean(_pred_g[:, _gidx] @ _w_g))
             _lift_basis = 'flux amplitude'
         _calib_lift_basis[_gname] = _lift_basis
         _calib_lift_means[_gname] = (_mean_true, _mean_pred)
@@ -1596,11 +1703,19 @@ def train_compressed_group_mlp(
             _gidx = np.asarray(compressors[_gname]['coef_indices'], dtype=int)
             # Prefer the means the lift was actually computed from; the per-coef
             # groups never recorded any, so fall back to the unweighted mean for
-            # display only.
+            # display only.  That fallback uses the SAME rows the lift was fitted
+            # on, or the printed mean would not match the printed lift for a
+            # group with a rule exclusion (moon).
+            _rows_show = _calib_rows_for(_gname)
             _mean_true, _mean_pred = _calib_lift_means.get(
-                _gname, (float(np.mean(_calib_true_phys[:, _gidx])),
-                         float(np.mean(_calib_pred_phys_naive[:, _gidx]))))
+                _gname,
+                (float(np.mean((_calib_true_phys if _rows_show is None
+                                else _calib_true_phys[_rows_show])[:, _gidx])),
+                 float(np.mean((_calib_pred_phys_naive if _rows_show is None
+                                else _calib_pred_phys_naive[_rows_show])[:, _gidx]))))
             _basis_txt = _calib_lift_basis.get(_gname, 'per-coefficient')
+            if _rows_show is not None:
+                _basis_txt = f'{_basis_txt}, rule-free rows'
             # 2026-08-24e: regime lift dict summary uses the moon_horizon per-coef vector.
             if isinstance(_corr, dict) and ('moon_horizon' in _corr or 'phase_q2_moon_horizon' in _corr):
                 _lift_vec = np.asarray((_corr['moon_horizon'] if 'moon_horizon' in _corr else _corr['phase_q2_moon_horizon']), dtype=np.float64)
@@ -1644,7 +1759,8 @@ def train_compressed_group_mlp(
         'n_input_score': n_input_score,
         'history': history,
         'blend_history': blend_history,
-        'blend_init_alpha': float(blend_init_alpha),
+        'blend_init_alpha': (dict(blend_init_alpha) if isinstance(blend_init_alpha, Mapping)
+                             else float(blend_init_alpha)),
         'alpha_lr_mult': float(alpha_lr_mult),
         'best_val_loss': float(best_val),
         'best_epoch': int(best_epoch),
@@ -1673,7 +1789,8 @@ def train_compressed_group_mlp(
             'continuum_group_weight': float(continuum_group_weight),
             'mesospheric_group_weight': float(mesospheric_group_weight),
             'ionospheric_group_weight': float(ionospheric_group_weight),
-            'blend_init_alpha': float(blend_init_alpha),
+            'blend_init_alpha': (dict(blend_init_alpha) if isinstance(blend_init_alpha, Mapping)
+                                 else float(blend_init_alpha)),
             'alpha_lr_mult': float(alpha_lr_mult),
             'flux_mse_groups': tuple(flux_mse_groups),
             'flux_amp_lambda': (dict(flux_amp_lambda)
@@ -2343,7 +2460,9 @@ class Trainer:
             continuum_branch_dims=tuple(int(v) for v in c["continuum_branch_dims"]),
             moon_zodi_ctx_restriction=c["moon_zodi_ctx_restriction"],
             moon_zodi_coupling_dims=tuple(int(v) for v in c["moon_zodi_coupling_dims"]),
-            blend_init_alpha=float(c["blend_init_alpha"]),
+            blend_init_alpha=(dict(c["blend_init_alpha"])
+                              if isinstance(c["blend_init_alpha"], Mapping)
+                              else float(c["blend_init_alpha"])),
             alpha_lr_mult=float(c["alpha_lr_mult"]),
             weight_decay=float(c["weight_decay"]),
             patience=int(c["patience"]),

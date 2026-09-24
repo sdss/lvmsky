@@ -33,7 +33,7 @@ Forward path
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Sequence, Mapping
 
 import numpy as np
 import torch
@@ -130,7 +130,7 @@ class DualEncoderGroupHeadMLPCompressed(nn.Module):
         zodi_head_extra_dims: tuple[int, ...] = (32,),
         continuum_head_extra_dims: tuple[int, ...] = (64,),
         continuum_branch_dims: tuple[int, ...] = (128, 64),
-        blend_init_alpha: float = 0.7,
+        blend_init_alpha: float | Mapping[str, float] = 0.7,
         alpha_ctx_features: Sequence[str] = ("moon_up_smooth", "ecl_beta_deg", "airmass"),
         zodi_ctx_restriction: Sequence[str] = (),
         continuum_ctx_restriction: Sequence[str] = (),
@@ -175,11 +175,31 @@ class DualEncoderGroupHeadMLPCompressed(nn.Module):
         })
 
         # ---- Per-group learnable blend alpha (direct parametrization) --------
+        #
+        # `blend_init_alpha` is a scalar for every group, or a mapping giving
+        # per-group values (missing groups fall back to the mapping's
+        # 'default', else 0.7).  Per-group matters because 0.85 encodes "the
+        # near arm is mostly right", which holds for moon/zodi but not for
+        # mesospheric: the best naive baseline there is B2_mean_geo, the
+        # EQUAL-weight two-arm mean, i.e. alpha = 0.5.  Starting a group at
+        # the wrong end costs gradient it may not have -- mesospheric carries
+        # 1.6% of the loss weight (m_g/sqrt(n_g) with n_g = 358), and in the
+        # deployed run its alpha only reached 0.679 from 0.850 while every
+        # other group stayed pinned at its init.
         self.blend_alpha_eps = 1e-3
-        init_alpha = float(np.clip(blend_init_alpha, self.blend_alpha_eps, 1 - self.blend_alpha_eps))
-        _init_logit = float(np.log(init_alpha / (1.0 - init_alpha)))
+        _clip = lambda a: float(np.clip(float(a), self.blend_alpha_eps,
+                                        1 - self.blend_alpha_eps))
+        if isinstance(blend_init_alpha, Mapping):
+            _dflt = _clip(blend_init_alpha.get("default", 0.7))
+            _init_by_group = {str(g): _clip(blend_init_alpha.get(g, _dflt))
+                              for g in group_score_dims}
+        else:
+            _a = _clip(blend_init_alpha)
+            _init_by_group = {str(g): _a for g in group_score_dims}
+        self.blend_init_alpha_by_group = dict(_init_by_group)
+        _logit = lambda a: float(np.log(a / (1.0 - a)))
         self.blend_alpha_direct = nn.ParameterDict({
-            str(g): nn.Parameter(torch.tensor(init_alpha))
+            str(g): nn.Parameter(torch.tensor(_init_by_group[str(g)]))
             for g in group_score_dims
         })
 
@@ -199,11 +219,12 @@ class DualEncoderGroupHeadMLPCompressed(nn.Module):
         self.alpha_predictors = nn.ModuleDict({
             g: nn.Linear(len(idx), 1) for g in _alpha_groups
         })
-        # Zero the weights and set the bias so that sigmoid(bias) = init_alpha at t=0.
+        # Zero the weights and set the bias so that sigmoid(bias) = the
+        # group's own init_alpha at t=0.
         with torch.no_grad():
-            for _p in self.alpha_predictors.values():
+            for _g, _p in self.alpha_predictors.items():
                 _p.weight.zero_()
-                _p.bias.fill_(_init_logit)
+                _p.bias.fill_(_logit(_init_by_group[str(_g)]))
         print(
             f"DualEncoderGroupHeadMLPCompressed: context-dependent alpha active, "
             f"features = {self.alpha_ctx_features}, groups = {self.alpha_ctx_groups}."

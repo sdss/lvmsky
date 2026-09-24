@@ -320,6 +320,25 @@ class Diagnostics:
         """
         return self._run('pipeline_state_check')
 
+    def training_history(self) -> dict:
+        """Per-epoch train/val loss and blend-alpha curves for every member.
+
+        Reads only what the trainer recorded, so it costs nothing and works
+        identically on a live ensemble and on one restored from a ``.pt``
+        (``save_ensemble`` persists the history since 2026-09-23; older files
+        carry none and this raises a message saying so).
+
+        Leaves ``training_history_result`` -- a per-seed DataFrame of
+        epochs_run / best_epoch / best_val / final_val / epochs_after_best --
+        in the exec globals, or ``None`` when the ensemble carries no history
+        (a pre-2026-09-23 file), in which case the cell prints why and skips
+        rather than raising.
+
+        Body lives in ``diagnostics_cells/training_history.py``.
+        Returns the persistent exec-globals dict for inspection.
+        """
+        return self._run('training_history')
+
     def per_seed_vs_ensemble(self) -> dict:
         """Notebook cell id=071885bd.  Body lives in ``diagnostics_cells/per_seed_vs_ensemble.py``.
 
@@ -550,26 +569,43 @@ class Diagnostics:
             ],
         )
 
-    def full_spectrum_batch_rmse(self, size: int = 100, seed: int = 42,
-                                 stroked: int = 60) -> dict:
-        """Sample-based full-spectrum RMSE.
+    def full_spectrum_batch_rmse(self, size: int | None = None, seed: int = 42,
+                                 stroked: int = 60, n_workers: int = 8,
+                                 split: str = "heldout") -> dict:
+        """Full-spectrum RMSE over the held-out rows.
 
-        ``size``    number of rows evaluated -- every statistic uses all of them.
-        ``seed``    numpy rng seed for the phase-stratified sample.
-        ``stroked`` how many of those rows are DRAWN as lines in the residual
-                    figure.  Only the drawing is capped; the RMS envelope, the
-                    histograms and every printed number still use all ``size``
-                    rows.  This is the memory knob: the figure has five
-                    spectrum panels and each line carries 12401 points, so an
-                    uncapped 500-row figure serialises to ~758 MB and kills
-                    the kernel, against ~49 MB at the default 60.  Budget
-                    roughly 0.8 MB per stroked row.
+        ``size``    rows evaluated.  ``None`` (default) takes EVERY gated row
+                    in ``split``; an integer caps it, drawn phase-stratified as
+                    before.  Every statistic uses all the rows taken.
+        ``seed``    rng seed for the stratified draw.  Irrelevant when ``size``
+                    is None, since then there is nothing to draw.
+        ``stroked`` how many rows are DRAWN as lines in the residual figure.
+                    Only the drawing is capped; the RMS envelope, the
+                    histograms and every printed number still use all rows.
+                    This is the memory knob: five spectrum panels x 12401
+                    points per line means an uncapped 500-row figure
+                    serialises to ~758 MB and kills the kernel, against ~49 MB
+                    at the default 60.  Budget ~0.8 MB per stroked row.
+        ``n_workers`` processes for the reconstruction loop (~0.3 s/row
+                    serial).  1 forces the serial path; the pool falls back to
+                    serial by itself if forking fails.
+        ``split``   which rows to score: ``'heldout'`` (validation + test, the
+                    default), ``'test'``, ``'val'``, or ``'all'``.  ``'all'``
+                    restores the pre-2026-09-23 behaviour of scoring training
+                    rows too, which made the numbers optimistic.
         """
+        if split not in ("heldout", "test", "val", "all"):
+            raise ValueError(
+                f"split must be 'heldout', 'test', 'val' or 'all'; got {split!r}")
         return self._run(
             "full_spectrum_batch_rmse",
             source_patches=[
-                (r"^\s*n_sample\s*=\s*\d+", f"    n_sample = {int(size)}"),
+                (r"^\s*n_sample\s*=\s*(?:\d+|None)",
+                 f"    n_sample = {'None' if size is None else int(size)}"),
                 (r"^\s*rng_seed\s*=\s*\d+", f"    rng_seed = {int(seed)}"),
+                (r"^\s*n_workers\s*=\s*\d+", f"    n_workers = {int(n_workers)}"),
+                (r"^\s*_EVAL_SPLIT\s*=\s*'[a-z]+'",
+                 f"    _EVAL_SPLIT = {split!r}"),
                 (r"^\s*MAX_RESID_LINES\s*=\s*\d+",
                  f"    MAX_RESID_LINES = {max(int(stroked), 0)}"),
             ],
