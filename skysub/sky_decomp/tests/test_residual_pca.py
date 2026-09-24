@@ -15,8 +15,10 @@ from skysub.sky_decomp.residual_pca import (
     SPLIT_ZODI_VNF_LINE_AMPLITUDE_PCA_ASSET,
     SkyDecompPalaceAijcVNFLineAmplitudePCA,
     SkyDecompPalaceAijcVNFNivContinuumLineAmplitudePCA,
+    SkyDecompPalaceCorrAijcVNFSplitZodiLSFSpline2D,
     SkyDecompPalaceAijcVNFSplitZodiLineAmplitudePCA30,
     SkyDecompTelluricCorrectedLinesLineAmplitudePCA,
+    SkyDecompTelluricCorrectedLinesPalaceAijc,
     SkyDecompTelluricCorrectedLinesPalaceAijcVN,
     SkyDecompTelluricCorrectedLinesResidualPCA,
     SkyDecompTelluricCorrectedLinesVNLineAmplitudePCA,
@@ -25,7 +27,14 @@ from skysub.sky_decomp.residual_pca import (
     _load_oh_coefficient_basis,
 )
 from skysub.sky_decomp.fit import CAP_WAVE, decode_hitran_id, vac_to_air
-from skysub.sky_decomp.moon_zodi_model import DEFAULT_DATA_ROOT, NATIVE_GRID_SHA256
+from skysub.sky_decomp.moon_zodi_model import (
+    DEFAULT_DATA_ROOT,
+    NATIVE_GRID_SHA256,
+    SKYFAR_LINEAR_RIDGE_PALACE_OH_SUFFIX,
+)
+from skysub.sky_decomp.telluric_corrected_lines import (
+    SkyDecompTelluricCorrectedLinesLSFSpline2D,
+)
 
 
 def test_split_zodi_pca30_uses_the_neutral_production_asset_and_legacy_alias():
@@ -283,6 +292,38 @@ def test_palace_aijc_is_the_only_oh_strength_used_by_the_pca_method():
         "N_upper",
         "F_upper",
     )
+
+
+def test_palace_aijc_accepts_an_explicit_oh_table(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(
+        SkyDecompTelluricCorrectedLinesLSFSpline2D,
+        "__init__",
+        lambda self, wave, *args, **kwargs: captured.update(kwargs),
+    )
+
+    SkyDecompTelluricCorrectedLinesPalaceAijc(
+        np.arange(2.0), palace_oh_suffix="_ushakov2025_v1"
+    )
+
+    assert captured["palace_oh_suffix"] == "_ushakov2025_v1"
+
+
+def test_palacecorr_forces_the_skyfar_linear_ridge_table(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(
+        SkyDecompTelluricCorrectedLinesLSFSpline2D,
+        "__init__",
+        lambda self, wave, *args, **kwargs: captured.update(kwargs),
+    )
+
+    SkyDecompPalaceCorrAijcVNFSplitZodiLSFSpline2D(np.arange(2.0))
+
+    assert captured["palace_oh_suffix"] == SKYFAR_LINEAR_RIDGE_PALACE_OH_SUFFIX
+    with pytest.raises(ValueError, match="palacecorr requires"):
+        SkyDecompPalaceCorrAijcVNFSplitZodiLSFSpline2D(
+            np.arange(2.0), palace_oh_suffix="_other"
+        )
 
 
 def test_vn_grouping_has_188_oh_groups_on_the_frozen_native_grid():

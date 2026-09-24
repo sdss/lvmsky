@@ -49,6 +49,8 @@ if __package__ in (None, ""):
 from skysub.sky_decomp.result_io import results_to_fits
 from skysub.sky_decomp.moon_zodi_model import (
     DEFAULT_DATA_ROOT as DEFAULT_MOON_ZODI_DATA_ROOT,
+    SKYFAR_LINEAR_RIDGE_LAMBDA,
+    SKYFAR_LINEAR_RIDGE_PALACE_OH_SUFFIX,
     file_sha256,
     validate_decomposition_data_root,
     wave_sha256,
@@ -203,6 +205,9 @@ FIT_MODEL_SUFFIXES = {
     "palace-aijc-vnf-split-zodi-lsf-spline2d": (
         "_palace_aijc_vnf_split_zodi_lsf_spline2d"
     ),
+    "palacecorr-aijc-vnf-split-zodi-lsf-spline2d": (
+        "_palacecorr_aijc_vnf_split_zodi_lsf_spline2d"
+    ),
     "palace-aijc-vnf-pca30-split-zodi-lsf-spline2d": (
         "_palace_aijc_vnf_pca30_split_zodi_lsf_spline2d"
     ),
@@ -218,6 +223,9 @@ ADAM25K_TELLURIC_FIT_MODEL = "adam25k-telluric-lsf-spline2d"
 PALACE_VNF_PCA30_FIT_MODEL = "palace-aijc-vnf-line-amplitude-pca30"
 ADAM25K_SPLIT_ZODI_FIT_MODEL = "adam25k-telluric-split-zodi-lsf-spline2d"
 PALACE_VNF_SPLIT_ZODI_FIT_MODEL = "palace-aijc-vnf-split-zodi-lsf-spline2d"
+PALACECORR_VNF_SPLIT_ZODI_FIT_MODEL = (
+    "palacecorr-aijc-vnf-split-zodi-lsf-spline2d"
+)
 PALACE_VNF_PCA30_SPLIT_ZODI_FIT_MODEL = (
     "palace-aijc-vnf-pca30-split-zodi-lsf-spline2d"
 )
@@ -241,6 +249,7 @@ PALACE_VNF_PCA30_SPLIT_ZODI_FIT_MODELS = (
 SPLIT_ZODI_TELLURIC_FIT_MODELS = (
     *ADAM25K_SPLIT_ZODI_FIT_MODELS,
     PALACE_VNF_SPLIT_ZODI_FIT_MODEL,
+    PALACECORR_VNF_SPLIT_ZODI_FIT_MODEL,
     *PALACE_VNF_PCA30_SPLIT_ZODI_FIT_MODELS,
 )
 TELLURIC_FIT_MODELS = (
@@ -248,6 +257,27 @@ TELLURIC_FIT_MODELS = (
     PALACE_VNF_PCA30_FIT_MODEL,
     *SPLIT_ZODI_TELLURIC_FIT_MODELS,
 )
+
+
+def _resolved_palace_oh_suffix(fit_model, palace_oh_suffix):
+    if fit_model != PALACECORR_VNF_SPLIT_ZODI_FIT_MODEL:
+        return palace_oh_suffix
+    if palace_oh_suffix not in (None, SKYFAR_LINEAR_RIDGE_PALACE_OH_SUFFIX):
+        raise ValueError(
+            "palacecorr requires pmd_popmodel_OH"
+            f"{SKYFAR_LINEAR_RIDGE_PALACE_OH_SUFFIX}.dat"
+        )
+    return SKYFAR_LINEAR_RIDGE_PALACE_OH_SUFFIX
+
+
+def _fit_model_primary_meta(fit_model, palace_oh_suffix):
+    metadata = {"DECOMPM": fit_model}
+    if palace_oh_suffix is not None:
+        metadata["OHFILE"] = f"pmd_popmodel_OH{palace_oh_suffix}.dat"
+    if fit_model == PALACECORR_VNF_SPLIT_ZODI_FIT_MODEL:
+        metadata["OHRIDGE"] = SKYFAR_LINEAR_RIDGE_LAMBDA
+    return metadata
+
 
 # Defaults for the SkyDecompLSFSurfaceIterative(split_zodi=True) knobs; match the
 # settings validated on the p40_p70 every10 identifiability notebook.
@@ -849,6 +879,7 @@ def init_worker(
         _PWV_FALLBACK_REPORTED
 
     _clamp_native_threads(1)
+    palace_oh_suffix = _resolved_palace_oh_suffix(fit_model, palace_oh_suffix)
 
     worker_rank = 0
     if worker_counter is not None:
@@ -1032,6 +1063,12 @@ def init_worker(
             )
 
             _WORKER_DECOMPOSER = SkyDecompPalaceAijcVNFSplitZodiLSFSpline2D
+        elif fit_model == PALACECORR_VNF_SPLIT_ZODI_FIT_MODEL:
+            from skysub.sky_decomp.residual_pca import (
+                SkyDecompPalaceCorrAijcVNFSplitZodiLSFSpline2D,
+            )
+
+            _WORKER_DECOMPOSER = SkyDecompPalaceCorrAijcVNFSplitZodiLSFSpline2D
         else:
             from skysub.sky_decomp.residual_pca import (
                 SkyDecompPalaceAijcVNFSplitZodiLineAmplitudePCA30,
@@ -1560,7 +1597,9 @@ def _load_cached_lsf_state(data):
     )
 
 
-def _write_compact_fits(cache_root, kind, n_rows, run_fingerprint, fit_model, output):
+def _write_compact_fits(
+    cache_root, kind, n_rows, run_fingerprint, fit_model, output, primary_meta=None
+):
     """Assemble one coefficient-only FITS from resumable per-row caches."""
     from astropy.table import Table
     from skysub.sky_decomp.result_io import _lsf_meta_row
@@ -1684,6 +1723,8 @@ def _write_compact_fits(cache_root, kind, n_rows, run_fingerprint, fit_model, ou
     primary.header["RUNFP"] = run_fingerprint
     primary.header["NINPUT"] = n_rows
     primary.header["NSUCC"] = success_count
+    for key, value in (primary_meta or {}).items():
+        primary.header[key] = value
     coefficient_table = Table(
         {name: coefficients[:, index] for index, name in enumerate(reference_names)}
     )
@@ -2271,6 +2312,7 @@ def run(
     ),
     compact_only=False,
 ):
+    palace_oh_suffix = _resolved_palace_oh_suffix(fit_model, palace_oh_suffix)
     base_dir, resolved_moon_zodi_data_root = resolve_runtime_data_roots(
         fit_model,
         palace_dir=palace_dir,
@@ -2350,6 +2392,7 @@ def run(
     print(f"  pin_workers={pin_workers}, diagnose_threads={diagnose_threads}")
     print(f"  base_dir={base_dir}")
 
+    primary_meta = _fit_model_primary_meta(fit_model, palace_oh_suffix)
     n_tasks = int(np.ceil(n_rows / chunk_size)) * 3
     results = {kind: [None] * n_rows for kind in ("sci", "sky1", "sky2")}
     reliability = {kind: [None] * n_rows for kind in ("sci", "sky1", "sky2")}
@@ -2469,12 +2512,14 @@ def run(
                 run_fingerprint,
                 fit_model,
                 output_dir / f"{stem}_{kind}_meta_coef{suffix}.fits",
+                primary_meta=primary_meta,
             )
         else:
             results_to_fits(
                 results[kind],
                 output_dir / f"{stem}_decomp_{kind}{suffix}.fits",
                 extra_meta=_reliability_extra_meta(reliability[kind], n_rows),
+                primary_meta=primary_meta,
             )
     return compact_provenance
 
@@ -2552,7 +2597,7 @@ def extract_meta_and_coef_products(
                 if extname not in hdul_dec:
                     raise KeyError(f"Missing {extname} extension in {decomp_path}")
             compact_hdus = [
-                fits.PrimaryHDU(),
+                fits.PrimaryHDU(header=hdul_dec[0].header.copy()),
                 _copy_hdu_with_name(hdul_dec["META"], "META"),
                 _copy_hdu_with_name(hdul_dec["COEF"], "COEF"),
             ]

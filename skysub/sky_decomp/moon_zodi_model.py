@@ -40,6 +40,8 @@ CORRECTION_SCOPE = "moon_plus_zodi"
 DATA_BUNDLE_SCHEMA_VERSION = 1
 DATA_BUNDLE_ID = "sky_decomp_moon_zodi_lsf_surface_iterative_v1"
 DEFAULT_PALACE_OH_SUFFIX = "_telluric_upper_parity_lsf_adam_25000_v1"
+SKYFAR_LINEAR_RIDGE_LAMBDA = 0.1
+SKYFAR_LINEAR_RIDGE_PALACE_OH_SUFFIX = "_skyfar_linear_ridge_0p1_v1"
 DEFAULT_PALACE_DIFFUSE_SUFFIX = "_canonhyb_v1"
 EPHEMERIS_ASSET = "jpl_de432s_short_planetary_ephemeris.bsp"
 SOLAR_ASSET = (
@@ -1139,6 +1141,8 @@ __all__ = [
     "MoonZodiPhysicalModel",
     "MoonZodiPrediction",
     "MoonZodiState",
+    "SKYFAR_LINEAR_RIDGE_LAMBDA",
+    "SKYFAR_LINEAR_RIDGE_PALACE_OH_SUFFIX",
     "SOLAR_ASSET",
     "ZODIACAL_LIGHT_ASSET",
     "air_to_vacuum",

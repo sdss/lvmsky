@@ -25,6 +25,8 @@ from skysub.sky_decomp.moon_zodi_lsf_surface_iterative import (
 from skysub.sky_decomp.moon_zodi_model import (
     DEFAULT_DATA_ROOT,
     DEFAULT_PALACE_OH_SUFFIX,
+    SKYFAR_LINEAR_RIDGE_LAMBDA,
+    SKYFAR_LINEAR_RIDGE_PALACE_OH_SUFFIX,
     MoonZodiObservation,
 )
 
@@ -457,6 +459,9 @@ def test_batch_role_coordinate_and_lsf_contract(monkeypatch):
         "palace-aijc-vnf-split-zodi-lsf-spline2d": (
             "_palace_aijc_vnf_split_zodi_lsf_spline2d"
         ),
+        "palacecorr-aijc-vnf-split-zodi-lsf-spline2d": (
+            "_palacecorr_aijc_vnf_split_zodi_lsf_spline2d"
+        ),
         "palace-aijc-vnf-pca30-split-zodi-lsf-spline2d": (
             "_palace_aijc_vnf_pca30_split_zodi_lsf_spline2d"
         ),
@@ -473,6 +478,19 @@ def test_batch_role_coordinate_and_lsf_contract(monkeypatch):
         decompose_parallel.PALACE_VNF_PCA30_NIV_CONTINUUM_FIT_MODEL
         == decompose_parallel.LEGACY_PALACE_VNF_PCA30_SPLIT_ZODI_FIT_MODEL
     )
+
+
+def test_palacecorr_suffix_and_primary_provenance_are_explicit():
+    fit_model = decompose_parallel.PALACECORR_VNF_SPLIT_ZODI_FIT_MODEL
+    suffix = decompose_parallel._resolved_palace_oh_suffix(fit_model, None)
+    assert suffix == SKYFAR_LINEAR_RIDGE_PALACE_OH_SUFFIX
+    assert decompose_parallel._fit_model_primary_meta(fit_model, suffix) == {
+        "DECOMPM": fit_model,
+        "OHFILE": f"pmd_popmodel_OH{suffix}.dat",
+        "OHRIDGE": SKYFAR_LINEAR_RIDGE_LAMBDA,
+    }
+    with pytest.raises(ValueError, match="palacecorr requires"):
+        decompose_parallel._resolved_palace_oh_suffix(fit_model, "_other")
 
 
 @pytest.mark.parametrize(
@@ -497,6 +515,11 @@ def test_batch_role_coordinate_and_lsf_contract(monkeypatch):
             decompose_parallel.PALACE_VNF_SPLIT_ZODI_FIT_MODEL,
             "skysub.sky_decomp.residual_pca."
             "SkyDecompPalaceAijcVNFSplitZodiLSFSpline2D",
+        ),
+        (
+            decompose_parallel.PALACECORR_VNF_SPLIT_ZODI_FIT_MODEL,
+            "skysub.sky_decomp.residual_pca."
+            "SkyDecompPalaceCorrAijcVNFSplitZodiLSFSpline2D",
         ),
         (
             decompose_parallel.PALACE_VNF_PCA30_SPLIT_ZODI_FIT_MODEL,
@@ -645,6 +668,11 @@ def test_telluric_cli_models_use_role_lsf_pwv_and_airmass(
         *decompose_parallel.PALACE_VNF_PCA30_SPLIT_ZODI_FIT_MODELS,
     ):
         assert all(call["n_line_amplitude_pca_components"] == 30 for call in constructor_calls)
+    if fit_model == decompose_parallel.PALACECORR_VNF_SPLIT_ZODI_FIT_MODEL:
+        assert all(
+            call["palace_oh_suffix"] == SKYFAR_LINEAR_RIDGE_PALACE_OH_SUFFIX
+            for call in constructor_calls
+        )
     if fit_model in decompose_parallel.SPLIT_ZODI_TELLURIC_FIT_MODELS:
         expected = {
             "n_zodi_spline_knots": 3,

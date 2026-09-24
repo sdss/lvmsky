@@ -727,9 +727,10 @@ def extra_meta_columns(extra_meta, n_results, reserved=()):
     return columns
 
 
-def results_to_fits(results, filename, extra_meta=None):
+def results_to_fits(results, filename, extra_meta=None, primary_meta=None):
     """Write a homogeneous batch of sky-decomposition results to FITS.
 
+    ``primary_meta`` adds or overrides primary-header provenance cards.
     ``extra_meta`` optionally adds per-row META columns that do not live on the
     result object -- the result dataclasses use ``slots=True``, so a caller
     cannot attach anything to them.  It is a sequence aligned with ``results``
@@ -928,6 +929,8 @@ def results_to_fits(results, filename, extra_meta=None):
         hdul[0].header["SCHEMAV"] = 1
         hdul.extend(build_moon_zodi_hdus([result.moon_zodi_state for result in results]))
 
+    for key, value in (primary_meta or {}).items():
+        hdul[0].header[key] = value
     hdul.writeto(filename, overwrite=True)
     print(
         f"Wrote {len(results)} results, {coef_arr.shape[1]} coefs, "

@@ -557,7 +557,11 @@ def test_lsf_fits_round_trip_reconstructs_surface(tmp_path):
     )
     output = tmp_path / "extended.fits"
 
-    results_to_fits([result], output)
+    results_to_fits(
+        [result],
+        output,
+        primary_meta={"DECOMPM": "palacecorr-test", "OHFILE": "oh.dat", "OHRIDGE": 0.1},
+    )
     restored = load_lsf_surface_state(output)
 
     with fits.open(output) as hdul:
@@ -589,6 +593,9 @@ def test_lsf_fits_round_trip_reconstructs_surface(tmp_path):
         sci_output_path=compact_paths[2],
     )
     with fits.open(compact_paths[0]) as hdul:
+        assert hdul[0].header["DECOMPM"] == "palacecorr-test"
+        assert hdul[0].header["OHFILE"] == "oh.dat"
+        assert hdul[0].header["OHRIDGE"] == 0.1
         assert [hdu.name for hdu in hdul] == [
             "PRIMARY",
             "META",

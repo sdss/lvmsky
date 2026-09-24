@@ -21,6 +21,8 @@ from .lsf_spline2d import (
 from .moon_zodi_model import (
     DEFAULT_DATA_ROOT,
     DEFAULT_PALACE_OH_SUFFIX,
+    SKYFAR_LINEAR_RIDGE_LAMBDA,
+    SKYFAR_LINEAR_RIDGE_PALACE_OH_SUFFIX,
     file_sha256,
     validate_decomposition_asset_contract,
     wave_sha256,
@@ -273,13 +275,11 @@ def _individual_line_design(model) -> sp.csc_matrix:
 class SkyDecompTelluricCorrectedLinesPalaceAijc(
     SkyDecompTelluricCorrectedLinesLSFSpline2D
 ):
-    """Use the PALACE ``Aijc`` OH ratios from the bundled source table."""
+    """Use ``Aijc`` OH ratios from the selected PALACE-format table."""
 
     def __init__(self, wave: np.ndarray, *args: Any, **kwargs: Any) -> None:
-        requested_suffix = kwargs.get("palace_oh_suffix")
-        if requested_suffix not in (None, DEFAULT_PALACE_OH_SUFFIX):
-            raise ValueError("PALACE Aijc requires the bundled OH source table")
-        kwargs["palace_oh_suffix"] = DEFAULT_PALACE_OH_SUFFIX
+        if kwargs.get("palace_oh_suffix") is None:
+            kwargs["palace_oh_suffix"] = DEFAULT_PALACE_OH_SUFFIX
         super().__init__(wave, *args, **kwargs)
 
     @staticmethod
@@ -905,6 +905,31 @@ class SkyDecompPalaceAijcVNFSplitZodiLSFSpline2D(
         return result
 
 
+class SkyDecompPalaceCorrAijcVNFSplitZodiLSFSpline2D(
+    SkyDecompPalaceAijcVNFSplitZodiLSFSpline2D
+):
+    """Use the validation-selected SkyFar linear-ridge OH coefficients."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        requested = kwargs.get("palace_oh_suffix")
+        if requested not in (None, SKYFAR_LINEAR_RIDGE_PALACE_OH_SUFFIX):
+            raise ValueError(
+                "palacecorr requires pmd_popmodel_OH"
+                f"{SKYFAR_LINEAR_RIDGE_PALACE_OH_SUFFIX}.dat"
+            )
+        kwargs["palace_oh_suffix"] = SKYFAR_LINEAR_RIDGE_PALACE_OH_SUFFIX
+        super().__init__(*args, **kwargs)
+
+    def _finalize_result(self, *args: Any, **kwargs: Any):
+        result = super()._finalize_result(*args, **kwargs)
+        result.fit_summary += (
+            " | oh_coefficients=skyfar-linear"
+            f" | oh_coefficient_ridge_lambda={SKYFAR_LINEAR_RIDGE_LAMBDA:g}"
+        )
+        self.fit_summary = result.fit_summary
+        return result
+
+
 class SkyDecompPalaceAijcVNFSplitZodiLineAmplitudePCA30(
     SkyDecompPalaceAijcVNFLineAmplitudePCA
 ):
@@ -1179,6 +1204,7 @@ __all__ = [
     "SkyDecompPalaceAijcVNFLineAmplitudePCA",
     "SkyDecompPalaceAijcVNFNivContinuumLSFSpline2D",
     "SkyDecompPalaceAijcVNFNivContinuumLineAmplitudePCA",
+    "SkyDecompPalaceCorrAijcVNFSplitZodiLSFSpline2D",
     "SkyDecompPalaceAijcVNFSplitZodiLSFSpline2D",
     "SkyDecompPalaceAijcVNFSplitZodiLineAmplitudePCA30",
     "SkyDecompTelluricCorrectedLinesLineAmplitudePCA",
