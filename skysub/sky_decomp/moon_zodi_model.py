@@ -1079,6 +1079,82 @@ def _physics_only_model(data_dir: str | Path) -> "MoonZodiPhysicalModel":
     return model
 
 
+# --- Empirical correction to the Leinert zodiacal-light brightness ---------
+# Measured 2026-09-24 on the 1.3.2 gaia-stars-mask-telluric-chi2 corpus, from
+# the 14,979 DARK pointings (moon_frac_po <= 1/150; sci, near and far arms
+# pooled) where the decomposition fits Zodi_bs freely.  Target:
+# log10(Z_fit / (SPLIT_ZODI_ZODI_PRIOR_CALIBRATION * Z_leinert)), with the
+# +-log10(kappa_z) bracket handled as CENSORING (Tobit likelihood) -- up to a
+# third of high-|beta| dark rows sit on the ceiling, so a plain fit to the
+# interior would be biased toward the model.  Interior fits do not depend on
+# the anchor (it only clips), so they are a genuine measurement.
+#
+# What was wrong: the Leinert profile falls off too STEEPLY with ecliptic
+# latitude for this data -- too bright on the ecliptic, too faint toward the
+# poles -- so it OVERSTATES the zodi contrast between pointings a few degrees
+# apart (fitted-on-model slope of sci-arm differences: 0.45 near / 0.43 far).
+#
+# Fitted JOINTLY with a galactic-latitude term and a log-airmass term, and
+# only the ecliptic part is kept here.  That matters: Zodi_bs also absorbs
+# Galactic continuum (diffuse galactic light / unresolved stars, ~1.5x more in
+# the plane, no template in the basis), and an ecliptic-only fit partly
+# mistakes it for zodi.  The Galactic part is -0.15 dex plane-to-pole.  The Galactic and
+# airmass terms were deliberately NOT deployed -- the Galactic one is not
+# zodiacal light, and the airmass one (+0.05 per ln X) looks like airglow
+# leaking into Zodi_bs.  The level was re-fitted with the shape fixed.
+#
+# Validated out-of-fold with WHOLE NIGHTS held out (this corpus leaks within
+# a night): dark scatter 0.124 -> 0.102 dex; sci-arm contrast slope
+# 0.45 -> 0.74 (near), 0.43 -> 0.94 (far); sci-far residual 0.113 -> 0.088.
+# Degree 2 was chosen over higher degrees on the CONTRAST test: degree 5 fits
+# absolute levels better but drives the near-arm slope to 0.37, i.e. it fits
+# fine structure that does not transfer between neighbouring pointings.
+#
+# GEOMETRY: |lambda - lambda_sun| is the TRUE geocentric-ecliptic value,
+# exactly as `relative_longitude` is computed below.  Do NOT derive it from
+# the ML context column `sun_sep`: that column is not the solar elongation
+# (mlp_predictor.data computes it as an ICRS separation, which puts the Sun
+# at the barycentre -- rho +0.13 with the true elongation).  A first version
+# of this fit did exactly that and had the longitude dependence wrong.
+#
+# Result: pole-vs-ecliptic +0.30 dex at |dlam| = 120; near-Sun vs anti-Sun on
+# the ecliptic only -0.03 dex.  Applied range over the 41,064 observed
+# pointings: -0.13 to +0.26 dex, median +0.06.
+#
+# Form: log10 factor = sum_k c_k P_i(u) P_j(v), Legendre P, with
+#   u = 2 |lambda - lambda_sun| / 180 - 1,   v = 2 sin|beta| - 1.
+ZODI_LEINERT_CORRECTIONS: dict[str, dict | None] = {
+    "none": None,
+    "lvm-ecl-2026-09": {
+        "terms": ((0, 0), (0, 1), (0, 2), (1, 0), (1, 1), (1, 2), (2, 0), (2, 1)),
+        "coef": (-0.0015446893945962865, 0.14287470227857374, 0.0355828485715581,
+                 0.15213766681794777, -0.005288404813077793, -0.025153192741487505,
+                 -0.11350842322273286, -0.02537049388355427),
+    },
+}
+
+
+def zodi_leinert_correction_log10(
+    correction: str, relative_longitude_deg: float, ecliptic_latitude_deg: float
+) -> float:
+    """log10 multiplicative correction to the Leinert zodi for ``correction``.
+
+    ``"none"`` returns 0.0 exactly, so the uncorrected model is bit-identical.
+    Raises ``KeyError`` for an unknown name rather than silently using none: a
+    decomposition and the cache built from it must agree on this.
+    """
+    spec = ZODI_LEINERT_CORRECTIONS[str(correction)]
+    if spec is None:
+        return 0.0
+    dlam = abs(((float(relative_longitude_deg) + 180.0) % 360.0) - 180.0)
+    u_ = 2.0 * dlam / 180.0 - 1.0
+    v_ = 2.0 * np.sin(np.deg2rad(abs(float(ecliptic_latitude_deg)))) - 1.0
+    pu = np.polynomial.legendre.legvander(np.asarray([u_]), 2)[0]
+    pv = np.polynomial.legendre.legvander(np.asarray([v_]), 2)[0]
+    return float(sum(c * pu[i] * pv[j]
+                     for (i, j), c in zip(spec["terms"], spec["coef"])))
+
+
 def geometry_amplitude_prior(
     wave_air_angstrom: np.ndarray,
     detector_lsf_fwhm_air_angstrom: np.ndarray,
@@ -1086,8 +1162,15 @@ def geometry_amplitude_prior(
     *,
     physical_to_fit_flux_scale: float,
     data_dir: str | Path = DEFAULT_DATA_DIR,
+    zodi_correction: str = "none",
 ) -> tuple[float, float, float]:
     """Geometry priors for ``SkyDecomp.set_amplitude_prior`` on one spectrum.
+
+    ``zodi_correction`` names an entry of ``ZODI_LEINERT_CORRECTIONS``.  It
+    rescales the zodi total AND is carried into ``moon_fraction``, so the two
+    constraints stay mutually consistent.  Every consumer -- the decomposition
+    anchor, the moon-model cache, the inference path -- must pass the SAME name
+    the decomposition was run with; see ``moon_model_cache.load``.
 
     Returns ``(moon_fraction, zodi_total, target_airmass)``:
 
@@ -1116,12 +1199,19 @@ def geometry_amplitude_prior(
     )
     moon_total = float(np.nansum(prediction.moon))
     zodi_total = float(np.nansum(prediction.zodi))
+    if zodi_correction != "none":
+        _geo = prediction.state.geometry
+        zodi_total *= 10.0 ** zodi_leinert_correction_log10(
+            zodi_correction, _geo.ecliptic_lon_relative_deg,
+            _geo.ecliptic_latitude_deg)
     denominator = moon_total + zodi_total
     fraction = moon_total / denominator if denominator > 0.0 else np.nan
     return fraction, zodi_total, float(prediction.state.geometry.target_airmass)
 
 
 __all__ = [
+    "ZODI_LEINERT_CORRECTIONS",
+    "zodi_leinert_correction_log10",
     "CORRECTION_SCOPE",
     "DATA_BUNDLE_ID",
     "DATA_BUNDLE_SCHEMA_VERSION",

@@ -271,7 +271,10 @@ def _resolved_palace_oh_suffix(fit_model, palace_oh_suffix):
 
 
 def _fit_model_primary_meta(fit_model, palace_oh_suffix):
-    metadata = {"DECOMPM": fit_model}
+    metadata = {
+        "DECOMPM": fit_model,
+        "ZODICORR": (SPLIT_ZODI_ZODI_CORRECTION, "Leinert zodi correction used by the anchor"),
+    }
     if palace_oh_suffix is not None:
         metadata["OHFILE"] = f"pmd_popmodel_OH{palace_oh_suffix}.dat"
     if fit_model == PALACECORR_VNF_SPLIT_ZODI_FIT_MODEL:
@@ -556,6 +559,35 @@ SPLIT_ZODI_DIFFUSE_OH_RELAX_DEX = SPLIT_ZODI_CONTINUUM_DEFAULTS[
 # rho(FLI) ~ 0.08 and partial rho(FLI | B500) ~ -0.12.  Judge this constraint
 # by pinning fraction, reversals and rms, not by those correlations.
 SPLIT_ZODI_ZODI_PRIOR_CALIBRATION = 1.6
+# Empirical correction to the Leinert zodi the anchor is built from -- see
+# `ZODI_LEINERT_CORRECTIONS` in sky_decomp/moon_zodi_model.py for the fit and
+# its validation.  The default, "lvm-ecl-2026-09", is the ecliptic-latitude/
+# longitude correction (dark-time scatter 0.124 -> 0.102 dex, sci-arm zodi
+# contrast slope 0.45/0.43 -> 0.74/0.94; on a 1000-row decomposition A/B it
+# removes the dark-time fitted/anchor trend with |beta| and cuts dark anchor
+# pinning 12% -> 1% at unchanged chi2).  "none" reproduces every decomposition
+# made before 2026-09-24 bit for bit (LVMSKY_ZODI_CORRECTION=none).
+#
+# A SOURCE CONSTANT, deliberately, not a CLI flag: the anchor is evaluated in
+# the worker processes, and a module global set at runtime in the parent does
+# not reach spawned workers, whereas a constant is present in every import.
+#
+# The environment variable LVMSKY_ZODI_CORRECTION overrides it, for side-by-side
+# A/B runs from one checkout.  That IS spawn-safe where a runtime global is not:
+# the environment is inherited by every worker at spawn time, so parent and
+# workers evaluate this line to the same value.
+#
+# Whatever this is set to is written to the primary header as ZODICORR and
+# folded into the run fingerprint.  The moon-model cache reads ZODICORR and
+# refuses to pair with a decomposition built under a different correction:
+# the ML's zodi-ceiling rule assumes pinned zodi = S x zodi_po with ONE fitted
+# S, which only holds if the cache's zodi_po and this anchor agree.  Changing
+# it therefore means: re-decompose, rebuild the cache, retrain.
+SPLIT_ZODI_ZODI_CORRECTION = os.environ.get("LVMSKY_ZODI_CORRECTION", "lvm-ecl-2026-09")
+from skysub.sky_decomp.moon_zodi_model import ZODI_LEINERT_CORRECTIONS as _ZLC  # noqa: E402
+if SPLIT_ZODI_ZODI_CORRECTION not in _ZLC:
+    raise ValueError(f"SPLIT_ZODI_ZODI_CORRECTION={SPLIT_ZODI_ZODI_CORRECTION!r} is not one of "
+                     f"{sorted(_ZLC)}")
 # Moon_bs interior-knot count.  Deliberately NOT SkyDecomp.__init__'s default
 # (25, with n_zodi_spline_knots 3): the deployed corpus and every measurement
 # behind the SPLIT_ZODI_* bounds above use 11 moon / 1 zodi interior knots.
@@ -1799,6 +1831,7 @@ def _install_split_zodi_amplitude_prior(decomposer, kind, row_index):
             _lsf,
             _moon_zodi_observation(kind, row_index),
             physical_to_fit_flux_scale=float(_WORKER_FACTOR),
+            zodi_correction=SPLIT_ZODI_ZODI_CORRECTION,
         )
     except MoonZodiInvalidObservationError:
         decomposer.set_amplitude_prior(None, None)
@@ -2349,6 +2382,8 @@ def run(
             "palace_suffix": palace_suffix,
             "palace_oh_suffix": palace_oh_suffix,
             "palace_diffuse_suffix": palace_diffuse_suffix,
+            # A resumed run must not mix rows anchored to different zodi models.
+            "zodi_correction": SPLIT_ZODI_ZODI_CORRECTION,
         }
         compact_provenance = _compact_run_provenance(
             data_file, wave, fit_model, base_dir, parameters
@@ -2761,7 +2796,12 @@ def main():
         # reachable from the CLI.  To reproduce a pre-2026-09-17 corpus, check
         # out a commit from before this change.
         choices=tuple(TELLURIC_FIT_MODELS),
-        default=PALACE_VNF_SPLIT_ZODI_FIT_MODEL,
+        # 2026-09-24: the SkyFar ridge-corrected PALACE OH line strengths.
+        # Same 388 coefficients (OH coefs move <1% at p90); on a 1000-row A/B
+        # OH-pixel chi2 drops x0.03 (r) / x0.28 (z), full band x0.69, with the
+        # continuum partition and reliability flags unchanged.  Outputs carry
+        # the _palacecorr_ suffix.
+        default=PALACECORR_VNF_SPLIT_ZODI_FIT_MODEL,
         help="Fit implementation (default: %(default)s)",
     )
     parser.add_argument(

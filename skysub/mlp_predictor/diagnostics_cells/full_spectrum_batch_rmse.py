@@ -345,7 +345,8 @@ else:
     # transmission at worst.  Build this cell's own lookup against EVAL_INPUT.
     _telluric_for = None
     if globals().get('TELLURIC_ROW_FOR') is not None:
-        _telluric_for = make_telluric_row_lookup(EVAL_INPUT, verbose=False)
+        _telluric_for = make_telluric_row_lookup(EVAL_INPUT, verbose=False,
+                                                 decomp_suffix=_DECOMP_SUFFIX)
     _model_cache = {}
 
     def _model_for(telluric):
@@ -580,10 +581,16 @@ else:
         if _atlas_keep[i]:
             _gp = _group_components(comps_sci)
             _gt = _group_components(comps_sci_true_batch)
-            _o_cpred = {_g: _gp[_g].astype(np.float32) for _g in _ATLAS_COMPONENTS}
+            # The DIFFERENCE is taken in float64 and only then narrowed.  Storing
+            # float32 pred and true and subtracting later cancels badly on rows
+            # where a family is predicted almost exactly: the residual is then
+            # ~1e-4 of the flux and float32 rounding of each operand is a
+            # visible fraction of it (measured: 2e-4 relative on a diffuse row).
+            _o_cdelta = {_g: (_gp[_g] - _gt[_g]).astype(np.float32)
+                         for _g in _ATLAS_COMPONENTS}
             _o_ctrue = {_g: _gt[_g].astype(np.float32) for _g in _ATLAS_COMPONENTS}
         else:
-            _o_cpred = _o_ctrue = None
+            _o_cdelta = _o_ctrue = None
 
         # Same reconstruction path, same LSF state, same O2 vector as the
         # prediction above -- only the coefficients differ (fitted, not
@@ -628,7 +635,7 @@ else:
                 _o_resid, _o_wave, _o_obs, _o_selfres,
                 _dmoon.astype(np.float32), _dzodi.astype(np.float32),
                 _ddiffuse.astype(np.float32), _dlines.astype(np.float32),
-                _o_cpred, _o_ctrue)
+                _o_cdelta, _o_ctrue)
 
     _t_loop0 = _time.perf_counter()
     _atlas_cpred, _atlas_ctrue = [], []
@@ -661,21 +668,21 @@ else:
     batch_recon_for_atlas = None
     if _atlas_cpred:
         _ak = np.flatnonzero(_atlas_keep)
-        _comp_pred = {_g: np.vstack([_c[_g] for _c in _atlas_cpred])
-                      for _g in _ATLAS_COMPONENTS}
+        # _atlas_cpred holds float64-derived DELTAS (pred - true), see _row_work.
+        _comp_delta = {_g: np.vstack([_c[_g] for _c in _atlas_cpred])
+                       for _g in _ATLAS_COMPONENTS}
         _comp_true = {_g: np.vstack([_c[_g] for _c in _atlas_ctrue])
                       for _g in _ATLAS_COMPONENTS}
-        _tot_pred = sum(_comp_pred.values())
-        _tot_true = sum(_comp_true.values())
+        _tot_delta = sum(_c.astype(np.float64) for _c in _comp_delta.values())
+        _tot_true = sum(_c.astype(np.float64) for _c in _comp_true.values())
         batch_recon_for_atlas = {
             # Positions into filtered_triplet, and the corpus FITS rows.
             'sel_pos': sel_pos[_ak],
             'sel_rows': sel_rows[_ak],
             'wave': np.asarray(wave_arr, dtype=np.float64),
-            'resid': (_tot_pred - _tot_true).astype(np.float32),
+            'resid': _tot_delta.astype(np.float32),
             'truth': _tot_true.astype(np.float32),
-            'resid_comp': {_g: (_comp_pred[_g] - _comp_true[_g]).astype(np.float32)
-                           for _g in _ATLAS_COMPONENTS},
+            'resid_comp': dict(_comp_delta),
             'truth_comp': {_g: _comp_true[_g] for _g in _ATLAS_COMPONENTS},
             'components': tuple(_ATLAS_COMPONENTS),
             'split': _EVAL_SPLIT,
@@ -707,8 +714,8 @@ else:
               f"own residuals to <1e-4 relative on {_chk.size} probed row(s)")
         print(f"  atlas handoff ready: {_ak.size} rows x "
               f"{len(_ATLAS_COMPONENTS)} components "
-              f"({(_tot_pred.nbytes * 2 + sum(a.nbytes for a in _comp_pred.values()) * 2) / 1e6:.0f} MB)")
-        del _comp_pred, _comp_true, _tot_pred, _tot_true, _atlas_cpred, _atlas_ctrue
+              f"({(sum(a.nbytes for a in _comp_delta.values()) * 2 + _tot_true.nbytes) / 1e6:.0f} MB)")
+        del _comp_delta, _comp_true, _tot_delta, _tot_true, _atlas_cpred, _atlas_ctrue
 
 
     def _rmse_stats(arr):
@@ -1197,7 +1204,7 @@ else:
         # but it is what says how far below the stack this sigma sits, and a
         # reader needs that number to relate the panel to the decomposition.
         _nfib = None
-        _meta_c2 = globals().get('_meta_e10')
+        _meta_c2 = globals().get('_meta_ev')   # full-corpus META; indexed by sel_rows below
         if _meta_c2 is not None:
             _cu = {c.lower(): c for c in _meta_c2.colnames}
             for _c in ('fibers_sci_used', 'fibers_sci'):

@@ -155,7 +155,7 @@ def _sanitised_lsf(lsf):
     return out
 
 
-def _init_worker(stack_path, exposure_seconds):
+def _init_worker(stack_path, exposure_seconds, zodi_correction="none"):
     from sky_decomp.moon_zodi_model import MoonZodiPhysicalModel
     hdul = fits.open(str(stack_path), memmap=True)
     wave = np.asarray(hdul["WAVE"].data, dtype=np.float64)
@@ -165,6 +165,7 @@ def _init_worker(stack_path, exposure_seconds):
     _W["lsf"] = {a: hdul[_ARM_META[a][3]].section for a in ARMS}
     _W["model"] = MoonZodiPhysicalModel()
     _W["exposure_seconds"] = float(exposure_seconds)
+    _W["zodi_correction"] = str(zodi_correction)
 
 
 def _run_chunk_po(rows):
@@ -201,7 +202,8 @@ def _run_chunk_po(rows):
                         target_dec_deg=float(m[dec_col]),
                         exposure_seconds=_W["exposure_seconds"],
                         exposure_seconds_source=EXPOSURE_SOURCE),
-                    physical_to_fit_flux_scale=FIT_FLUX_SCALE)
+                    physical_to_fit_flux_scale=FIT_FLUX_SCALE,
+                    zodi_correction=_W.get("zodi_correction", "none"))
             except Exception as exc:
                 # Same policy as _run_chunk: keep the first few reasons so
                 # build() can raise with them instead of writing all-NaN.
@@ -270,7 +272,8 @@ def _run_chunk(rows):
                         target_dec_deg=float(m[dec_col]),
                         exposure_seconds=_W["exposure_seconds"],
                         exposure_seconds_source=EXPOSURE_SOURCE),
-                    physical_to_fit_flux_scale=FIT_FLUX_SCALE)
+                    physical_to_fit_flux_scale=FIT_FLUX_SCALE,
+                    zodi_correction=_W.get("zodi_correction", "none"))
             except Exception as exc:
                 if len(fails) < 5:
                     fails.append((int(r), arm,
@@ -282,9 +285,33 @@ def _run_chunk(rows):
     return rows, out, ok, fails
 
 
+
+def decomposition_zodi_correction(corpus_prefix):
+    """The Leinert zodi correction the corpus's decomposition was anchored with.
+
+    Read from the ZODICORR primary-header keyword of ``<prefix>_decomp_*.fits``
+    (written by decompose_parallel since 2026-09-24).  Products written before
+    then carry no keyword and were all built uncorrected, so a missing keyword
+    means ``"none"``.  Several decomposition files that DISAGREE raise, because
+    then there is no single right answer for the cache to match.
+    """
+    import glob
+    tags = {}
+    for path in sorted(glob.glob(f"{corpus_prefix}_decomp_*.fits")):
+        try:
+            tags[path] = str(fits.getheader(path, 0).get("ZODICORR", "none")).strip()
+        except OSError:
+            continue
+    found = set(tags.values())
+    if len(found) > 1:
+        raise RuntimeError(
+            f"decomposition products under {corpus_prefix} disagree on the zodi "
+            f"correction: " + ", ".join(f"{Path(k).name}={v}" for k, v in tags.items()))
+    return found.pop() if found else "none"
+
 def build(corpus_prefix, n_workers=8, chunk_size=32,
           exposure_seconds=DEFAULT_EXPOSURE_SECONDS, rows=None,
-          overwrite=False, verbose=True):
+          overwrite=False, verbose=True, zodi_correction=None):
     """Compute the cache with a process pool and write it beside the corpus.
 
     ``rows`` restricts the computation (for testing); a partial cache is marked
@@ -297,6 +324,11 @@ def build(corpus_prefix, n_workers=8, chunk_size=32,
     stack = Path(f"{corpus_prefix}.fits")
     if not stack.exists():
         raise FileNotFoundError(f"corpus stack not found: {stack}")
+    if zodi_correction is None:
+        zodi_correction = decomposition_zodi_correction(corpus_prefix)
+    if verbose:
+        print(f"[moon-model-cache] zodi correction: {zodi_correction!r} "
+              f"(from the decomposition headers)", flush=True)
     out_path = cache_path(corpus_prefix)
     if out_path.exists() and not overwrite:
         raise FileExistsError(
@@ -326,7 +358,8 @@ def build(corpus_prefix, n_workers=8, chunk_size=32,
               flush=True)
     ctx = mp.get_context("fork")
     with ctx.Pool(processes=int(n_workers), initializer=_init_worker,
-                  initargs=(str(stack), float(exposure_seconds))) as pool:
+                  initargs=(str(stack), float(exposure_seconds),
+                            zodi_correction)) as pool:
         done = 0
         fails = []
         for chunk_rows, vals, chunk_ok, chunk_fails in pool.imap_unordered(
@@ -352,6 +385,9 @@ def build(corpus_prefix, n_workers=8, chunk_size=32,
     payload["n_rows"] = np.array(n_rows)
     payload["complete"] = np.array(bool(complete))
     payload["version"] = np.array(CACHE_VERSION)
+    # Which zodi correction the physics-only fields were computed under; see
+    # decomposition_zodi_correction and load().
+    payload["zodi_correction"] = np.array(str(zodi_correction))
     payload["exposure_seconds"] = np.array(float(exposure_seconds))
     payload["fit_flux_scale"] = np.array(FIT_FLUX_SCALE)
     np.savez_compressed(out_path, **payload)
@@ -428,7 +464,8 @@ def upgrade_v1_to_v2(corpus_prefix, n_workers=8, chunk_size=32, verbose=True):
     ctx = mp.get_context("fork")
     fails = []
     with ctx.Pool(processes=int(n_workers), initializer=_init_worker,
-                  initargs=(str(stack), exposure_seconds)) as pool:
+                  initargs=(str(stack), exposure_seconds,
+                            decomposition_zodi_correction(corpus_prefix))) as pool:
         done = 0
         for chunk_rows, vals, chunk_ok, chunk_fails in pool.imap_unordered(
                 _run_chunk_po, chunks):
@@ -455,6 +492,7 @@ def upgrade_v1_to_v2(corpus_prefix, n_workers=8, chunk_size=32, verbose=True):
     payload["ok"] = np.asarray(old["ok"], dtype=bool) & ok_po
     payload["fields"] = np.array(_FIELDS + _FIELDS_PO)
     payload["version"] = np.array(2)
+    payload["zodi_correction"] = np.array(decomposition_zodi_correction(corpus_prefix))
     # The learned fields must be untouched -- checked, not assumed.
     for a in ARMS:
         for f in _FIELDS:
@@ -501,6 +539,19 @@ def load(corpus_prefix, expnum=None, require_complete=True):
         raise RuntimeError(
             f"{path} is a PARTIAL cache (built with rows=...); rebuild it "
             f"without `rows` before using it for training")
+    # The physics-only fields must be computed under the same zodi correction
+    # the decomposition's anchor used.  The ML's zodi-ceiling rule fits ONE
+    # scale S with pinned zodi = S x zodi_po; if the two disagree that ratio is
+    # no longer constant and the rule is silently wrong on every pinned row.
+    # Caches written before 2026-09-24 carry no tag and were all uncorrected.
+    _have_zc = str(z["zodi_correction"]) if "zodi_correction" in z.files else "none"
+    _want_zc = decomposition_zodi_correction(corpus_prefix)
+    if _have_zc != _want_zc:
+        raise RuntimeError(
+            f"{path} was built with zodi correction {_have_zc!r} but the "
+            f"decomposition under {corpus_prefix} was anchored with "
+            f"{_want_zc!r}. Rebuild the cache (delete it and rerun, or "
+            f"`python -m mlp_predictor.moon_model_cache {corpus_prefix} --overwrite`).")
     if expnum is not None:
         want = np.asarray(expnum, dtype=np.int64)
         have = np.asarray(z["expnum"], dtype=np.int64)

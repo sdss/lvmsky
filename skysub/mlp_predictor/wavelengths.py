@@ -103,10 +103,10 @@ def build_coef_wavelengths(
     # we would silently get split-zodi OH centroids -- wrong by a median
     # 46.9 A -- for a telluric corpus.
     from . import data as _data
-    _variant = _data.decomp_variant_for_suffix(str(decomp_suffix or ''))
+    _spec = _data.decomp_variant_spec(decomp_suffix)
     _decomposer = None
     _tel_note = ''
-    if _variant is not None and _data.DECOMP_VARIANTS[_variant]['telluric']:
+    if _spec is not None and _spec['telluric']:
         # The telluric basis is divided by a PER-ROW transmission, but we need
         # one set of wavelengths for the whole corpus, so a representative row
         # is needed.  Use the row whose sci_airmass is the median: T enters the
@@ -126,7 +126,7 @@ def build_coef_wavelengths(
         _rep = int(_ok[np.argsort(_am[_ok])[_ok.size // 2]])
         _tel = _data.telluric_row_kwargs(
             _meta, _rep, 'sci', wave_ref,
-            _lsf[_rep])
+            _lsf[_rep], palace_oh_suffix=_spec.get('palace_oh_suffix'))
         _decomposer = _data.make_reconstruction_decomposer(
             wave_ref, n_spline_knots=n_moon_knots, base_dir=_data._infer_base_dir_for_reconstruction(),
             split_zodi=split_zodi, n_zodi_spline_knots=n_zodi_knots,
@@ -138,7 +138,8 @@ def build_coef_wavelengths(
             # 13.3 A out (p95 48 A, max 82 A).
             lsf_sigma=lsf_ref / LSF_FWHM_TO_SIGMA)
         _tel_note = (f' (telluric basis from representative row {_rep}, '
-                     f'sci_airmass {_am[_rep]:.3f}, pwv {_tel["pwv_mm"]:g} mm)')
+                     f'sci_airmass {_am[_rep]:.3f}, pwv {_tel["pwv_mm"]:g} mm, '
+                     f'OH file pmd_popmodel_OH{_spec.get("palace_oh_suffix") or ""}.dat)')
         if verbose:
             print(f'[wavelength-basis] building the TELLURIC basis{_tel_note}')
     result = coef_wavelengths_from_basis(

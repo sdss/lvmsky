@@ -91,6 +91,16 @@ def test_real_fit_state_result_and_fits(real_result, tmp_path):
     with fits.open(output) as hdul:
         assert hdul[0].header["DECOMPM"] == "lsf-spline2d-split-zodi"
         assert hdul["LSF_COEF"].header["BASIS"] == "M-spline"
+        assert "ZODICORR" not in hdul[0].header
+
+    # Run-level cards (decompose_parallel's ZODICORR) reach the primary header
+    # of the full product, not just the compact one.
+    tagged = tmp_path / "tagged.fits"
+    results_to_fits([result], tagged,
+                    primary_meta={"ZODICORR": ("lvm-ecl-2026-09", "anchor correction")})
+    with fits.open(tagged) as hdul:
+        assert hdul[0].header["ZODICORR"] == "lvm-ecl-2026-09"
+        assert hdul[0].header["DECOMPM"] == "lsf-spline2d-split-zodi"
 
 
 def test_failed_input_keeps_mspline_contract(real_result):

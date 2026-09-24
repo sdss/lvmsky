@@ -737,6 +737,10 @@ def results_to_fits(results, filename, extra_meta=None, primary_meta=None):
     of dicts sharing one key set, which is how `decompose_parallel` carries the
     `sky_decomp.reliability` flags (a decision made by the FITTER, e.g. whether
     a reversal retry was run, and therefore not recoverable from the result).
+
+    ``primary_meta`` optionally adds run-level cards to the primary header,
+    as ``{key: value}`` or ``{key: (value, comment)}`` -- e.g. ZODICORR, which
+    `moon_model_cache` reads back to match its prior to the decomposition.
     """
     from astropy.io import fits
     from astropy.table import Table

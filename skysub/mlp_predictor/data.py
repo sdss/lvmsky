@@ -31,6 +31,7 @@ import pandas as pd
 from astropy.coordinates import (
     AltAz,
     BarycentricMeanEcliptic,
+    GeocentricMeanEcliptic,
     EarthLocation,
     SkyCoord,
     get_sun,
@@ -262,6 +263,15 @@ def _pointing_ra_dec_columns(meta_upper, kind):
     return ra_key, dec_key
 
 
+# Version of the astropy-derived context geometry.  1 = before 2026-09-24,
+# when sun_sep / moon_sep were ICRS separations (Sun and Moon placed at the
+# barycentre) and the Sun's ecliptic longitude behind zodi_log10_v was
+# barycentric.  2 = topocentric separations and a geocentric Sun.  Stored in
+# every trained artifact; load_ensemble warns when a model's version differs,
+# because the network would then be fed features it was never trained on.
+CTX_GEOMETRY_VERSION = 2
+
+
 def _compute_astropy_geometry(meta, meta_upper, kind):
     """Compute all astropy-derived geometry features for one pointing kind.
 
@@ -300,8 +310,18 @@ def _compute_astropy_geometry(meta, meta_upper, kind):
     sun_altaz = sun.transform_to(frame)
     moon_altaz = moon.transform_to(frame)
 
-    sun_sep = pointing.separation(sun).to_value(u.deg)
-    moon_sep = pointing.separation(moon).to_value(u.deg)
+    # Separations are taken TOPOCENTRICALLY, in the AltAz frame, where the
+    # pointing (at infinity) and the Sun/Moon (at their real distances, seen
+    # from LCO) are directions from the same origin.  Until 2026-09-24 these
+    # were `pointing.separation(sun)` with the pointing in ICRS: astropy then
+    # moves the BODY into ICRS, whose origin is the solar-system barycentre, so
+    # the Sun's direction was close to meaningless (rho +0.13 with the true
+    # elongation) and the Moon's was roughly the Earth's -- `moon_sep` came out
+    # as 180 deg minus the solar elongation (rho +0.01 with the real moon
+    # separation).  astropy raises no warning for this.  Every ensemble trained
+    # before that date learned from the broken values; see CTX_GEOMETRY_VERSION.
+    sun_sep = pointing_altaz.separation(sun_altaz).to_value(u.deg)
+    moon_sep = pointing_altaz.separation(moon_altaz).to_value(u.deg)
 
     alt_deg = pointing_altaz.alt.to_value(u.deg)
     sinalt = np.sin(np.deg2rad(alt_deg))
@@ -2069,10 +2089,27 @@ def load_o2_vector_if_available(decomp_fits_path, spectrum_index):
 # wavelength cache and the diagnostics all had to branch.  A corpus written by
 # the old `_lsf_surface_iterative_split_zodi` path is no longer loadable from
 # this branch; check out a commit before this one to read it.
+#
+# `palace_oh_suffix` selects the OH line file, `pmd_popmodel_OH{suffix}.dat`
+# (None = the canonical PALACE file).  It MUST match the fit: the palacecorr
+# coefficients are nearly identical to the palace ones (OH p90 0.8%), so a
+# reconstruction on the wrong OH file is invisible in coefficient space and
+# wrong by +0.11 dex in r-band OH flux.  Every telluric basis gets it from here,
+# through `telluric_row_kwargs` -> `make_reconstruction_decomposer`.
 DECOMP_VARIANTS = {
     'telluric': {
         'suffix': '_palace_aijc_vnf_split_zodi_lsf_spline2d',
         'telluric': True,
+        'palace_oh_suffix': None,
+    },
+    # 2026-09-24: SkyFar ridge-corrected PALACE OH line strengths, decompose_
+    # parallel's default fit model from that date.  Must equal sky_decomp's
+    # SKYFAR_LINEAR_RIDGE_PALACE_OH_SUFFIX (tested; not imported, to keep this
+    # module importable without the physics model).
+    'telluric-palacecorr': {
+        'suffix': '_palacecorr_aijc_vnf_split_zodi_lsf_spline2d',
+        'telluric': True,
+        'palace_oh_suffix': '_skyfar_linear_ridge_0p1_v1',
     },
 }
 # decompose_parallel's fallback when META.pwv_med is missing or non-positive.
@@ -2104,8 +2141,42 @@ def decomp_variant_for_suffix(suffix):
     return None
 
 
+# Markers of the telluric / PALACE fit-model family.  None of them occurs in a
+# legacy non-telluric suffix (`_lsf_surface_iterative_split_zodi`, ...), so an
+# unregistered suffix carrying one is a NEW telluric variant this module does
+# not know -- and treating it as legacy would silently build the non-telluric
+# basis with the canonical OH file.
+_TELLURIC_FAMILY_MARKERS = ('palace', 'telluric', 'spline2d')
+
+
+def decomp_variant_spec(suffix):
+    """``DECOMP_VARIANTS`` entry for a suffix, or None for a legacy non-telluric one.
+
+    Raises for an unregistered suffix from the telluric family instead of
+    returning None: that is how a new fit model would otherwise be reconstructed
+    on the wrong basis without any error.
+    """
+    _name = decomp_variant_for_suffix(suffix)
+    if _name is not None:
+        return DECOMP_VARIANTS[_name]
+    _s = str(suffix or '').lower()
+    if any(_m in _s for _m in _TELLURIC_FAMILY_MARKERS):
+        raise ValueError(
+            f'decomposition suffix {suffix!r} looks like a telluric fit model '
+            f'but is not registered in data.DECOMP_VARIANTS '
+            f'({sorted(v["suffix"] for v in DECOMP_VARIANTS.values())}); add it, '
+            f'with its palace_oh_suffix, before reconstructing from it')
+    return None
+
+
+def palace_oh_suffix_for(decomp_suffix):
+    """The OH line-file suffix a decomposition was fitted with (None = canonical)."""
+    _spec = decomp_variant_spec(decomp_suffix)
+    return None if _spec is None else _spec.get('palace_oh_suffix')
+
+
 def telluric_row_kwargs(meta, row_index, kind, wave, lsf_row,
-                        telluric_calculator=None):
+                        telluric_calculator=None, palace_oh_suffix=None):
     """Per-row telluric constructor kwargs, mirroring decompose_parallel.
 
     Reproduces `_telluric_decomposer_for_row` exactly, because a reconstruction
@@ -2119,6 +2190,10 @@ def telluric_row_kwargs(meta, row_index, kind, wave, lsf_row,
       lines themselves; for a sky arm it is selected by the sky_near/far LABEL,
       not by the column name, because the near/far assignment flips per
       exposure.
+    * `palace_oh_suffix` is the variant's OH line file (`palace_oh_suffix_for`).
+      It rides in the bundle so that every decomposer built from it gets the
+      OH templates the row was fitted with; `make_reconstruction_decomposer`
+      pops it back out.
     """
     if telluric_calculator is None:
         telluric_calculator = default_telluric_calculator()
@@ -2150,7 +2225,8 @@ def telluric_row_kwargs(meta, row_index, kind, wave, lsf_row,
         np.asarray(wave, dtype=np.float64), _lsf[None, :], _pwv, _sci_am,
         telluric_calculator), dtype=np.float64).ravel()
     return {'telluric_calculator': telluric_calculator, 'pwv_mm': _pwv,
-            'source_airmass': _src_am, 'drp_transmission': _trans}
+            'source_airmass': _src_am, 'drp_transmission': _trans,
+            'palace_oh_suffix': palace_oh_suffix}
 
 
 def telluric_representative_row(input_fits_path):
@@ -2174,7 +2250,8 @@ def telluric_representative_row(input_fits_path):
     return int(_ok[np.argsort(_am[_ok])[_ok.size // 2]])
 
 
-def make_telluric_row_lookup(input_fits_path, wave=None, verbose=True):
+def make_telluric_row_lookup(input_fits_path, wave=None, verbose=True, *,
+                             decomp_suffix):
     """Return ``f(kind, row) -> telluric kwargs`` bound to one input stack.
 
     `kind` is 'sci' / 'sky1' / 'sky2' (or 'near' / 'far'), `row` is a row index
@@ -2189,9 +2266,18 @@ def make_telluric_row_lookup(input_fits_path, wave=None, verbose=True):
     columns.  Both corpora are built from the same input stack, so `pwv_med` and
     the per-arm airmasses are present either way and cannot discriminate.
     Missing columns therefore raise here rather than silently degrading.
+
+    `decomp_suffix` is REQUIRED: it selects the OH line file that every bundle
+    this lookup returns carries (`palace_oh_suffix_for`), so the telluric
+    variants cannot be reconstructed on each other's OH templates.
     """
     from astropy.io import fits as _fits
     from astropy.table import Table as _Table
+    _spec = decomp_variant_spec(decomp_suffix)
+    if _spec is None or not _spec['telluric']:
+        raise ValueError(f'make_telluric_row_lookup: {decomp_suffix!r} is not a '
+                         f'telluric decomposition suffix')
+    _oh_suffix = _spec.get('palace_oh_suffix')
     _need = {'pwv_med', 'sci_airmass', 'skye_airmass', 'skyw_airmass',
              'sky_near_label', 'sky_far_label'}
     _lsf_ext = {'sci': 'LSF_SCI', 'sky1': 'LSF_SKY_NEAR', 'near': 'LSF_SKY_NEAR',
@@ -2222,13 +2308,14 @@ def make_telluric_row_lookup(input_fits_path, wave=None, verbose=True):
                                f'{input_fits_path}')
             _cache[_key] = telluric_row_kwargs(
                 _meta, int(row), str(kind), _w, _plane[int(row)],
-                telluric_calculator=_calc)
+                telluric_calculator=_calc, palace_oh_suffix=_oh_suffix)
         return _cache[_key]
 
     if verbose:
         print(f'  [telluric] per-row reconstruction enabled from '
               f'{input_fits_path} ({len(_meta)} rows, '
-              f'{sum(1 for _ in _lsf)} LSF planes)')
+              f'{sum(1 for _ in _lsf)} LSF planes, OH file '
+              f'pmd_popmodel_OH{_oh_suffix or ""}.dat)')
     return _lookup
 
 
@@ -2255,6 +2342,17 @@ def make_reconstruction_decomposer(wave, *, n_spline_knots, base_dir,
     """
     from sky_decomp.lsf_surface_iterative import (
         LSFSurfaceIterativeConfig, SkyDecompLSFSurfaceIterative)
+    if telluric:
+        # The bundle names the OH file the row was fitted with.  An explicit
+        # argument may agree with it but never silently override it.
+        telluric = dict(telluric)
+        _tel_oh = telluric.pop('palace_oh_suffix', None)
+        if (palace_oh_suffix is not None and _tel_oh is not None
+                and palace_oh_suffix != _tel_oh):
+            raise ValueError(
+                f'palace_oh_suffix={palace_oh_suffix!r} disagrees with the '
+                f'telluric bundle\'s {_tel_oh!r}')
+        palace_oh_suffix = palace_oh_suffix if palace_oh_suffix is not None else _tel_oh
     _common = dict(lsf_sigma=lsf_sigma, n_spline_knots=int(n_spline_knots),
                    base_dir=base_dir, palace_oh_suffix=palace_oh_suffix,
                    palace_diffuse_suffix=palace_diffuse_suffix,
@@ -2306,9 +2404,8 @@ def make_corpus_basis_decomposer(wave_ref, *, input_fits_for_basis, decomp_suffi
     _lsf_ext = {'sci': 'LSF_SCI', 'sky1': 'LSF_SKY_NEAR', 'near': 'LSF_SKY_NEAR',
                 'sky2': 'LSF_SKY_FAR', 'far': 'LSF_SKY_FAR'}[str(kind)]
 
-    _variant = decomp_variant_for_suffix(str(decomp_suffix or ''))
-    _is_telluric = bool(_variant is not None
-                        and DECOMP_VARIANTS[_variant]['telluric'])
+    _spec = decomp_variant_spec(decomp_suffix)
+    _is_telluric = bool(_spec is not None and _spec['telluric'])
 
     with _fits.open(str(input_fits_for_basis), memmap=False) as _h:
         _meta = _Table(_h['META'].data)
@@ -2320,7 +2417,8 @@ def make_corpus_basis_decomposer(wave_ref, *, input_fits_for_basis, decomp_suffi
     if _is_telluric:
         _rep = telluric_representative_row(input_fits_for_basis)
         _tel = telluric_row_kwargs(_meta, _rep, str(kind), wave_ref,
-                                   _lsf_plane[_rep])
+                                   _lsf_plane[_rep],
+                                   palace_oh_suffix=_spec.get('palace_oh_suffix'))
         _am = float(np.asarray(_meta['sci_airmass'], dtype=np.float64)[_rep])
         _note = (f'telluric basis from representative row {_rep}, '
                  f'sci_airmass {_am:.3f}, pwv {_tel["pwv_mm"]:g} mm')
@@ -2970,6 +3068,11 @@ def _augment_triplet_with_moon_model(triplet, corpus_prefix, force=False,
     cache = (_mmc.load_or_build(corpus_prefix, n_workers=n_workers,
                                 verbose=verbose)
              if build_if_missing else _mmc.load(corpus_prefix))
+    # Carried to the trained artifact so the inference path computes
+    # zodi_po / moon_frac_po under the same Leinert correction the targets were
+    # anchored with (load() has already refused a mismatched cache).
+    triplet['zodi_correction'] = (str(cache['zodi_correction'])
+                                  if 'zodi_correction' in cache else 'none')
     row_index = np.asarray(triplet['row_index'], dtype=np.int64)
     n_cache = int(cache['n_rows'])
     if row_index.size and (row_index.min() < 0 or row_index.max() >= n_cache):
@@ -3972,7 +4075,14 @@ def _leinert_zodi_log10_v(helio_lon_deg, beta_deg):
 def _sun_ecliptic_longitude_deg(obstime_mjd):
     _t = Time(np.asarray(obstime_mjd, dtype=np.float64),
               format='mjd', scale='utc')
-    _sun = get_sun(_t).transform_to(BarycentricMeanEcliptic())
+    # GEOCENTRIC: the zodi geometry is the Sun as seen from the Earth.  In
+    # BarycentricMeanEcliptic (used until 2026-09-24) the Sun sits almost at
+    # the origin and its "longitude" is meaningless, which scrambled the
+    # helio-relative longitude behind `zodi_log10_v`.  GeocentricMeanEcliptic
+    # has the same J2000 mean-ecliptic orientation as the pointings'
+    # BarycentricMeanEcliptic coordinates (identical for directions at
+    # infinity), so the longitude DIFFERENCE is consistent.
+    _sun = get_sun(_t).transform_to(GeocentricMeanEcliptic())
     return np.asarray(_sun.lon.degree, dtype=np.float64)
 
 

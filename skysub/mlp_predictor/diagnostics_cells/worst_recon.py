@@ -163,7 +163,8 @@ EVERY10_SCI = _src.get("source_sci", f"{_e10_stem}_decomp_sci{_e10_suffix}.fits"
 print(f"  worst-recon reads {Path(EVERY10_INPUT).name} "
       f"(the file the batch-RMSE row indices belong to)")
 if globals().get('TELLURIC_ROW_FOR') is not None:
-    _telluric_for = make_telluric_row_lookup(EVERY10_INPUT, verbose=False)
+    _telluric_for = make_telluric_row_lookup(EVERY10_INPUT, verbose=False,
+                                             decomp_suffix=_DECOMP_SUFFIX)
 # LSF cubes once per arm: load_lsf_state_if_available re-reads LSF_COEF +
 # LSF_KNOTS + LSF_META (~80 MB on a corpus file) on every call, and this cell
 # makes three per plotted row.

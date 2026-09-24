@@ -54,13 +54,22 @@ def _angular_separation_deg(ra1, dec1, ra2, dec2):
 
 
 def _compute_moon_phase_deg(obstime_mjd: np.ndarray) -> np.ndarray:
-    """Return per-row moon phase in degrees (0 = new moon, 180 = full moon).
+    """Per-row moon phase in degrees, in the convention of META ``MOON_PHASE``.
 
-    Matches the convention of the ``MOON_PHASE`` META column consumed by the
-    training pipeline: the encoded angle folds through ``moon_fli =
-    (1 - cos(phase))/2``, so ``phase = 180 - elongation_from_sun``.
+    0 = new, 90 = first quarter, 180 = full, 270 = last quarter: the lunar
+    elongation from the Sun while waxing (Moon east of the Sun), 360 minus it
+    while waning.  ``moon_fli = (1 - cos(phase)) / 2`` then holds, and so do the
+    ``moon_phase_sin`` / ``moon_phase_cos`` features the ensemble was trained on.
+
+    Until 2026-09-24 this returned ``180 - elongation`` on [0, 180]: INVERTED
+    (0 = full moon) and UNSIGNED (waxing and waning indistinguishable), so any
+    caller that did not pass ``moon_phase_deg`` -- including the example
+    notebook -- fed the model moon_fli and moon_phase_cos flipped relative to
+    training.  Checked against the 1.3.2 corpus META on 2000 rows: median
+    |diff| 0.003 deg, p99 0.005 deg (one row near new moon flips sign, where
+    the waxing/waning call is a few degrees from ambiguous).
     """
-    from astropy.coordinates import get_body, get_sun
+    from astropy.coordinates import GeocentricTrueEcliptic, get_body, get_sun
     from astropy.time import Time
     import astropy.units as u
 
@@ -69,7 +78,10 @@ def _compute_moon_phase_deg(obstime_mjd: np.ndarray) -> np.ndarray:
     sun = get_sun(time)
     moon = get_body("moon", time, location=lco)
     elong_deg = moon.separation(sun).to_value(u.deg)
-    return (180.0 - elong_deg).astype(np.float64)
+    ecl = GeocentricTrueEcliptic(equinox=time)
+    east = (((moon.transform_to(ecl).lon.deg - sun.transform_to(ecl).lon.deg)
+             + 180.0) % 360.0 - 180.0) > 0.0
+    return np.where(east, elong_deg, 360.0 - elong_deg).astype(np.float64)
 
 
 def build_triplet_from_pointings(
@@ -210,7 +222,7 @@ def build_triplet_from_pointings(
 # one `geometry_amplitude_prior` per arm per row.
 def _moon_model_augment_direct(triplet, *, wave, lsf_near, lsf_far, lsf_sci,
                                date_obs, expnum=None, exposure_seconds=900.0,
-                               verbose=True):
+                               verbose=True, zodi_correction="none"):
     """Append the three moon/zodi-model ctx features, computed per row.
 
     Mirrors `data._augment_triplet_with_moon_model` exactly: one shared
@@ -266,7 +278,8 @@ def _moon_model_augment_direct(triplet, *, wave, lsf_near, lsf_far, lsf_sci,
                 pass
             try:
                 _f, _z, _ = geometry_amplitude_prior(
-                    _wave, _l, obs, physical_to_fit_flux_scale=_FIT_FLUX_SCALE)
+                    _wave, _l, obs, physical_to_fit_flux_scale=_FIT_FLUX_SCALE,
+                    zodi_correction=zodi_correction)
                 zp[i] = float(_z); fp[i] = float(_f)
             except Exception:
                 pass
@@ -536,7 +549,9 @@ def predict_sky_from_minimal_inputs(
         _lsf_near, _lsf_far = _swap(lsf_e, lsf_w)
         _mm_inputs = dict(wave=wave, lsf_near=_lsf_near, lsf_far=_lsf_far,
                           lsf_sci=lsf_sci, date_obs=date_obs, expnum=expnum,
-                          exposure_seconds=exposure_seconds)
+                          exposure_seconds=exposure_seconds,
+                          # the correction the ensemble's targets were anchored with
+                          zodi_correction=str(ensemble.get("zodi_correction", "none")))
 
     triplet = build_triplet_from_pointings(
         obstime_mjd=obstime_mjd_arr,

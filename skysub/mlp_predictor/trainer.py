@@ -79,6 +79,7 @@ from astropy.io import fits
 
 from sky_decomp.lsf_surface_iterative import SkyDecompLSFSurfaceIterative
 
+from . import data as _data_mod
 from .compressor import (
     compress_coef_err_to_score_sigma,
     compress_coefs_to_scores,
@@ -1767,6 +1768,8 @@ def train_compressed_group_mlp(
         'train_idx': train_idx, 'val_idx': val_idx, 'test_idx': test_idx,
         'coef_names': [str(x) for x in filtered['coef_names']],
         'ctx_names': [str(x) for x in filtered['ctx_names']],
+        'zodi_correction': str(filtered.get('zodi_correction', 'none')),
+        'ctx_geometry_version': int(_data_mod.CTX_GEOMETRY_VERSION),
         'moon_down_amp_rule': _moon_down_rule,
         'zodi_ceiling_rule': _zodi_ceiling,
         'config': {
@@ -2664,6 +2667,8 @@ class Trainer:
             "n_input_score": first["n_input_score"],
             "coef_names": first["coef_names"],
             "ctx_names": first["ctx_names"],
+            "zodi_correction": first.get("zodi_correction", "none"),
+            "ctx_geometry_version": int(first.get("ctx_geometry_version", 1)),
             "train_idx": first["train_idx"],
             "val_idx": first["val_idx"],
             "test_idx": first["test_idx"],

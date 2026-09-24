@@ -401,7 +401,7 @@ def test_batch_run_restores_row_order_and_writes_three_outputs(monkeypatch, tmp_
     monkeypatch.setattr(
         decompose_parallel,
         "results_to_fits",
-        lambda results, path, extra_meta=None: written.append(
+        lambda results, path, extra_meta=None, primary_meta=None: written.append(
             (results, path.name, extra_meta)),
     )
 

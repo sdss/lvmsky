@@ -102,6 +102,14 @@ def save_ensemble(ensemble_artifacts: Mapping[str, Any], out_path: str | Path) -
         # only whether each rule was ENABLED, which is not enough to apply it.
         "moon_down_amp_rule": first.get("moon_down_amp_rule"),
         "zodi_ceiling_rule":  first.get("zodi_ceiling_rule"),
+        # Leinert zodi correction the training targets were anchored with.
+        # Inference must compute zodi_po / moon_frac_po under the same one, or
+        # the zodi-ceiling rule is applied against the wrong scale.  Optional:
+        # files written before 2026-09-24 were all uncorrected ("none").
+        "zodi_correction": str(ensemble_artifacts.get("zodi_correction", "none")),
+        # Context-geometry version the model was trained on; see
+        # mlp_predictor.data.CTX_GEOMETRY_VERSION.  Files without it are v1.
+        "ctx_geometry_version": int(ensemble_artifacts.get("ctx_geometry_version", 1)),
         # Per-member training history (2026-09-23), for `diag.training_history()`
         # and any later post-hoc comparison of runs.
         #
@@ -216,6 +224,17 @@ def load_ensemble(path: str | Path, *, device: str | None = None,
 
     cfg = dict(payload["config"])
     ctx_names = list(payload["ctx_names"])
+    from .data import CTX_GEOMETRY_VERSION as _CGV
+    _geo_v = int(payload.get("ctx_geometry_version", 1))
+    if _geo_v != _CGV:
+        print(f"[load_ensemble] WARNING: this ensemble was trained on context "
+              f"geometry v{_geo_v}, but the code now computes v{_CGV}. "
+              + ("v1 had sun_sep / moon_sep as ICRS separations (the Sun and Moon "
+                 "placed at the solar-system barycentre: moon_sep was really "
+                 "180 - solar elongation) and a barycentric Sun longitude behind "
+                 "zodi_log10_v. " if _geo_v == 1 else "")
+              + "Its predictions will differ from the ones it was validated "
+              "with, because it is now fed features it never saw. Retrain.")
     group_score_dims = dict(payload["group_score_dims"])
     n_input_score = int(payload["n_input_score"])
 
@@ -272,6 +291,7 @@ def load_ensemble(path: str | Path, *, device: str | None = None,
             "jensen_corrections": _member_jc[_i_member],
             "moon_down_amp_rule": payload.get("moon_down_amp_rule"),
             "zodi_ceiling_rule":  payload.get("zodi_ceiling_rule"),
+            "zodi_correction": str(payload.get("zodi_correction", "none")),
             "coef_upper_bound":   payload["coef_upper_bound"],
             "geom_kwargs":  payload["geom_kwargs"],
             "group_indices":    payload["group_indices"],
@@ -310,6 +330,8 @@ def load_ensemble(path: str | Path, *, device: str | None = None,
         # session or restored from disk.
         "best_epochs": _best_ep,
         "best_val_losses": _best_vl,
+        "zodi_correction": str(payload.get("zodi_correction", "none")),
+        "ctx_geometry_version": _geo_v,
     }
 
 

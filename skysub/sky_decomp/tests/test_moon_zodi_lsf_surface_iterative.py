@@ -488,6 +488,8 @@ def test_palacecorr_suffix_and_primary_provenance_are_explicit():
         "DECOMPM": fit_model,
         "OHFILE": f"pmd_popmodel_OH{suffix}.dat",
         "OHRIDGE": SKYFAR_LINEAR_RIDGE_LAMBDA,
+        "ZODICORR": (decompose_parallel.SPLIT_ZODI_ZODI_CORRECTION,
+                     "Leinert zodi correction used by the anchor"),
     }
     with pytest.raises(ValueError, match="palacecorr requires"):
         decompose_parallel._resolved_palace_oh_suffix(fit_model, "_other")
