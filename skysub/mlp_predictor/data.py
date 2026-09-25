@@ -2250,6 +2250,91 @@ def telluric_representative_row(input_fits_path):
     return int(_ok[np.argsort(_am[_ok])[_ok.size // 2]])
 
 
+# --- Science emission-line mask, as the decomposition applied it -------------
+# decompose_parallel zeroes the fit weight in windows around the science
+# field's nebular lines (Halpha, [NII], [SII], [OIII], ...), each window
+# centred on the row's measured Halpha velocity.  Those pixels carry the
+# TARGET's emission, not sky: neither the prediction nor the decomposition
+# models them, so on HII-region rows they dominate any residual statistic
+# (~3450 per pixel at Halpha on one row) without saying anything about the
+# sky model.  Diagnostics that score sky residuals must drop the same pixels.
+_SCIENCE_MASK_REFERENCE_FWHM = {}
+
+
+def _decompose_parallel_module():
+    try:
+        from skysub import decompose_parallel as _dp
+    except ImportError:
+        import decompose_parallel as _dp
+    return _dp
+
+
+def science_mask_reference_fwhm(input_fits_path, wave):
+    """The LSF FWHM reference the decomposition sized its mask windows with.
+
+    `decompose_parallel._science_mask_lsf_reference` takes the median over ALL
+    rows of the decomposed stack, per arm, then across the three arms.  An
+    ``*_every10`` stack was never decomposed itself -- its products are
+    thinned from the full run -- so its parent stack is used when present.
+    Cached per path; the LSF planes are read only inside the line windows.
+    """
+    import re as _re
+    path = str(input_fits_path)
+    parent = _re.sub(r"_every\d+(\.fits)$", r"\1", path)
+    if parent != path and Path(parent).exists():
+        path = parent
+    if path in _SCIENCE_MASK_REFERENCE_FWHM:
+        return _SCIENCE_MASK_REFERENCE_FWHM[path]
+    _dp = _decompose_parallel_module()
+    wave = np.asarray(wave, dtype=np.float64)
+    with fits.open(path, memmap=True) as _h:
+        _w = np.asarray(_h["WAVE"].data, dtype=np.float64)
+        _w = _w if _w.ndim == 1 else _w[0]
+        if _w.shape != wave.shape or not np.allclose(_w, wave, rtol=0, atol=1e-6):
+            raise ValueError(f"{path} is on a different wavelength grid")
+        use = np.zeros(wave.size, dtype=bool)
+        for _, lam in _dp.SCIENCE_EMISSION_LINES:
+            use |= np.abs(wave - float(lam)) <= 25.0
+        cols = np.flatnonzero(use)
+        # Contiguous column blocks, so the memmap reads only what it needs.
+        blocks = np.split(cols, np.flatnonzero(np.diff(cols) > 1) + 1)
+        lsf = {}
+        for role, ext in (("sci", "LSF_SCI"), ("sky1", "LSF_SKY_NEAR"),
+                          ("sky2", "LSF_SKY_FAR")):
+            plane = np.full((_h[ext].shape[0], wave.size), np.nan)
+            for b in blocks:
+                plane[:, b[0]:b[-1] + 1] = np.asarray(
+                    _h[ext].data[:, b[0]:b[-1] + 1], dtype=np.float64)
+            lsf[role] = plane
+    ref = _dp._science_mask_lsf_reference(wave, lsf)
+    _SCIENCE_MASK_REFERENCE_FWHM[path] = ref
+    return ref
+
+
+def science_line_mask_rows(input_fits_path, wave, flux_sci, flux_sky):
+    """Per-row science-line mask, True where decompose_parallel zeroed the fit.
+
+    ``flux_sci`` / ``flux_sky`` are the rows' science and near-arm spectra (any
+    common scale: the velocity estimate is scale-free), shape (n, n_wave) or
+    (n_wave,).  Reproduces `decompose_parallel._science_line_mask_for_row`:
+    windows sized from the stack's reference FWHM, centred on the measured
+    Halpha velocity, or at rest when the line is not measurable.
+    """
+    _dp = _decompose_parallel_module()
+    wave = np.asarray(wave, dtype=np.float64)
+    sci = np.atleast_2d(np.asarray(flux_sci, dtype=np.float64))
+    sky = np.atleast_2d(np.asarray(flux_sky, dtype=np.float64))
+    ref = science_mask_reference_fwhm(input_fits_path, wave)
+    static, _ = _dp.science_line_mask(wave, ref)
+    out = np.empty(sci.shape, dtype=bool)
+    for i in range(sci.shape[0]):
+        v = (_dp.measure_halpha_velocity(wave, sci[i], sky[i])
+             if _dp.SCIENCE_LINE_MASK_CENTRE_ON_HALPHA else 0.0)
+        out[i] = static if v == 0.0 else _dp.science_line_mask(
+            wave, ref, centre_velocity_km_s=v)[0]
+    return out if np.ndim(flux_sci) > 1 else out[0]
+
+
 def make_telluric_row_lookup(input_fits_path, wave=None, verbose=True, *,
                              decomp_suffix):
     """Return ``f(kind, row) -> telluric kwargs`` bound to one input stack.

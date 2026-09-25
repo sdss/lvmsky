@@ -464,6 +464,57 @@ def _reflected_lunar_velocity_kms(obstime: Time) -> float:
     return float(incoming + outgoing)
 
 
+@lru_cache(maxsize=8)
+def _midpoint_body_geometry(
+    date_obs: str, exposure_seconds: float, data_dir: str
+) -> dict[str, object]:
+    """Sun and Moon at the exposure midpoint -- everything that is not the target.
+
+    The three arms of one exposure share a midpoint, so `moon_model_cache`
+    asks for the same ephemeris three (and, with the physics-only pass, six)
+    times.  Cached on (date_obs, exposure_seconds, data_dir); the computation
+    is exactly the one `compute_midpoint_geometry` used to do inline.
+    """
+    root = Path(data_dir)
+    obstime = Time(date_obs, scale="utc") + TimeDelta(
+        0.5 * exposure_seconds,
+        format="sec",
+    )
+    altaz = AltAz(obstime=obstime, location=LCO, pressure=0 * u.hPa)
+    with solar_system_ephemeris.set(str(root / EPHEMERIS_ASSET)):
+        moon = get_body("moon", obstime, LCO)
+        sun = get_body("sun", obstime, LCO)
+        moon_geocentric = get_body("moon", obstime)
+        sun_geocentric = get_body("sun", obstime)
+        moon_altitude = float(moon.transform_to(altaz).alt.deg)
+        sun_altitude = float(sun.transform_to(altaz).alt.deg)
+        elongation = float(moon_geocentric.separation(sun_geocentric).deg)
+        phase_abs = 180.0 - elongation
+        ecliptic = GeocentricTrueEcliptic(equinox=obstime)
+        sun_ecliptic = sun_geocentric.transform_to(ecliptic)
+        moon_ecliptic = moon_geocentric.transform_to(ecliptic)
+        moon_relative_longitude = float(
+            (moon_ecliptic.lon - sun_ecliptic.lon).wrap_at(180 * u.deg).to_value(u.deg)
+        )
+        signed_phase = float(np.sign(moon_relative_longitude) * phase_abs)
+        sun_position, _ = get_body_barycentric_posvel("sun", obstime)
+        moon_position, _ = get_body_barycentric_posvel("moon", obstime)
+        sun_moon_distance = float(
+            np.linalg.norm(_cartesian_km(sun_position) - _cartesian_km(moon_position))
+        )
+        moon_velocity = _reflected_lunar_velocity_kms(obstime)
+    return {
+        "moon": moon,
+        "sun": sun,
+        "moon_altitude": moon_altitude,
+        "sun_altitude": sun_altitude,
+        "signed_phase": signed_phase,
+        "sun_ecliptic_lon": sun_ecliptic.lon,
+        "sun_moon_distance": sun_moon_distance,
+        "moon_velocity": moon_velocity,
+    }
+
+
 def compute_midpoint_geometry(
     observation: MoonZodiObservation,
     *,
@@ -513,37 +564,27 @@ def compute_midpoint_geometry(
             geometry=geometry,
         )
 
+    _bodies = _midpoint_body_geometry if _MEMOISE else _midpoint_body_geometry.__wrapped__
+    bodies = _bodies(
+        observation.date_obs, float(observation.exposure_seconds), str(root)
+    )
+    moon, sun = bodies["moon"], bodies["sun"]
+    moon_altitude = bodies["moon_altitude"]
+    sun_altitude = bodies["sun_altitude"]
+    signed_phase = bodies["signed_phase"]
+    sun_moon_distance = bodies["sun_moon_distance"]
+    moon_velocity = bodies["moon_velocity"]
     with solar_system_ephemeris.set(str(root / EPHEMERIS_ASSET)):
-        moon = get_body("moon", obstime, LCO)
-        sun = get_body("sun", obstime, LCO)
-        moon_geocentric = get_body("moon", obstime)
-        sun_geocentric = get_body("sun", obstime)
         target_topocentric = target.transform_to(moon.frame)
-        moon_altitude = float(moon.transform_to(altaz).alt.deg)
-        sun_altitude = float(sun.transform_to(altaz).alt.deg)
         moon_separation = float(target_topocentric.separation(moon).deg)
-        elongation = float(moon_geocentric.separation(sun_geocentric).deg)
-        phase_abs = 180.0 - elongation
-
         ecliptic = GeocentricTrueEcliptic(equinox=obstime)
         target_ecliptic = target.transform_to(ecliptic)
-        sun_ecliptic = sun_geocentric.transform_to(ecliptic)
-        moon_ecliptic = moon_geocentric.transform_to(ecliptic)
         relative_longitude = float(
-            (target_ecliptic.lon - sun_ecliptic.lon).wrap_at(180 * u.deg).to_value(u.deg)
+            (target_ecliptic.lon - bodies["sun_ecliptic_lon"])
+            .wrap_at(180 * u.deg).to_value(u.deg)
         )
-        moon_relative_longitude = float(
-            (moon_ecliptic.lon - sun_ecliptic.lon).wrap_at(180 * u.deg).to_value(u.deg)
-        )
-        signed_phase = float(np.sign(moon_relative_longitude) * phase_abs)
         ecliptic_latitude = float(target_ecliptic.lat.to_value(u.deg))
         solar_elongation = float(target_topocentric.separation(sun).deg)
-        sun_position, _ = get_body_barycentric_posvel("sun", obstime)
-        moon_position, _ = get_body_barycentric_posvel("moon", obstime)
-        sun_moon_distance = float(
-            np.linalg.norm(_cartesian_km(sun_position) - _cartesian_km(moon_position))
-        )
-        moon_velocity = _reflected_lunar_velocity_kms(obstime)
 
     zodi_velocity = float(
         zodi_velocity_amplitude_kms
@@ -665,6 +706,83 @@ def build_projection_operator(
     return wave_detector_vacuum, indices.astype(np.int32), weights
 
 
+# --- Opt-in memoisation for repeated evaluations ------------------------------
+# `moon_model_cache` evaluates every arm twice (the fitted model and the
+# physics-only variant used by `geometry_amplitude_prior`) and all three arms
+# of an exposure share one midpoint.  The two most expensive pure steps, the
+# LSF projection operator (~0.11 s) and the astropy ephemeris (~0.03 s), depend
+# only on those inputs, so with memoisation on they are computed once.  Keys
+# are content digests, never object identities, and cached arrays are
+# read-only.  It is OFF by default: a process-wide cache would outlive any
+# change to module state (a monkeypatched Leinert lookup, say), so only a
+# caller whose inputs are fixed -- the cache builder's worker processes --
+# should turn it on.
+_MEMOISE = False
+
+
+def set_memoisation(enabled: bool) -> None:
+    """Turn the per-process evaluation caches on or off (and empty them)."""
+    global _MEMOISE
+    _MEMOISE = bool(enabled)
+    _PROJECTION_CACHE.clear()
+    _cached_midpoint_geometry.cache_clear()
+    _midpoint_body_geometry.cache_clear()
+
+
+_PROJECTION_CACHE_SIZE = 4
+_PROJECTION_CACHE: "dict[tuple, tuple]" = {}
+
+
+def _array_digest(values: np.ndarray) -> bytes:
+    array = np.ascontiguousarray(values, dtype=np.float64)
+    return sha256(array.tobytes()).digest() + repr(array.shape).encode()
+
+
+def _cached_projection(
+    wave_detector_air: np.ndarray,
+    lsf_fwhm_air: np.ndarray,
+    wave_hr_vacuum: np.ndarray,
+    wave_hr_key: bytes,
+):
+    """`build_projection_operator` plus its CSR form, memoised on content."""
+    key = (wave_hr_key, _array_digest(wave_detector_air), _array_digest(lsf_fwhm_air))
+    hit = _PROJECTION_CACHE.get(key)
+    if hit is not None:
+        return hit
+    from scipy import sparse
+
+    _, indices, weights = build_projection_operator(
+        wave_detector_air, lsf_fwhm_air, wave_hr_vacuum
+    )
+    n_rows, stencil = indices.shape
+    # Duplicate column indices (clipped at the grid edges) are summed by CSR,
+    # exactly as the gather-and-sum formulation did.
+    operator = sparse.csr_matrix(
+        (weights.ravel(), indices.ravel().astype(np.int64),
+         np.arange(0, n_rows * stencil + 1, stencil, dtype=np.int64)),
+        shape=(n_rows, wave_hr_vacuum.size),
+    )
+    for array in (indices, weights):
+        array.setflags(write=False)
+    hit = (indices, weights, operator)
+    if len(_PROJECTION_CACHE) >= _PROJECTION_CACHE_SIZE:
+        _PROJECTION_CACHE.pop(next(iter(_PROJECTION_CACHE)))
+    _PROJECTION_CACHE[key] = hit
+    return hit
+
+
+@lru_cache(maxsize=16)
+def _cached_midpoint_geometry(
+    observation: "MoonZodiObservation", data_dir: str
+) -> "MoonZodiGeometry":
+    """`compute_midpoint_geometry`, memoised on the (frozen) observation.
+
+    Rejections are not cached: the exception propagates and the next call
+    recomputes, which only costs time on rows that are refused anyway.
+    """
+    return compute_midpoint_geometry(observation, data_dir=data_dir)
+
+
 def _rolo_albedo(
     wave_vacuum_angstrom: np.ndarray,
     signed_phase_deg: float,
@@ -758,6 +876,10 @@ class MoonZodiPhysicalModel:
             [item["value"] for item in parameters],
             dtype=np.float64,
         )
+        # Pointing-independent high-resolution arrays, computed on first use.
+        self._zodi_broadened: np.ndarray | None = None
+        self._tau_rayleigh: np.ndarray | None = None
+        self._wave_hr_key: bytes | None = None
 
     def validate_wave(self, wave: np.ndarray) -> None:
         value = np.asarray(wave)
@@ -825,18 +947,24 @@ class MoonZodiPhysicalModel:
             raise ValueError("physical_to_fit_flux_scale must be positive and finite")
 
         started = time.perf_counter()
-        geometry = compute_midpoint_geometry(observation, data_dir=self.data_dir)
+        geometry = (
+            _cached_midpoint_geometry(observation, str(self.data_dir))
+            if _MEMOISE
+            else compute_midpoint_geometry(observation, data_dir=self.data_dir)
+        )
         moon_solar = _shift_spectrum(
             self.wave_hr,
             self.solar_flux,
             geometry.moon_velocity_kms,
         )
-        zodi_broadened = gaussian_filter1d(
-            self.solar_flux,
-            sigma=30.0 / self.dv_kms,
-            mode="nearest",
-            truncate=5.0,
-        )
+        if self._zodi_broadened is None:
+            self._zodi_broadened = gaussian_filter1d(
+                self.solar_flux,
+                sigma=30.0 / self.dv_kms,
+                mode="nearest",
+                truncate=5.0,
+            )
+        zodi_broadened = self._zodi_broadened
         zodi_solar = _shift_spectrum(
             self.wave_hr,
             zodi_broadened,
@@ -848,12 +976,22 @@ class MoonZodiPhysicalModel:
             self.rolo_constants,
             self.rolo_coefficients,
         )
-        tau_rayleigh = _rayleigh_optical_depth(self.wave_hr)
-        _, projection_indices, projection_weights = build_projection_operator(
-            wave,
-            lsf,
-            self.wave_hr,
-        )
+        if self._tau_rayleigh is None:
+            self._tau_rayleigh = _rayleigh_optical_depth(self.wave_hr)
+        tau_rayleigh = self._tau_rayleigh
+        if _MEMOISE:
+            if self._wave_hr_key is None:
+                self._wave_hr_key = _array_digest(self.wave_hr)
+            _, _, projection_operator = _cached_projection(
+                wave, lsf, self.wave_hr, self._wave_hr_key
+            )
+        else:
+            projection_operator = None
+            _, projection_indices, projection_weights = build_projection_operator(
+                wave,
+                lsf,
+                self.wave_hr,
+            )
 
         below_horizon = geometry.moon_altitude_deg < 0.0
         moon_airmass_geometry = (
@@ -916,6 +1054,8 @@ class MoonZodiPhysicalModel:
         conversion = fibre_solid_angle_sr * 100.0
 
         def project(values: np.ndarray) -> np.ndarray:
+            if projection_operator is not None:
+                return conversion * (projection_operator @ values)
             return conversion * np.sum(
                 np.take(values, projection_indices) * projection_weights,
                 axis=1,

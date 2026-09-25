@@ -2,8 +2,12 @@
 
 Why a cache exists at all
 -------------------------
-``MoonZodiPhysicalModel.predict`` costs ~0.25 s per arm, so evaluating a whole
-corpus is ~3 h of wall clock for three arms x ~14 500 rows.  That is far too
+``MoonZodiPhysicalModel.predict`` costs ~0.1-0.25 s per arm (the LSF projection
+operator dominates; it and the ephemeris are memoised, so the second, physics-
+only evaluation of an arm is cheap), i.e. ~0.55 s per row for all three arms and
+both variants.  A full corpus is ~25 min on 10 cores -- far too slow to sit
+inside the training loop, and an every10 subsample is sliced from its parent's
+cache (`derive_from_parent`) rather than recomputed.  That is far too
 slow to sit inside the training loop, but the numbers are a pure function of
 (expnum, pointing, LSF) and never change once the decomposition products are
 written -- so they are computed once, in parallel, and stored beside the corpus.
@@ -156,7 +160,11 @@ def _sanitised_lsf(lsf):
 
 
 def _init_worker(stack_path, exposure_seconds, zodi_correction="none"):
-    from sky_decomp.moon_zodi_model import MoonZodiPhysicalModel
+    from sky_decomp.moon_zodi_model import MoonZodiPhysicalModel, set_memoisation
+    # Inputs are fixed for the life of a worker, so the projection operator and
+    # ephemeris can be shared between the fitted and physics-only evaluations
+    # of each arm and across the three arms of an exposure (~2.3x faster).
+    set_memoisation(True)
     hdul = fits.open(str(stack_path), memmap=True)
     wave = np.asarray(hdul["WAVE"].data, dtype=np.float64)
     _W["hdul"] = hdul
@@ -565,8 +573,99 @@ def load(corpus_prefix, expnum=None, require_complete=True):
 
 
 def default_workers():
-    """Worker count for an implicit build: 8, or fewer on a smaller machine."""
-    return max(1, min(8, os.cpu_count() or 1))
+    """Worker count for an implicit build: every core.
+
+    Measured on an M1 Max (8 performance + 2 efficiency cores): 10 workers
+    give 12.7 rows/s against 11.0 for 8, so the efficiency cores still help.
+    """
+    return max(1, os.cpu_count() or 1)
+
+
+def _parent_prefix(corpus_prefix):
+    """The full-corpus prefix an ``*_every<N>`` subsample was thinned from."""
+    import re
+    prefix = str(corpus_prefix)
+    parent = re.sub(r"_every\d+$", "", prefix)
+    return None if parent == prefix else parent
+
+
+def derive_from_parent(corpus_prefix, parent_prefix=None, n_check=4,
+                       rtol=1e-12, verbose=True):
+    """Write a subsample's cache by slicing its parent corpus's cache.
+
+    An every10 stack is a row subset of the full stack -- same exposures, same
+    pointings, same LSF rows -- so its cache entries are exactly the parent's
+    at the matching rows, and recomputing them costs ~3 minutes of CPU for
+    nothing.  Rows are matched on ``expnum`` (unique per row) and the science
+    pointing is checked too.  The parent must load cleanly and carry the same
+    zodi correction the subsample's decomposition was anchored with, and
+    ``n_check`` rows spread over the subsample are RECOMPUTED from its own
+    stack and must agree to ``rtol``; any disagreement raises, so a subsample
+    whose inputs differ from its parent's can never inherit the wrong numbers.
+    """
+    parent_prefix = parent_prefix or _parent_prefix(corpus_prefix)
+    if parent_prefix is None:
+        raise ValueError(f"{corpus_prefix} has no parent corpus prefix")
+    parent = load(parent_prefix)
+    want_zc = decomposition_zodi_correction(corpus_prefix)
+    # Untagged caches predate the tag and were all uncorrected (as in load()).
+    have_zc = str(parent.get("zodi_correction", "none"))
+    if have_zc != want_zc:
+        raise RuntimeError(
+            f"parent cache zodi correction {have_zc!r} != {want_zc!r} for "
+            f"{corpus_prefix}")
+    stack = Path(f"{corpus_prefix}.fits")
+    with fits.open(stack, memmap=True) as hdul:
+        _meta = hdul["META"].data
+        expnum = np.asarray(_meta["expnum"], dtype=np.int64)
+        sci_ra = np.asarray(_meta["sci_ra"], dtype=np.float64)
+        sci_dec = np.asarray(_meta["sci_dec"], dtype=np.float64)
+    p_expnum = np.asarray(parent["expnum"], dtype=np.int64)
+    order = np.argsort(p_expnum)
+    pos = np.searchsorted(p_expnum[order], expnum)
+    pos = np.clip(pos, 0, p_expnum.size - 1)
+    idx = order[pos]
+    if not np.array_equal(p_expnum[idx], expnum):
+        raise RuntimeError(f"{corpus_prefix} has exposures its parent lacks")
+    if not (np.array_equal(np.asarray(parent["sci_ra"])[idx], sci_ra)
+            and np.array_equal(np.asarray(parent["sci_dec"])[idx], sci_dec)):
+        raise RuntimeError(f"{corpus_prefix} pointings differ from its parent's")
+    n_parent = int(parent["n_rows"])
+    payload = {k: (np.asarray(v)[idx]
+                   if np.ndim(v) >= 1 and np.shape(v)[0] == n_parent else v)
+               for k, v in parent.items()}
+    payload["expnum"] = expnum
+    payload["sci_ra"] = sci_ra
+    payload["sci_dec"] = sci_dec
+    payload["n_rows"] = np.array(expnum.size)
+    payload["zodi_correction"] = np.array(want_zc)
+
+    # Spot check: recompute a few rows from the SUBSAMPLE's own stack.
+    check = np.unique(np.linspace(0, expnum.size - 1, max(int(n_check), 1)).astype(int))
+    from sky_decomp import moon_zodi_model as _mzm
+    _was_memoising = _mzm._MEMOISE
+    _init_worker(str(stack), float(parent["exposure_seconds"]), want_zc)
+    try:
+        _, vals, ok, _ = _run_chunk(check)
+    finally:
+        _W["hdul"].close()
+        _W.clear()
+        _mzm.set_memoisation(_was_memoising)   # _init_worker turned it on
+    if not np.array_equal(ok, np.asarray(payload["ok"])[check]):
+        raise RuntimeError("spot check: usable-arm flags differ from the parent's")
+    for key, arr in vals.items():
+        ref = np.asarray(payload[key])[check]
+        fin = np.isfinite(arr)
+        if not np.array_equal(fin, np.isfinite(ref)) or not np.allclose(
+                arr[fin], ref[fin], rtol=rtol, atol=0.0):
+            raise RuntimeError(f"spot check: {key} differs from the parent's")
+    out_path = cache_path(corpus_prefix)
+    np.savez_compressed(out_path, **payload)
+    if verbose:
+        print(f"[moon-model-cache] wrote {out_path} by slicing "
+              f"{cache_path(parent_prefix).name} ({expnum.size} rows, "
+              f"{check.size} rows re-verified)")
+    return out_path
 
 
 def load_or_build(corpus_prefix, n_workers=None, expnum=None, verbose=True,
@@ -581,12 +680,22 @@ def load_or_build(corpus_prefix, n_workers=None, expnum=None, verbose=True,
     find out which is not a reasonable default; the message says what to run.
     """
     path = cache_path(corpus_prefix)
+    parent = _parent_prefix(corpus_prefix)
+    if not path.exists() and parent is not None and cache_path(parent).exists():
+        # A subsample of a corpus that already has its cache: slice it.
+        try:
+            derive_from_parent(corpus_prefix, parent, verbose=verbose)
+        except Exception as exc:
+            if verbose:
+                print(f"  [moon-model-cache] could not derive from {parent} "
+                      f"({type(exc).__name__}: {exc}); building instead.")
     if not path.exists():
         workers = default_workers() if n_workers is None else int(n_workers)
         if verbose:
             print(f"  [moon-model-cache] no cache at {path}; building it now on "
-                  f"{workers} worker(s).  This is a one-off: ~26 min for a full "
-                  f"corpus, ~3 min for an every10 subsample, then free.")
+                  f"{workers} worker(s).  This is a one-off: ~25 min for a "
+                  f"full corpus on 10 cores; an every10 subsample is sliced "
+                  f"from its parent's cache in seconds once that exists.")
         build(corpus_prefix, n_workers=workers, chunk_size=chunk_size,
               overwrite=False, verbose=verbose)
     return load(corpus_prefix, expnum=expnum)

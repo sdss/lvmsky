@@ -11,7 +11,8 @@ from sky_decomp.result_io import (load_lsf_surface_cubes,
 
 from mlp_predictor import cell_parallel as _cell_parallel
 from mlp_predictor.data import (make_reconstruction_decomposer,
-                                make_telluric_row_lookup)
+                                make_telluric_row_lookup,
+                                science_line_mask_rows)
 from sky_decomp.moon_zodi_model import LSF_FWHM_TO_SIGMA
 
 RUN_RMSE_SUBSET_EVAL = True  # Set True to execute this slower evaluation cell.
@@ -244,6 +245,22 @@ else:
     print(f"  observed spectra: {n_use} rows x 3 arms loaded in "
           f"{_time.perf_counter() - _t_load0:.1f} s "
           f"({3 * flux_sci_sel.nbytes / 1e6:.0f} MB)")
+    # The science field's own emission lines, masked exactly as the
+    # decomposition masked them (windows from the stack's reference LSF,
+    # centred on each row's measured Halpha velocity).  They are the TARGET's
+    # light, modelled by neither the prediction nor the decomposition, and on
+    # HII-region rows they would otherwise dominate the chi2 below.
+    _t_mask0 = _time.perf_counter()
+    try:
+        sci_line_mask_sel = science_line_mask_rows(
+            EVAL_INPUT, wave_arr if np.ndim(wave_arr) == 1 else wave_arr[0],
+            flux_sci_sel, flux_near_sel)
+        print(f"  science-line mask: median {int(np.median(sci_line_mask_sel.sum(1)))} px "
+              f"per row excluded from the chi2 ({_time.perf_counter() - _t_mask0:.1f} s)")
+    except Exception as _exc_mask:
+        sci_line_mask_sel = None
+        print(f"  science-line mask unavailable ({type(_exc_mask).__name__}: "
+              f"{_exc_mask}); the chi2 includes the science emission lines.")
 
     # 3) Predict SCI coefficients for the selected rows.
     coef_near_sel = np.asarray(coef_near_all[sel_ft], dtype=np.float64)
@@ -767,8 +784,8 @@ else:
     print(f"Per-row pRMSE / pWRMSE stats in display units (x{FACTOR:.3g}):")
     print(summary_disp_df.to_string(index=False, float_format=lambda v: f"{v:.6g}"))
 
-    # Multi-panel residual figure (2026-08-19): row 1 keeps the historical
-    # sci total residual (pred - observed); rows 2-4 show per-component
+    # Multi-panel residual figure (2026-08-19): row 1 shows the sky-subtracted
+    # sci spectrum (observed - pred, since 2026-09-25); rows 2-5 show per-component
     # residuals (pred - recon(sci_true)) so a broadband deficit that lives
     # entirely in one component (e.g. moon spline) shows up separately from
     # a line-emission miss (mesospheric / atomic / ionospheric / O2).  The
@@ -776,6 +793,10 @@ else:
     from plotly.subplots import make_subplots as _make_subplots_resid
 
     sci_resid_arr = np.vstack(sci_resid_rows) * FACTOR
+    # Panel 1 shows the SKY-SUBTRACTED spectrum, observed - predicted, i.e.
+    # what a user of the prediction gets; `sci_resid_arr` itself keeps the
+    # pred - observed sign it is stored and returned with.
+    sci_skysub_arr = -sci_resid_arr
     sci_moon_arr = np.vstack(sci_moon_resid_rows) * FACTOR
     sci_zodi_arr = np.vstack(sci_zodi_resid_rows) * FACTOR
     sci_diffuse_arr = np.vstack(sci_diffuse_resid_rows) * FACTOR
@@ -821,7 +842,7 @@ else:
     # The band is COMPARABLE TO OR WIDER THAN the residual envelope, so it
     # reads as a wide grey region that most of the strokes sit inside:
     #
-    #   row 1   pred - observed          band / p68|r| = 0.80
+    #   row 1   observed - pred          band / p68|r| = 0.80
     #   rows 2-5  pred - recon(sci coef) band / p68|r| = 1.52
     #
     # That is the message, not a defect: on a typical pixel the transfer
@@ -867,7 +888,7 @@ else:
         horizontal_spacing=0.03,
         vertical_spacing=0.04,
         subplot_titles=(
-            f"SCI residuals: pred - observed (n={n_use})",
+            f"SCI sky-subtracted: observed - pred (n={n_use})",
             "median residual / row (±1,2,3σ)",
             "Moon component: pred - recon(sci coef)",
             "",
@@ -896,7 +917,7 @@ else:
 
     _wave_ref32 = np.asarray(wave_ref, dtype=np.float32)
     _panels = [
-        ("total",   sci_resid_arr),
+        ("total",   sci_skysub_arr),
         ("moon",    sci_moon_arr),
         ("zodi",    sci_zodi_arr),
         ("diffuse", sci_diffuse_arr),
@@ -1093,7 +1114,7 @@ else:
 
     fig_resid.update_xaxes(title_text="Wavelength [Å]", row=4, col=1)
     fig_resid.update_xaxes(title_text="median residual / row", row=4, col=2)
-    fig_resid.update_yaxes(title_text="pred - obs", row=1, col=1)
+    fig_resid.update_yaxes(title_text="obs - pred", row=1, col=1)
     fig_resid.update_yaxes(title_text="pred - recon(true) [moon]",    row=2, col=1)
     fig_resid.update_yaxes(title_text="pred - recon(true) [zodi]",    row=3, col=1)
     fig_resid.update_yaxes(title_text="pred - recon(true) [diffuse]", row=4, col=1)
@@ -1226,6 +1247,10 @@ else:
         # would measure a different noise model from the one being tested.
         _good = (np.isfinite(_obs_a) & np.isfinite(_res_a)
                  & np.isfinite(_sens)[None, :] & (_sens > 0)[None, :])
+        # Science emission lines out, for the prediction AND the self-fit
+        # (both use `_good`), so the two stay on identical pixels.
+        if sci_line_mask_sel is not None and sci_line_mask_sel.shape == _good.shape:
+            _good &= ~sci_line_mask_sel
         _pull2 = np.where(_good, _res_a ** 2 / _var_c2, np.nan)
         # NOT renormalised to a median of 1.  The scale is absolute now, and
         # dividing by the median would throw away the only thing this panel
@@ -1506,7 +1531,9 @@ else:
         print(f"  [chi2] ABSOLUTE reduced chi2 vs the {_c2_mode} photon "
               f"model: median {float(np.nanmedian(_chi2_ph)):.4g}, "
               f"p10 {_q[0]:.4g}, p90 {_q[1]:.4g}, "
-              f"max {float(np.nanmax(_chi2_ph)):.4g}")
+              f"max {float(np.nanmax(_chi2_ph)):.4g}"
+              + ("   (science emission-line windows excluded)"
+                 if sci_line_mask_sel is not None else ""))
         if _c2b.size:
             _qb = np.nanpercentile(_chi2_blue, [10, 90])
             print(f"  [chi2] blue of {CHI2_BLUE_MAX_A:.0f} A only "

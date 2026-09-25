@@ -939,7 +939,10 @@ def init_worker(
     _WORKER_RUN_FINGERPRINT = run_fingerprint
     _PWV_FALLBACK_REPORTED = False
     # Keep worker-local memmapped access to flux tables to avoid large IPC payloads.
-    _WORKER_HDU = fits.open(data_file, memmap=True)
+    # An already-open HDUList (an in-memory stack, see `decompose_in_process`)
+    # is used as is.
+    _WORKER_HDU = (data_file if isinstance(data_file, fits.HDUList)
+                   else fits.open(data_file, memmap=True))
     _WORKER_PROGRESS_QUEUE = progress_queue
     _WORKER_FLUX = {
         "sci": np.asarray(_WORKER_HDU["FLUX_SCI"].data),
@@ -2309,6 +2312,57 @@ def _compact_run_provenance(data_file, wave, fit_model, base_dir, parameters):
     return payload | {"run_fingerprint": fingerprint}
 
 
+def _worker_initargs(
+    *, wave, lsf_sigma, base_dir, factor, data_file, progress_queue, fit_model,
+    n_refinement_cycles, worker_counter, pin_workers, diagnose_threads,
+    palace_suffix, palace_oh_suffix, palace_diffuse_suffix, exposure_seconds,
+    moon_zodi_data_root, n_spline_knots, n_zodi_spline_knots, zodi_smooth_lambda,
+    moon_smooth_lambda, mask_science_lines, centre_on_halpha, fit_pixel_weights,
+    fit_pixel_weight_clip, reversal_retry_bound, diffuse_ratio_bound_dex,
+    diffuse_ratio_nominal, diffuse_oh_centre_log10, diffuse_oh_bound_dex,
+    compact_cache_root, run_fingerprint,
+):
+    """The positional `init_worker` arguments of a run -- one definition.
+
+    Shared by `run` (the process pool) and `decompose_in_process` (a single
+    exposure in the caller's process), so the two can never set a worker up
+    differently.
+    """
+    return (
+        wave,
+        lsf_sigma,
+        str(base_dir),
+        float(factor),
+        data_file if isinstance(data_file, fits.HDUList) else str(data_file),
+        progress_queue,
+        fit_model,
+        n_refinement_cycles,
+        worker_counter,
+        bool(pin_workers),
+        bool(diagnose_threads),
+        palace_suffix,
+        palace_oh_suffix,
+        palace_diffuse_suffix,
+        exposure_seconds,
+        None if moon_zodi_data_root is None else str(moon_zodi_data_root),
+        int(n_spline_knots),
+        int(n_zodi_spline_knots),
+        float(zodi_smooth_lambda),
+        float(moon_smooth_lambda),
+        bool(mask_science_lines),
+        bool(centre_on_halpha),
+        bool(fit_pixel_weights),
+        None if fit_pixel_weight_clip is None else float(fit_pixel_weight_clip),
+        None if reversal_retry_bound is None else float(reversal_retry_bound),
+        float(diffuse_ratio_bound_dex),
+        diffuse_ratio_nominal,
+        diffuse_oh_centre_log10,
+        float(diffuse_oh_bound_dex),
+        None if compact_cache_root is None else str(compact_cache_root),
+        run_fingerprint,
+    )
+
+
 def run(
     data_file,
     palace_dir,
@@ -2454,42 +2508,31 @@ def run(
         max_workers=n_workers,
         mp_context=mp_context,
         initializer=init_worker,
-        initargs=(
-            wave,
-            lsf_sigma,
-            str(base_dir),
-            float(factor),
-            str(data_file),
-            progress_queue,
-            fit_model,
-            n_refinement_cycles,
-            worker_counter,
-            bool(pin_workers),
-            bool(diagnose_threads),
-            palace_suffix,
-            palace_oh_suffix,
-            palace_diffuse_suffix,
-            exposure_seconds,
-            (
-                None
-                if resolved_moon_zodi_data_root is None
-                else str(resolved_moon_zodi_data_root)
-            ),
-            int(n_spline_knots),
-            int(n_zodi_spline_knots),
-            float(zodi_smooth_lambda),
-            float(moon_smooth_lambda),
-            bool(mask_science_lines),
-            bool(centre_on_halpha),
-            bool(fit_pixel_weights),
-            None if fit_pixel_weight_clip is None else float(fit_pixel_weight_clip),
-            None if reversal_retry_bound is None else float(reversal_retry_bound),
-            float(diffuse_ratio_bound_dex),
-            diffuse_ratio_nominal,
-            diffuse_oh_centre_log10,
-            float(diffuse_oh_bound_dex),
-            None if compact_cache_root is None else str(compact_cache_root),
-            run_fingerprint,
+        initargs=_worker_initargs(
+            wave=wave, lsf_sigma=lsf_sigma, base_dir=base_dir, factor=factor,
+            data_file=data_file, progress_queue=progress_queue,
+            fit_model=fit_model, n_refinement_cycles=n_refinement_cycles,
+            worker_counter=worker_counter, pin_workers=pin_workers,
+            diagnose_threads=diagnose_threads, palace_suffix=palace_suffix,
+            palace_oh_suffix=palace_oh_suffix,
+            palace_diffuse_suffix=palace_diffuse_suffix,
+            exposure_seconds=exposure_seconds,
+            moon_zodi_data_root=resolved_moon_zodi_data_root,
+            n_spline_knots=n_spline_knots,
+            n_zodi_spline_knots=n_zodi_spline_knots,
+            zodi_smooth_lambda=zodi_smooth_lambda,
+            moon_smooth_lambda=moon_smooth_lambda,
+            mask_science_lines=mask_science_lines,
+            centre_on_halpha=centre_on_halpha,
+            fit_pixel_weights=fit_pixel_weights,
+            fit_pixel_weight_clip=fit_pixel_weight_clip,
+            reversal_retry_bound=reversal_retry_bound,
+            diffuse_ratio_bound_dex=diffuse_ratio_bound_dex,
+            diffuse_ratio_nominal=diffuse_ratio_nominal,
+            diffuse_oh_centre_log10=diffuse_oh_centre_log10,
+            diffuse_oh_bound_dex=diffuse_oh_bound_dex,
+            compact_cache_root=compact_cache_root,
+            run_fingerprint=run_fingerprint,
         ),
     ) as executor:
         pbar = tqdm(
@@ -2749,7 +2792,8 @@ def thin_fits_every_n(input_path, output_path, n, row_hdu_name="META"):
         fits.HDUList(out_hdus).writeto(output_path, overwrite=True)
 
 
-def main():
+def build_arg_parser():
+    """The command-line parser; its defaults ARE a default cluster run."""
     parser = argparse.ArgumentParser(description="LVM sky spectral decomposition")
     parser.add_argument("data_file", help="Input FITS file (median stacked LVM frame)")
     parser.add_argument(
@@ -3071,6 +3115,119 @@ def main():
             "NaN coefficients and an explicit error status."
         ),
     )
+    return parser
+
+
+def _run_kwargs_from_args(args):
+    """Keyword arguments `run` receives for parsed command-line `args`."""
+    return dict(
+        data_file=args.data_file,
+        palace_dir=args.palace_dir,
+        n_workers=args.n_workers,
+        lsf_sigma=args.lsf_sigma,
+        factor=args.factor,
+        output_dir=args.output_dir,
+        chunk_size=args.chunk_size,
+        max_in_flight=args.max_in_flight,
+        fit_model=args.fit_model,
+        n_refinement_cycles=args.n_refinement_cycles,
+        limit=args.limit,
+        pin_workers=args.pin_workers,
+        diagnose_threads=args.diagnose_threads,
+        palace_suffix=args.palace_suffix,
+        palace_oh_suffix=args.palace_oh_suffix,
+        palace_diffuse_suffix=args.palace_diffuse_suffix,
+        exposure_seconds=args.exposure_seconds,
+        moon_zodi_data_root=args.moon_zodi_data_root,
+        n_spline_knots=args.n_spline_knots,
+        n_zodi_spline_knots=args.n_zodi_spline_knots,
+        zodi_smooth_lambda=args.zodi_smooth_lambda,
+        moon_smooth_lambda=args.moon_smooth_lambda,
+        diffuse_ratio_bound_dex=args.diffuse_ratio_bound_dex,
+        diffuse_oh_bound_dex=args.diffuse_oh_bound_dex,
+        diffuse_oh_centre_log10=args.diffuse_oh_centre_log10,
+        diffuse_ratio_nominal=(
+            None if not args.diffuse_ratio_nominal
+            else tuple(float(v) for v in args.diffuse_ratio_nominal.split(","))
+        ),
+        mask_science_lines=not args.no_science_line_mask,
+        centre_on_halpha=not args.no_halpha_centring,
+        fit_pixel_weights=not args.no_fit_pixel_weights,
+        fit_pixel_weight_clip=args.fit_pixel_weight_clip,
+        reversal_retry_bound=(
+            None if args.no_reversal_retry else args.reversal_retry_bound
+        ),
+        compact_only=args.compact_only,
+    )
+
+
+def decompose_in_process(data_file, rows=(0,), kinds=("sci", "sky1", "sky2"),
+                         argv=()):
+    """Decompose rows of a stack in THIS process, exactly as a CLI run would.
+
+    ``argv`` are extra command-line options; with none, every setting is the
+    parser default, i.e. what a bare ``python -m skysub.decompose_parallel
+    <data_file>`` -- a default cluster run -- uses: fit model, knots,
+    smoothing, all identifiability constraints, the zodi correction
+    (``LVMSKY_ZODI_CORRECTION``, read at import as for a run), photon pixel
+    weights, the science-line mask centred on the measured Halpha velocity,
+    the per-row telluric transmission, the geometry amplitude priors and the
+    reversal retry.  The worker is initialised through the same
+    `_worker_initargs` as `run`, and each row goes through the same
+    `_fit_ivar_row` -> `_fit_worker_row` path as `fit_chunk_worker`.
+
+    ``data_file`` is a stack in the corpus format (WAVE, FLUX_SCI,
+    FLUX_SKY_NEAR, FLUX_SKY_FAR, LSF_SCI, LSF_SKY_NEAR, LSF_SKY_FAR and a META
+    row per spectrum with the lvm_medians columns): a path, or an in-memory
+    ``astropy.io.fits.HDUList`` with those HDUs, so a single exposure needs no
+    file on disk.  Returns ``{(kind, row): (result, reliability_columns)}``.
+    """
+    in_memory = isinstance(data_file, fits.HDUList)
+    args = build_arg_parser().parse_args(
+        ["<in-memory stack>" if in_memory else str(data_file), *map(str, argv)])
+    kw = _run_kwargs_from_args(args)
+    fit_model = kw["fit_model"]
+    palace_oh_suffix = _resolved_palace_oh_suffix(fit_model, kw["palace_oh_suffix"])
+    base_dir, moon_zodi_root = resolve_runtime_data_roots(
+        fit_model, palace_dir=kw["palace_dir"],
+        moon_zodi_data_root=kw["moon_zodi_data_root"])
+    wave = (np.asarray(data_file["WAVE"].data) if in_memory
+            else fits.getdata(str(data_file), "WAVE")).astype(np.float64)
+    init_worker(*_worker_initargs(
+        wave=wave, lsf_sigma=kw["lsf_sigma"], base_dir=base_dir,
+        factor=kw["factor"], data_file=data_file, progress_queue=None,
+        fit_model=fit_model, n_refinement_cycles=kw["n_refinement_cycles"],
+        worker_counter=None, pin_workers=False, diagnose_threads=False,
+        palace_suffix=kw["palace_suffix"], palace_oh_suffix=palace_oh_suffix,
+        palace_diffuse_suffix=kw["palace_diffuse_suffix"],
+        exposure_seconds=kw["exposure_seconds"],
+        moon_zodi_data_root=moon_zodi_root,
+        n_spline_knots=kw["n_spline_knots"],
+        n_zodi_spline_knots=kw["n_zodi_spline_knots"],
+        zodi_smooth_lambda=kw["zodi_smooth_lambda"],
+        moon_smooth_lambda=kw["moon_smooth_lambda"],
+        mask_science_lines=kw["mask_science_lines"],
+        centre_on_halpha=kw["centre_on_halpha"],
+        fit_pixel_weights=kw["fit_pixel_weights"],
+        fit_pixel_weight_clip=kw["fit_pixel_weight_clip"],
+        reversal_retry_bound=kw["reversal_retry_bound"],
+        diffuse_ratio_bound_dex=kw["diffuse_ratio_bound_dex"],
+        diffuse_ratio_nominal=kw["diffuse_ratio_nominal"],
+        diffuse_oh_centre_log10=kw["diffuse_oh_centre_log10"],
+        diffuse_oh_bound_dex=kw["diffuse_oh_bound_dex"],
+        compact_cache_root=None, run_fingerprint=None))
+    # init_worker clamps native threads for pool workers; that is harmless here.
+    out = {}
+    for kind in kinds:
+        for idx in rows:
+            flux_row = np.asarray(_WORKER_FLUX[kind][int(idx)], dtype=np.float64) * _WORKER_FACTOR
+            out[(kind, int(idx))] = _fit_worker_row(
+                kind, int(idx), flux_row, _fit_ivar_row(kind, int(idx), flux_row))
+    return out
+
+
+def main():
+    parser = build_arg_parser()
     args = parser.parse_args()
 
     if args.chunk_size < 1:
@@ -3110,45 +3267,7 @@ def main():
     output_dir = Path(args.output_dir)
 
     if not args.only_thin:
-        run(
-            data_file=args.data_file,
-            palace_dir=args.palace_dir,
-            n_workers=args.n_workers,
-            lsf_sigma=args.lsf_sigma,
-            factor=args.factor,
-            output_dir=args.output_dir,
-            chunk_size=args.chunk_size,
-            max_in_flight=args.max_in_flight,
-            fit_model=args.fit_model,
-            n_refinement_cycles=args.n_refinement_cycles,
-            limit=args.limit,
-            pin_workers=args.pin_workers,
-            diagnose_threads=args.diagnose_threads,
-            palace_suffix=args.palace_suffix,
-            palace_oh_suffix=args.palace_oh_suffix,
-            palace_diffuse_suffix=args.palace_diffuse_suffix,
-            exposure_seconds=args.exposure_seconds,
-            moon_zodi_data_root=args.moon_zodi_data_root,
-            n_spline_knots=args.n_spline_knots,
-            n_zodi_spline_knots=args.n_zodi_spline_knots,
-            zodi_smooth_lambda=args.zodi_smooth_lambda,
-            moon_smooth_lambda=args.moon_smooth_lambda,
-            diffuse_ratio_bound_dex=args.diffuse_ratio_bound_dex,
-            diffuse_oh_bound_dex=args.diffuse_oh_bound_dex,
-            diffuse_oh_centre_log10=args.diffuse_oh_centre_log10,
-            diffuse_ratio_nominal=(
-                None if not args.diffuse_ratio_nominal
-                else tuple(float(v) for v in args.diffuse_ratio_nominal.split(","))
-            ),
-            mask_science_lines=not args.no_science_line_mask,
-            centre_on_halpha=not args.no_halpha_centring,
-            fit_pixel_weights=not args.no_fit_pixel_weights,
-            fit_pixel_weight_clip=args.fit_pixel_weight_clip,
-            reversal_retry_bound=(
-                None if args.no_reversal_retry else args.reversal_retry_bound
-            ),
-            compact_only=args.compact_only,
-        )
+        run(**_run_kwargs_from_args(args))
 
         if args.compact_only:
             with fits.open(args.data_file, memmap=True, lazy_load_hdus=True) as hdul:

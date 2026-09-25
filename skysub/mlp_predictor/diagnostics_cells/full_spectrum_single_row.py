@@ -360,6 +360,19 @@ else:
     # being tested.
     _good_c2 = (np.isfinite(flux_sci_true_row) & np.isfinite(_sens_c2)
                 & (_sens_c2 > 0) & np.isfinite(_var_c2) & (_var_c2 > 0))
+    # The science field's emission lines, masked exactly as the decomposition
+    # masked them (stack reference LSF, windows centred on this row's measured
+    # Halpha velocity).  They are the target's light, not sky, and on an HII
+    # region a single Halpha pixel can outweigh the rest of the row.
+    try:
+        from mlp_predictor.data import science_line_mask_rows as _sci_mask_rows
+        _sci_mask_row = _sci_mask_rows(EVERY10_INPUT, wave_row,
+                                       flux_sci_true_row, flux_near_row)
+        _good_c2 &= ~_sci_mask_row
+    except Exception as _exc_mask:
+        _sci_mask_row = None
+        print(f"  [chi2] science-line mask unavailable ({type(_exc_mask).__name__}: "
+              f"{_exc_mask}); the chi2 includes the science emission lines.")
     _resid_self_row = flux_sci_true_recon_row - flux_sci_true_row
     chi2_pix_pred = np.where(_good_c2, resid_row ** 2 / _var_c2, np.nan)
     chi2_pix_self = np.where(_good_c2, _resid_self_row ** 2 / _var_c2, np.nan)
@@ -755,7 +768,7 @@ if _mz_overlay:
 #    row1: near observed vs reconstruction from near coefficients
 #    row2: far observed vs reconstruction from far coefficients
 #    row3: science true vs science prediction
-#    row4: science residual
+#    row4: science sky-subtracted spectrum, observed - pred
 #    row5: per-pixel photon chi2, prediction against the decomposition's floor
 #          (omitted when the noise model could not be loaded)
 _SHOW_CHI2_PANEL = chi2_pix_pred is not None
@@ -764,7 +777,7 @@ _panel_titles = [
     "Near: observed vs reconstructed from near coefficients",
     "Far: observed vs reconstructed from far coefficients",
     "Science: observed / recon(sci coef) / recon(pred)",
-    "Science residual: pred - true",
+    "Science sky-subtracted: observed - pred",
 ]
 _panel_heights = [0.22, 0.22, 0.30, 0.13]
 if _SHOW_CHI2_PANEL:
@@ -901,9 +914,9 @@ fig.add_trace(
 fig.add_trace(
     go.Scattergl(
         x=wave_row,
-        y=resid_row * FACTOR,
+        y=-resid_row * FACTOR,
         mode="lines",
-        name="science residual",
+        name="science sky-subtracted (obs - pred)",
         line=dict(color="#d62728", width=1.0),
     ),
     row=4,
@@ -943,11 +956,20 @@ if _SHOW_CHI2_PANEL:
 fig.update_yaxes(type="log", title_text="Near flux", row=1, col=1)
 fig.update_yaxes(type="log", title_text="Far flux", row=2, col=1)
 fig.update_yaxes(type="log", title_text="Science flux", row=3, col=1)
-fig.update_yaxes(type="linear", title_text="pred - true", row=4, col=1)
+fig.update_yaxes(type="linear", title_text="obs - pred", row=4, col=1)
 if _SHOW_CHI2_PANEL:
-    # Log, unlike the batch panel's linear axis: that one plots a ROW MEAN,
-    # which lives inside a decade, whereas per-pixel chi2 spans several.
-    fig.update_yaxes(type="log", title_text="chi2 / pixel", row=_CHI2_ROW, col=1)
+    # Linear (2026-09-25): with the science lines masked the per-pixel chi2 no
+    # longer spans the several decades that motivated a log axis.
+    fig.update_yaxes(type="linear", title_text="chi2 / pixel", row=_CHI2_ROW, col=1)
+# Shade the science-line windows the chi2 excludes, so a gap reads as masked.
+if _SHOW_CHI2_PANEL and globals().get("_sci_mask_row") is not None:
+    _m = np.asarray(_sci_mask_row, dtype=bool)
+    _edges = np.flatnonzero(np.diff(np.concatenate([[0], _m.astype(int), [0]])))
+    for _a, _b in zip(_edges[0::2], _edges[1::2]):
+        for _r in (4, _CHI2_ROW):
+            fig.add_vrect(x0=float(wave_row[_a]), x1=float(wave_row[_b - 1]),
+                          fillcolor="rgba(150,150,150,0.18)", line_width=0,
+                          layer="below", row=_r, col=1)
 fig.update_xaxes(title_text="Wavelength [A]", row=len(_panel_titles), col=1)
 
 if _SHOW_CHI2_PANEL:
