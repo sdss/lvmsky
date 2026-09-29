@@ -78,14 +78,14 @@ else:
     MAX_RESID_LINES = 60
 
     # Rows whose PER-COMPONENT reconstruction is kept for wavelength_residual_
-    # atlas to reuse.  The atlas needs six component spectra x (pred, true) per
-    # row, which is 0.6 MB/row on top of what this cell already keeps -- 1.7 GB
-    # if we kept all 2900.  Its output is aggregate curves that converge long
-    # before that (it sampled 500 rows when it did its own reconstruction), so
-    # cap the handoff and spend the memory on the RMSE statistics instead,
-    # which do use every row.  0 disables the handoff and the atlas falls back
-    # to reconstructing its own sample.
-    ATLAS_HANDOFF_ROWS = 600
+    # atlas to reuse.  None (the default since 2026-09-29) hands over EVERY row
+    # scored here, so the atlas describes exactly the held-out sample this
+    # cell scores, not a subset of it or its own every10 draw.  Cost: six
+    # component spectra x (pred, true) per row, ~0.65 MB/row, ~1.9 GB for the
+    # 2888 held-out rows.  An integer caps it to an evenly spaced subset; 0
+    # disables the handoff and the atlas falls back to reconstructing its own
+    # every10 sample.
+    ATLAS_HANDOFF_ROWS = None
 
     # Must match _ATLAS_COMPONENTS in wavelength_residual_atlas.py -- the atlas
     # indexes the handoff by these exact keys, so a mismatch raises rather than
@@ -201,7 +201,9 @@ else:
     # Rows whose per-component reconstruction we keep for the atlas: a
     # systematic every-k sample of the selection.  Evenly spaced rather than
     # random so it is reproducible without a seed and cannot cluster.
-    if int(ATLAS_HANDOFF_ROWS) > 0 and n_use > 0:
+    if ATLAS_HANDOFF_ROWS is None and n_use > 0:
+        _atlas_take = np.arange(n_use)
+    elif ATLAS_HANDOFF_ROWS is not None and int(ATLAS_HANDOFF_ROWS) > 0 and n_use > 0:
         _atlas_take = (np.arange(n_use) if n_use <= int(ATLAS_HANDOFF_ROWS)
                        else np.unique(np.linspace(0, n_use - 1,
                                                   int(ATLAS_HANDOFF_ROWS)
@@ -786,7 +788,8 @@ else:
 
     # Multi-panel residual figure (2026-08-19): row 1 shows the sky-subtracted
     # sci spectrum (observed - pred, since 2026-09-25); rows 2-5 show per-component
-    # residuals (pred - recon(sci_true)) so a broadband deficit that lives
+    # residuals (recon(sci_true) - pred, since 2026-09-29, the same sense as row
+    # 1: truth minus prediction) so a broadband deficit that lives
     # entirely in one component (e.g. moon spline) shows up separately from
     # a line-emission miss (mesospheric / atomic / ionospheric / O2).  The
     # legend is off; per-line hover shows row_idx + expnum from META.
@@ -797,10 +800,14 @@ else:
     # what a user of the prediction gets; `sci_resid_arr` itself keeps the
     # pred - observed sign it is stored and returned with.
     sci_skysub_arr = -sci_resid_arr
-    sci_moon_arr = np.vstack(sci_moon_resid_rows) * FACTOR
-    sci_zodi_arr = np.vstack(sci_zodi_resid_rows) * FACTOR
-    sci_diffuse_arr = np.vstack(sci_diffuse_resid_rows) * FACTOR
-    sci_lines_arr = np.vstack(sci_lines_resid_rows) * FACTOR
+    # Panels 2-5 likewise show decomposition - predicted, the same sense as
+    # panel 1. The per-row lists keep pred - recon(true), which is what the
+    # atlas handoff self-check above compares against, so only these display
+    # arrays are negated.
+    sci_moon_arr = -np.vstack(sci_moon_resid_rows) * FACTOR
+    sci_zodi_arr = -np.vstack(sci_zodi_resid_rows) * FACTOR
+    sci_diffuse_arr = -np.vstack(sci_diffuse_resid_rows) * FACTOR
+    sci_lines_arr = -np.vstack(sci_lines_resid_rows) * FACTOR
     # The per-component lists are dead once stacked, and each is n_use x 12401
     # float64 -- 50 MB apiece at n_use=500, 200 MB across the four, held for
     # the whole rest of the cell for nothing.  (sci_resid_rows, sci_obs_rows,
@@ -843,7 +850,7 @@ else:
     # reads as a wide grey region that most of the strokes sit inside:
     #
     #   row 1   observed - pred          band / p68|r| = 0.80
-    #   rows 2-5  pred - recon(sci coef) band / p68|r| = 1.52
+    #   rows 2-5  recon(sci coef) - pred band / p68|r| = 1.52
     #
     # That is the message, not a defect: on a typical pixel the transfer
     # error is already below the noise of a single fibre, and rows 2-5 are
@@ -890,13 +897,13 @@ else:
         subplot_titles=(
             f"SCI sky-subtracted: observed - pred (n={n_use})",
             "median residual / row (±1,2,3σ)",
-            "Moon component: pred - recon(sci coef)",
+            "Moon component: recon(sci coef) - pred",
             "",
-            "Zodi component: pred - recon(sci coef)",
+            "Zodi component: recon(sci coef) - pred",
             "",
-            "Diffuse continuum (HO2 + FeO + O2ac): pred - recon(sci coef)",
+            "Diffuse continuum (HO2 + FeO + O2ac): recon(sci coef) - pred",
             "",
-            "Lines (OH + atom + ORC + O2): pred - recon(sci coef)",
+            "Lines (OH + atom + ORC + O2): recon(sci coef) - pred",
             "",
         ),
     )
@@ -969,8 +976,8 @@ else:
                     x=wave_ref, y=_sig1_band,
                     mode="lines", line=dict(width=0),
                     fill="tonexty", fillcolor="rgba(130,130,130,0.22)",
-                    name="±1σ single fibre",
-                    hovertemplate=("λ=%{x:.1f} Å<br>±1σ single fibre="
+                    name="±1σ Single-fiber noise",
+                    hovertemplate=("λ=%{x:.1f} Å<br>±1σ Noise="
                                    "%{y:.4g}<extra></extra>"),
                     showlegend=bool(_row_i == 1),
                 ),
@@ -1058,7 +1065,22 @@ else:
 
         # Right-column histogram: median residual per row (median over pixels)
         # with empirical two-tailed 1σ / 2σ / 3σ percentile bars.
-        _med_per_row = np.nanmedian(_arr, axis=1)
+        # The "lines" panel (OH + atom + ORC + O2) is LSF-convolved, so it
+        # never hits a literal 0.0 away from a line core -- it decays
+        # continuously into a long, tiny tail instead (measured: only 0.85%
+        # of pixels are bit-exact zero, even restricted to the OH-free blue
+        # half of the spectrum). Those tail pixels carry no real line signal,
+        # but there are so many of them (~99% of the 12401-pixel grid) that
+        # left in, they swamp the median and pull it toward 0 regardless of
+        # how the actual line residuals behave. Masked here (this panel
+        # only) below a fixed 1e-3 (FACTOR units) magnitude, so a pixel only
+        # counts as "line-bearing" if its residual clears that floor; median
+        # then taken over those alone.
+        _LINES_HIST_FLOOR = 1e-2  # FACTOR units; see comment above
+        _hist_arr = _arr
+        if _pname == "lines":
+            _hist_arr = np.where(np.abs(_arr) <= _LINES_HIST_FLOOR, np.nan, _arr)
+        _med_per_row = np.nanmedian(_hist_arr, axis=1)
         _med_per_row = _med_per_row[np.isfinite(_med_per_row)]
         if _med_per_row.size > 0:
             _nb_hist = int(max(10, min(40, np.sqrt(_med_per_row.size) * 2.0)))
@@ -1113,12 +1135,12 @@ else:
                 )
 
     fig_resid.update_xaxes(title_text="Wavelength [Å]", row=4, col=1)
-    fig_resid.update_xaxes(title_text="median residual / row", row=4, col=2)
-    fig_resid.update_yaxes(title_text="obs - pred", row=1, col=1)
-    fig_resid.update_yaxes(title_text="pred - recon(true) [moon]",    row=2, col=1)
-    fig_resid.update_yaxes(title_text="pred - recon(true) [zodi]",    row=3, col=1)
-    fig_resid.update_yaxes(title_text="pred - recon(true) [diffuse]", row=4, col=1)
-    fig_resid.update_yaxes(title_text="pred - recon(true) [lines]",   row=5, col=1)
+    fig_resid.update_xaxes(title_text="Median residual", row=4, col=2)
+    fig_resid.update_yaxes(title_text="Observed - Predicted sky", row=1, col=1)
+    fig_resid.update_yaxes(title_text="Decomposition - predicted moon",    row=2, col=1)
+    fig_resid.update_yaxes(title_text="Decomposition - predicted zodi",    row=3, col=1)
+    fig_resid.update_yaxes(title_text="Decomposition - predicted diffuse", row=4, col=1)
+    fig_resid.update_yaxes(title_text="Decomposition - predicted lines",   row=5, col=1)
     fig_resid.update_layout(
         template="plotly_white",
         title=(f"SCI + per-component residuals (n={n_use} spectra"
@@ -1362,14 +1384,14 @@ else:
             _bins = dict(start=_lo, end=_hi, size=(_hi - _lo) / 36.0)
             if _vsf.size:
                 _figc.add_trace(go.Histogram(
-                    x=_vsf, xbins=_bins, name="decomposition self-fit",
+                    x=_vsf, xbins=_bins, name="Decomposition",
                     marker=dict(color="#999999"), opacity=0.55,
                     legendgroup="self", showlegend=(_col == 1),
                     hovertemplate=("self-fit chi2_red=%{x:.3g}"
                                    "<br>n=%{y}<extra></extra>")),
                     row=1, col=_col)
             _figc.add_trace(go.Histogram(
-                x=_vf, xbins=_bins, name="ML reconstruction",
+                x=_vf, xbins=_bins, name="Prediction",
                 marker=dict(color=_colour), opacity=0.75,
                 legendgroup="recon", showlegend=(_col == 1),
                 hovertemplate=("recon chi2_red=%{x:.3g}"
@@ -1384,15 +1406,15 @@ else:
             if _vf.size:
                 _n_out = int(np.sum(_vf > _hi))
                 _med_r = float(np.median(_vf))
-                _txt = f"recon median {_med_r:.3g}"
+                _txt = f"Pred. median {_med_r:.3g}"
                 if _vsf.size:
                     _med_s = float(np.median(_vsf))
-                    _txt += (f"<br>self-fit median {_med_s:.3g}"
+                    _txt += (f"<br>Decomp. median {_med_s:.3g}"
                              f"<br>ratio {_med_r / _med_s:.2f}x"
                              if _med_s > 0 else
-                             f"<br>self-fit median {_med_s:.3g}")
+                             f"<br>Decomp. median {_med_s:.3g}")
                 if _n_out:
-                    _txt += (f"<br>{_n_out} recon rows above {_hi:.3g}"
+                    _txt += (f"<br>{_n_out} rows above {_hi:.3g}"
                              f"<br>(max {float(_vf.max()):.3g})")
                 _figc.add_annotation(
                     x=0.98, y=0.94, xref="x domain", yref="y domain",
@@ -1452,7 +1474,7 @@ else:
                     marker=dict(color=_cc, size=_sz, opacity=0.55,
                                 line=dict(width=0)),
                     legendgroup=_nm, showlegend=(_col == 1),
-                    text=[f"{l}<br>ratio {r:.2f}x"
+                    text=[f"{l}<br>Ratio {r:.2f}x"
                           for l, r in zip([_l for _l, _k in zip(_lo_o, _m) if _k],
                                           _rat[_m])],
                     hovertemplate=("%{text}<br>decomposition %{x:.3g}"
@@ -1473,10 +1495,10 @@ else:
                                row=2, col=_col)
             _figc.add_annotation(
                 x=0.02, y=0.97, xref="x domain", yref="y domain",
-                text=(f"median ratio {float(np.median(_rat)):.2f}x<br>"
+                text=(f"Median ratio {float(np.median(_rat)):.2f}x<br>"
                       f"{int((_rat > 2).sum())} rows > 2x, "
                       f"{int((_rat > 10).sum())} > 10x<br>"
-                      f"lines: 1x (floor), 2x, 10x"),
+                      f"Lines: 1x (floor), 2x, 10x"),
                 showarrow=False, xanchor="left", align="left",
                 font=dict(size=10, color="#666666"), row=2, col=_col)
 
@@ -1518,15 +1540,19 @@ else:
                              + "</sub>"),
                        font=dict(size=13), x=0.02, xanchor="left"),
             margin=dict(t=110))
-        _figc.update_xaxes(title_text="reduced chi2", row=1, col=1)
-        _figc.update_yaxes(title_text="rows", row=1, col=1)
-        _figc.update_xaxes(title_text="reduced chi2", row=1, col=2)
-        _figc.update_yaxes(title_text="rows", row=1, col=2)
+        # Whole label inside ONE $...$ span (\text{} for the words) -- Plotly's
+        # MathJax rendering drops a plain-text prefix mixed with a separate
+        # $...$ span in the same title (e.g. "Reduced $\chi^2$" rendered as
+        # just "chi^2", the "Reduced " silently gone).
+        _figc.update_xaxes(title_text=r"$\text{Reduced }\chi^2$", row=1, col=1)
+        _figc.update_yaxes(title_text="Rows", row=1, col=1)
+        _figc.update_xaxes(title_text=r"$\text{Reduced }\chi^2$", row=1, col=2)
+        _figc.update_yaxes(title_text="Rows", row=1, col=2)
         if _chi2_self is not None:
             for _cc in (1, 2):
-                _figc.update_xaxes(title_text="decomposition self-fit chi2",
+                _figc.update_xaxes(title_text=r"$\text{Decomposition self-fit }\chi^2$",
                                    row=2, col=_cc)
-                _figc.update_yaxes(title_text="prediction chi2", row=2, col=_cc)
+                _figc.update_yaxes(title_text=r"$\text{Prediction }\chi^2$", row=2, col=_cc)
         _figc.show()
         print(f"  [chi2] ABSOLUTE reduced chi2 vs the {_c2_mode} photon "
               f"model: median {float(np.nanmedian(_chi2_ph)):.4g}, "

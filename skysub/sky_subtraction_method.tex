@@ -44,7 +44,12 @@ two sky pointings and the observing context. Amplitudes that the
 decomposition fixes by constraint rather than by data are derived from
 geometry at prediction time instead of being learned. The predicted
 coefficients are reconstructed into a full-resolution sky spectrum and
-subtracted from the science exposure.
+subtracted from the science exposure. On 2888 observations not used in
+training, the predicted sky leaves a residual with a median reduced $\chi^2$
+of 1.27 against the photon noise of a single fibre, compared with 0.92 for
+the decomposition's own fit to the same spectra. The error added by the
+prediction is about 0.6 times that noise, or 5\% of the sky per pixel, and
+the integrated sky flux is reproduced to 1.5\% at the median.
 \end{abstract}
 
 %% Replace with Unified Astronomy Thesaurus concepts and their IDs.
@@ -60,30 +65,33 @@ the Milky Way and the Magellanic Clouds, for which the night sky is a
 first-order contaminant. Each science exposure is accompanied by two
 simultaneous sky exposures taken with dedicated sky telescopes pointed at
 blank fields a few degrees from the science field. The sky is not uniform on
-this baseline:
-\begin{itemize}
-  \item scattered moonlight has strong angular structure set by the
-        scattering phase functions of molecules and aerosols;
-  \item the zodiacal light varies by tens of percent with ecliptic latitude
-        and elongation across the pointings of one night;
-  \item OH airglow is modulated by mesospheric gravity waves on scales of
-        tens of arcminutes;
-  \item the three lines of sight have different zenith angles and hence
-        different slant paths through the emitting layers and the
-        atmosphere.
-\end{itemize}
-Subtracting either sky spectrum directly therefore leaves systematic
-residuals of order one to ten percent of the sky, enough to bury the diffuse
-emission that motivates the survey.
+this baseline. Scattered moonlight has strong angular structure, set by the
+scattering phase functions of molecules and aerosols. The zodiacal light
+varies by tens of percent with ecliptic latitude and solar elongation across
+the pointings of one night. OH airglow is modulated by mesospheric gravity
+waves on scales of tens of arcminutes. The three lines of sight also have
+different zenith angles, and so different slant paths through the emitting
+layers and the atmosphere. Subtracting either sky spectrum directly therefore
+leaves systematic residuals of one to ten percent of the sky, enough to bury
+the diffuse emission that motivates the survey.
 
 The procedure described here replaces direct subtraction by a prediction.
-Each spectrum is decomposed into per-emitter coefficients
-(Section~\ref{sec:decomp}). The coefficients are transformed to a
-geometry-normalised, zenith-equivalent frame (Section~\ref{sec:geometry}). A
-learned transfer (Section~\ref{sec:ml}) maps the two sky pointings and the
-observing context to the coefficients at the science pointing at the same
-instant. The predicted coefficients are reconstructed into a sky spectrum on
+Each spectrum is first decomposed into the contributions of physically
+distinct emitters (Section~\ref{sec:decomp}). These contributions are
+converted to a zenith-equivalent frame that removes the known effect of
+viewing geometry (Section~\ref{sec:geometry}). A neural network, which we
+call the \emph{transfer}, then predicts the contributions at the science
+pointing from those at the two sky pointings and from the observing geometry
+(Section~\ref{sec:ml}). The prediction is turned back into a sky spectrum on
 the native pixel grid and subtracted from the science spectrum.
+
+The natural yardstick for the result is the photon noise of a single fibre,
+because the sky model is subtracted from individual fibres. On observations
+not used in training, the predicted sky reaches a median reduced $\chi^2$ of
+1.27 against that noise, where the decomposition's own fit to the same
+spectra reaches 0.92; the prediction thus adds an error of about 0.6 times
+the single-fibre noise, or about 5\% of the sky per pixel
+(Section~\ref{sec:evaluation}).
 
 %======================================================================
 \section{Input data}
@@ -93,56 +101,48 @@ the native pixel grid and subtracted from the science spectrum.
 science, for two sky fields (east and west) and for spectrophotometric
 standards, all feeding fibre bundles into spectrographs with three channels
 ($b$, $r$, $z$) covering $3600$--$9800$\,\AA. The fibre diameter is
-$35.3''$. The two sky telescopes point at fields chosen near the science
-field; for each exposure we call the one that is closer on the sky the
-\emph{near} arm and the other the \emph{far} arm. This assignment varies from
-exposure to exposure and is independent of which physical telescope is used.
+$35.3''$. We call the three pointings of an exposure its \emph{arms}: the
+science arm and two sky arms. The sky arm closer to the science field on the
+sky is the \emph{near} arm and the other the \emph{far} arm. This assignment
+changes from exposure to exposure and does not depend on which physical
+telescope is used.
 
 \paragraph{Spectra.} The inputs are the reduced, flux-calibrated frames of
 the LVM data reduction pipeline (DRP). The DRP divides every fibre by a model
-telluric transmission evaluated along the \emph{science} line of sight; this
+telluric transmission evaluated along the \emph{science} line of sight, which
 matters for the decomposition (Section~\ref{sec:telluric}). For each exposure
 we form three spectra on a common grid of $N_\lambda = 12\,401$ pixels at
-$\Delta\lambda = 0.5$\,\AA:
-\begin{itemize}
-  \item the median over the science fibres, after rejecting fibres whose
-        Gaia DR3 \citep{GaiaDR3} predicted stellar $G$-band flux exceeds
-        1\% of the fibre's measured flux plus sky;
-  \item the median over the fibres of each sky telescope.
-\end{itemize}
-The median is a robust estimate of the sky-dominated spectrum. Its variance
-is that of a mean over $N_{\rm eff} = (2/\pi)\,n_{\rm fib}$ fibres, where
-$n_{\rm fib}$ is the number of fibres combined. Each spectrum carries the
-per-pixel line-spread function (LSF) width of its fibre bundle.
+$\Delta\lambda = 0.5$\,\AA: the median over the fibres of each sky telescope,
+and the median over the science fibres after rejecting fibres whose Gaia DR3
+\citep{GaiaDR3} predicted stellar $G$-band flux exceeds 1\% of the fibre's
+measured flux plus sky. The median is a robust estimate of the
+sky-dominated spectrum, with the variance of a mean over
+$N_{\rm eff} = (2/\pi)\,n_{\rm fib}$ fibres, where $n_{\rm fib}$ is the
+number of fibres combined. Each spectrum carries the per-pixel line-spread
+function (LSF) width of its fibre bundle.
 
-\paragraph{Metadata.} Each exposure provides:
-\begin{itemize}
-  \item the pointing coordinates of all three telescopes;
-  \item the exposure mid-time and duration;
-  \item the airmass of each pointing;
-  \item the precipitable water vapour (PWV) used by the DRP;
-  \item the identity of the near and far telescopes.
-\end{itemize}
-Solar, lunar and ecliptic geometry are computed from these for each pointing
-(Section~\ref{sec:ctx}), together with solar and geomagnetic activity indices
-for the date.
+\paragraph{Metadata.} Each exposure provides the pointing coordinates and
+airmass of all three telescopes, the exposure mid-time and duration, the
+precipitable water vapour (PWV) used by the DRP, and which sky telescope is
+near and which far. From these we compute the solar, lunar and ecliptic
+geometry of each pointing and look up solar and geomagnetic activity indices
+for the date (Section~\ref{sec:ctx}).
 
-\paragraph{Sample.} The sample used here contains $18\,668$ exposures. A
-\emph{row} is one exposure with its three spectra (science, near, far).
-$13\,688$ rows survive the selection of Section~\ref{sec:selection}.
+\paragraph{Data set.} The data set contains $18\,668$ exposures. We call one
+exposure with its three spectra (science, near, far) an \emph{observation}.
+$13\,688$ observations survive the selection of Section~\ref{sec:selection}.
 
 %======================================================================
 \section{Physical decomposition}
 \label{sec:decomp}
 
-Each of the three spectra of a row is fitted independently by the same
-physical model. The model returns a non-negative coefficient vector
-$\vect{c}\in\mathbb{R}^{P}$ with $P = 388$, together with its uncertainty,
-the component spectra and a set of reliability flags. The coefficients are
-the quantity the transfer of Section~\ref{sec:ml} operates on. The
-decomposition is therefore designed so that each coefficient has a fixed
-physical identity from row to row, even where the data alone could not
-enforce it.
+Each of the three spectra of an observation is fitted independently by the
+same physical model. The fit returns a non-negative vector of $P = 388$
+coefficients, one per template spectrum, together with their uncertainties,
+the spectrum of each emitter and a set of reliability flags. The transfer of
+Section~\ref{sec:ml} works on these coefficients, so the decomposition is
+designed to give each coefficient a fixed physical meaning from one
+observation to the next, even where the data alone could not enforce it.
 
 \subsection{Model}
 \label{sec:model}
@@ -153,11 +153,11 @@ templates:
   y(\lambda) \;\simeq\; \sum_{k=1}^{P} c_k\,T_k(\lambda), \qquad c_k \ge 0 ,
   \label{eq:model}
 \end{equation}
-where each template $T_k$ is a physical spectrum convolved with the fitted
-LSF of the row (Section~\ref{sec:lsf}), attenuated by the atmosphere as
-appropriate for its emitting layer (Section~\ref{sec:telluric}), and divided
-by the transmission the DRP removed. Stacking the templates gives the design
-matrix
+where each template $T_k$ is a physical spectrum convolved with the LSF
+fitted to the same spectrum (Section~\ref{sec:lsf}), attenuated by the
+atmosphere as appropriate for its emitting layer
+(Section~\ref{sec:telluric}), and divided by the transmission the DRP
+removed. Stacking the templates gives the design matrix
 \begin{equation}
 \begin{split}
   \mathbf{A} = \big[\,&\mathbf{A}_{\rm OH}\,\big|\,\mathbf{A}_{\rm O_2}\,\big|\,
@@ -167,11 +167,25 @@ matrix
   \in \mathbb{R}^{N_\lambda\times P}.
 \end{split}
 \end{equation}
-The families are listed in Table~\ref{tab:families}. They divide into a
-\emph{line} block (OH, O$_2$, atomic lines), which depends on the LSF, and a
-\emph{continuum} block (moonlight, zodiacal light, diffuse airglow), which is
-smooth on the scale of the LSF. This division structures the estimation
+The templates are grouped into \emph{families}, one per emitter
+(Table~\ref{tab:families}). The families divide into a \emph{line} block
+(OH, O$_2$, atomic lines), which depends on the LSF, and a \emph{continuum}
+block (moonlight, zodiacal light, diffuse airglow), which is smooth on the
+scale of the LSF. This division structures the estimation
 (Section~\ref{sec:estimation}).
+
+The \emph{amplitude} of a family $g$ is the flux it contributes, integrated
+over wavelength,
+\begin{equation}
+  A_g = \vect{c}_g\cdot\vect{v}_g ,
+  \label{eq:amplitude}
+\end{equation}
+where $\vect c_g$ holds the family's coefficients and $\vect v_g$ the
+wavelength integrals of its templates. The integrals are taken before
+atmospheric attenuation (Section~\ref{sec:telluric}), so $A_g$ measures the
+emission itself. For moonlight and zodiacal light the coefficients are
+spline weights that also set the spectral shape, and the amplitude is their
+total flux.
 
 \begin{deluxetable}{lrL{11.2cm}}
 \tablecaption{Emitter families of the decomposition.\label{tab:families}}
@@ -180,7 +194,7 @@ smooth on the scale of the LSF. This division structures the estimation
 OH Meinel bands & 357 & groups of PALACE transitions sharing the upper
   vibrational level $v'$, rotational level $N'$ and fine-structure component
   $F'$; ridge-corrected relative line strengths \\
-O$_2$ atmospheric ($b$) band & 1 & per-row band shape from a pre-fit \\
+O$_2$ atmospheric ($b$) band & 1 & band shape pre-fitted to each spectrum \\
 Atomic lines & 7 & K\,\textsc{i} 7699, Na\,\textsc{i}\,D, [O\,\textsc{i}] 5577;
   N\,\textsc{i} 5199, [O\,\textsc{i}] 6300/6364, O\,\textsc{i} 7774,
   O\,\textsc{i} 8446 \\
@@ -215,7 +229,7 @@ in the $b$ channel and a six-function cubic B-spline in $\lambda$ in the $r$
 and $z$ channels. A line template is rendered by integrating
 $K(\,\cdot\,;\lambda_\ell)$ analytically over each pixel for every line
 $\ell$ of the family. The LSF parameters are fitted to the sky lines of the
-row itself (Section~\ref{sec:estimation}), with a roughness penalty on the
+spectrum itself (Section~\ref{sec:estimation}), with a roughness penalty on the
 weights and a low-order polynomial nuisance background in each channel. A
 Gaussian of the DRP-reported width seeds the fit, and it is retained for any
 channel that carries too little line information to constrain the kernel. The same fitted LSF
@@ -230,33 +244,29 @@ overlap the H$_2$O and O$_2$ absorption bands. If undimmed templates were
 fitted, the line amplitudes would absorb the transmission. That transmission
 depends on airmass and water vapour, so it would not cancel between the
 pointings, and the transfer would be asked to predict atmospheric absorption
-disguised as mesospheric emission. Two corrections avoid this:
-\begin{enumerate}
-  \item Each line template is attenuated at its own centre wavelength by the
-        PALACE molecular transmission, evaluated from high-resolution line
-        optical depths at the airmass $X_{\rm src}$ of the fibre being
-        fitted:
-        \begin{equation}
-          t_\ell = \exp\!\Big\{-X_{\rm src}\big[\tau_\ell^{\rm dry}
-          + (w/w_0)\,\tau_\ell^{\rm H_2O}\big]\Big\},
-        \end{equation}
-        where $w$ is the PWV and $w_0 = 2.5$\,mm is the reference water
-        column.
-  \item Every template is divided by the smooth transmission
-        $T_{\rm DRP}(\lambda;\,X_{\rm sci},w)$ that the DRP removed from all
-        fibres along the science line of sight. Model and data are then
-        compared in the frame in which the data are delivered.
-\end{enumerate}
-The row's design matrix is therefore
-$\mathbf{A}^{\rm row} = \mathbf{A}(X_{\rm src}, w)/T_{\rm DRP}(\lambda;
-X_{\rm sci}, w)$, and the coefficients keep the meaning of
-top-of-atmosphere amplitudes of the emitting layer. Compared with a fit that
-omits the transmission, this lowers the decomposition $\chi^2$ by about 30\%
-over the full band, with essentially no change in the blue, where there is no
-telluric absorption. Integrated amplitudes
-$A_g = \vect{c}_g\cdot\vect{v}_g$ are always defined with the
-transmission-free template integrals $\vect{v}_g$, so they measure the
-emission itself.
+disguised as mesospheric emission. Two corrections avoid this. First, each
+line template is attenuated at its own centre wavelength by the PALACE
+molecular transmission, evaluated from high-resolution line optical depths at
+the airmass $X_{\rm src}$ of the fibre being fitted,
+\begin{equation}
+  t_\ell = \exp\!\Big\{-X_{\rm src}\big[\tau_\ell^{\rm dry}
+  + (w/w_0)\,\tau_\ell^{\rm H_2O}\big]\Big\},
+\end{equation}
+where $w$ is the PWV and $w_0 = 2.5$\,mm is the reference water column.
+Second, every template is divided by the smooth transmission
+$T_{\rm DRP}(\lambda;\,X_{\rm sci},w)$ that the DRP removed from all fibres
+along the science line of sight, so that model and data are compared in the
+frame in which the data are delivered. The design matrix of a spectrum is
+therefore $\mathbf{A}^{\rm obs} = \mathbf{A}(X_{\rm src}, w)/T_{\rm
+DRP}(\lambda; X_{\rm sci}, w)$, and the coefficients keep their meaning as
+top-of-atmosphere amplitudes of the emitting layer.
+
+Here and throughout, $\chi^2$ is the reduced $\chi^2$ of the fit residual
+under the photon-noise model of Section~\ref{sec:noise}, and \emph{the blue}
+is the range blueward of 6000\,\AA, where the continuum rather than OH
+dominates the sky. Including the transmission lowers the decomposition
+$\chi^2$ by about 30\% over the full band, with essentially no change in the
+blue, which has no telluric absorption.
 
 \subsection{OH and O$_2$ airglow}
 \label{sec:oh}
@@ -277,24 +287,19 @@ The correction was fitted on far-arm sky spectra with ridge regularisation
 $r$ channel. There the canonical relative strengths are too weak by about
 0.11\,dex. The fit could not compensate, because those lines share
 coefficients with the brighter $z$-channel lines of the same upper state. On
-1000 test rows the correction:
-\begin{itemize}
-  \item reduces the decomposition $\chi^2$ on OH-dominated pixels by factors
-        of 33 in $r$ and 3.6 in $z$, and by 31\% over the full band, with
-        every row improving;
-  \item reduces the systematic residual at the OH lines, stacked over rows,
-        from 1.1\% to 0.14\% of the line peak in $r$;
-  \item leaves the coefficients themselves nearly unchanged (0.8\% at the
-        90th percentile), and leaves the continuum partition and all
-        reliability flags unchanged.
-\end{itemize}
+1000 test observations the correction reduces the decomposition $\chi^2$ on
+OH-dominated pixels by factors of 33 in $r$ and 3.6 in $z$, and by 31\% over
+the full band, with every observation improving. The systematic residual at
+the OH lines, stacked over observations, falls from 1.1\% to 0.14\% of the
+line peak in $r$. The coefficients themselves barely change (0.8\% at the
+90th percentile), nor do the continuum partition and the reliability flags.
 Because the coefficients hardly change, any reconstruction must use the same
-line strengths as the fit: a mismatch is invisible in coefficient space and
-appears only in flux.
+line strengths as the fit: a mismatch is invisible in the coefficients and
+appears only in the reconstructed spectrum.
 
 \paragraph{O$_2$ atmospheric band.} The O$_2$ $b$-band near 8645\,\AA{} is
-first fitted on its own. The resulting per-row band shape then enters the
-main fit as a single template with one free amplitude.
+first fitted on its own. The band shape found for each spectrum then enters
+the main fit as a single template with one free amplitude.
 
 \subsection{Atomic lines}
 
@@ -314,16 +319,12 @@ Its template family is
   T_{{\rm moon},j}(\lambda) = I_\odot(\lambda)\;
   \alpha_{\rm ROLO}(\lambda,\phi_0)\; B^{(11)}_j(\lambda),
 \end{equation}
-for $j = 1,\dots,15$. The terms are:
-\begin{itemize}
-  \item $I_\odot$ is the solar spectrum \citep{Meftah2018};
-  \item $\alpha_{\rm ROLO}$ is the disk-integrated lunar albedo
-        \citep{Kieffer2005} at a fiducial phase angle
-        $\phi_0 = 30^\circ$;
-  \item $B^{(11)}_j$ are cubic B-splines with 11 interior knots across the
-        band.
-\end{itemize}
-The spline multiplier absorbs the wavelength dependence of atmospheric
+for $j = 1,\dots,15$, where $I_\odot$ is the solar spectrum
+\citep{Meftah2018}, $\alpha_{\rm ROLO}$ the disk-integrated lunar albedo
+\citep{Kieffer2005} at a fiducial phase angle $\phi_0 = 30^\circ$, and
+$B^{(11)}_j$ are cubic B-splines with 11 interior knots across the band.
+Their weighted sum, the spline \emph{multiplier}, absorbs the wavelength
+dependence of atmospheric
 scattering and the departure of the actual lunar phase from $\phi_0$. The
 albedo carries the lunar mineral absorption bands, which give the family a
 distinctive shape. At this knot spacing no adjacent pair of basis functions
@@ -343,30 +344,25 @@ knot. The multiplier is further restricted by a
 curvature penalty (Section~\ref{sec:qp}), so it is nearly monotone. Moonlight
 and zodiacal light must be separate families: otherwise the smooth zodiacal
 continuum is absorbed into the moon family on dark, low-ecliptic-latitude
-rows. The moon coefficients then have a mixed identity that no transfer can
-learn, because the two emitters depend on disjoint geometries.
+observations. The moon coefficients then have a mixed identity that no
+transfer can learn, because the two emitters depend on disjoint geometries.
 
 \subsection{Diffuse airglow continuum}
 \label{sec:diffuse}
 
 Three fixed templates describe the broadband airglow continuum, following the
-PALACE components \citep{Noll2024,Noll2025}:
-\begin{itemize}
-  \item HO$_2$: the PALACE template, interpolated onto the LVM grid;
-  \item FeO (the ``orange arc''): the PALACE template, interpolated onto the
-        LVM grid;
-  \item O$_2$ continuum: re-derived on LVM sky spectra, because the
-        canonical one peaks at 3220\,\AA, outside the LVM band, so only its
-        tail is constrained. Over $4200$--$5900$\,\AA{} the canonical
-        template runs about twice too high and biases the blue residual.
-\end{itemize}
-With the canonical HO$_2$/FeO pair, FeO peaks at 5966\,\AA, where FeO(VIS)
+PALACE components \citep{Noll2024,Noll2025}. HO$_2$ and FeO (the ``orange
+arc'') are the PALACE templates, interpolated onto the LVM grid. The O$_2$
+continuum was re-derived on LVM sky spectra: the canonical template peaks at
+3220\,\AA, outside the LVM band, so only its tail is constrained, and over
+$4200$--$5900$\,\AA{} it runs about twice too high and biases the blue
+residual. With the canonical HO$_2$/FeO pair, FeO peaks at 5966\,\AA, where FeO(VIS)
 is expected, and the 580--610\,nm feature is attributed to FeO rather than
 HO$_2$.
 
 PALACE is calibrated at Cerro Paranal, while LVM observes from Las Campanas.
 The absolute PALACE continuum levels are therefore indicative only. In dark
-time the fitted diffuse block amounts to 7.8\% of the 500--720\,nm airglow,
+time (Moon below the horizon) the fitted diffuse block amounts to 7.8\% of the 500--720\,nm airglow,
 against $3.3\pm0.8\%$ in the PALACE reference. This factor of 2.4 is not
 removed by any basis choice or constraint considered here. Either the
 continuum at Las Campanas differs, or the block contains emission that is not
@@ -403,23 +399,15 @@ a target of airmass $X_t$ and angular distance $\theta$ from the Moon is
   0.97\,\tau_{\rm A}\,P_{\rm HG}(\theta)\Big]\,E(\lambda).
 \end{split}
 \end{equation}
-The terms are:
-\begin{itemize}
-  \item $\tau = \tau_{\rm R}+\tau_{\rm A}$, with $\tau_{\rm R}$ the
-        Rayleigh optical depth and
-        $\tau_{\rm A} = 0.0336\,(\lambda/\lambda_0)^{-1.38}$ the
-        aerosol optical depth;
-  \item $\Phi(\delta) = (1-e^{-\delta})/\delta$ is the two-airmass
-        extinction factor;
-  \item $P_{\rm R}$ is the Rayleigh phase function with depolarisation
-        factor 0.0148;
-  \item $P_{\rm HG}$ is the Henyey--Greenstein phase function
-        \citep{Henyey1941} with $g = 0.8$;
-  \item $E(\lambda) = [1+3.5\,X_t\,\tau_{\rm R}(\lambda)]/
-        [1+3.5\,X_t\,\tau_{\rm R}(\lambda_0)]$ is an approximate
-        multiple-scattering enhancement of the blue;
-  \item $X_{\rm moon}$ is the airmass of the Moon.
-\end{itemize}
+Here $\tau = \tau_{\rm R}+\tau_{\rm A}$ is the sum of the Rayleigh optical
+depth and the aerosol optical depth
+$\tau_{\rm A} = 0.0336\,(\lambda/\lambda_0)^{-1.38}$;
+$\Phi(\delta) = (1-e^{-\delta})/\delta$ is the two-airmass extinction factor;
+$P_{\rm R}$ is the Rayleigh phase function with depolarisation factor 0.0148
+and $P_{\rm HG}$ the Henyey--Greenstein phase function \citep{Henyey1941}
+with $g = 0.8$; $E(\lambda) = [1+3.5\,X_t\,\tau_{\rm R}(\lambda)]/
+[1+3.5\,X_t\,\tau_{\rm R}(\lambda_0)]$ approximates the multiple-scattering
+enhancement of the blue; and $X_{\rm moon}$ is the airmass of the Moon.
 Scattered moonlight persists with the Moon just below the horizon. It is
 modelled by the taper $H = \exp[-8.22\,\tanh(\max(-h_{\rm moon},0)/5^\circ)]$,
 which gives $-0.70$\,dex at $h_{\rm moon} = -1^\circ$, $-2.72$\,dex at
@@ -436,22 +424,17 @@ $-5^\circ$ and saturates near $-3.6$\,dex.
 \end{split}
   \label{eq:zodimodel}
 \end{equation}
-The terms are:
-\begin{itemize}
-  \item $B_{500}$ is the tabulated zodiacal brightness at 500\,nm
-        \citep{Leinert1998}, as a function of the helio-ecliptic longitude
-        $\Delta\lambda_\odot \equiv |\lambda_{\rm ecl}-\lambda_\odot|$ and
-        ecliptic latitude $\beta$, both geocentric;
-  \item $\tilde I_\odot$ is the solar spectrum broadened by
-        30\,km\,s$^{-1}$ and Doppler-shifted by the dust velocity
-        $v_{\rm z}$;
-  \item the exponent 0.26 is the zodiacal reddening;
-  \item the factor $1/2$ in the extinction reflects forward scattering into
-        the beam of an extended source;
-  \item $f$ is the empirical correction described below.
-\end{itemize}
+Here $B_{500}$ is the tabulated zodiacal brightness at 500\,nm
+\citep{Leinert1998} as a function of the helio-ecliptic longitude
+$\Delta\lambda_\odot \equiv |\lambda_{\rm ecl}-\lambda_\odot|$ and the
+ecliptic latitude $\beta$, both geocentric; $\tilde I_\odot$ is the solar
+spectrum broadened by 30\,km\,s$^{-1}$ and Doppler-shifted by the dust
+velocity $v_{\rm z}$; the exponent 0.26 is the zodiacal reddening; the
+factor $1/2$ in the extinction reflects forward scattering into the beam of
+an extended source; and $f$ is the empirical correction described below.
 Both spectra are multiplied by the fibre solid angle and projected onto the
-LVM grid with the row's LSF. The constraints use two numbers from the model:
+LVM grid with the LSF of the spectrum. The constraints use two numbers from
+the model:
 the zodiacal integral $Z_{\rm pred} = \int S_{\rm zodi}\,\dd\lambda$ and the
 moonlight fraction
 \begin{equation}
@@ -472,8 +455,9 @@ therefore use the physics-only model, with all fitted scale factors set to
 unity except the horizon taper. The two versions differ by a factor of
 1.5--1.7 in absolute zodiacal light.
 
-\paragraph{Empirical correction to the zodiacal profile.} On dark rows the
-fitted zodiacal amplitude is set by the data (Section~\ref{sec:constraints}).
+\paragraph{Empirical correction to the zodiacal profile.} In dark time
+the fitted zodiacal amplitude is set by the data
+(Section~\ref{sec:constraints}).
 Comparing it with Equation~(\ref{eq:zodimodel}) with $f=0$ showed that the
 tabulated profile falls off too steeply with ecliptic latitude for LVM: it is
 too bright on the ecliptic and too faint toward the poles. It therefore
@@ -492,30 +476,21 @@ term:
 where the $P_i$ are Legendre polynomials of degree $\le 2$ and the
 coefficients are listed in Table~\ref{tab:zodicorr}.
 
-\begin{itemize}
-  \item \emph{Fit.} The correction was fitted on 14\,979 dark pointings,
-        pooling all three arms. Rows at the bounds of the zodiacal bracket
-        were treated as censored observations (a Tobit likelihood;
-        \citealt{Tobin1958}).
-  \item \emph{Joint terms, not deployed.} The ecliptic shape was fitted
-        jointly with a Galactic-latitude term and a log-airmass term, and
-        only the ecliptic part is deployed. The zodiacal family also absorbs
-        Galactic continuum (diffuse Galactic light and unresolved stars,
-        $-0.15$\,dex from the plane to high latitude), for which the basis
-        has no template. The airmass term is consistent with airglow leaking
-        into the family. Neither is zodiacal light.
-  \item \emph{Validation}, with whole nights held out: the dark-time scatter
-        of fitted against predicted zodiacal light falls from 0.124 to
-        0.102\,dex, and the contrast slopes rise to 0.74 (near) and 0.94
-        (far).
-  \item \emph{Degree.} A degree-5 correction fits absolute levels better but
-        lowers the near-arm contrast slope to 0.37: it fits structure that
-        does not carry over between neighbouring pointings.
-  \item \emph{Size.} Over the observed pointings the correction ranges from
-        $-0.13$ to $+0.26$\,dex (median $+0.06$); the ecliptic pole is
-        $+0.30$\,dex relative to the ecliptic.
-\end{itemize}
-The correction enters $Z_{\rm pred}$ and, through it, $f_{\rm pred}$, so the
+The correction was fitted on 14\,979 dark pointings, pooling all three arms;
+pointings at a bound of the zodiacal bracket were treated as censored (a
+Tobit likelihood; \citealt{Tobin1958}). The ecliptic shape was fitted
+jointly with a Galactic-latitude term and a log-airmass term, but only the
+ecliptic part is used. The zodiacal family also absorbs Galactic continuum
+(diffuse Galactic light and unresolved stars, $-0.15$\,dex from the plane to
+high latitude), for which the basis has no template, and the airmass term is
+consistent with airglow leaking into the family; neither is zodiacal light.
+With whole nights held out, the correction reduces the dark-time scatter of
+fitted against predicted zodiacal light from 0.124 to 0.102\,dex and raises
+the contrast slopes to 0.74 (near) and 0.94 (far). A degree-5 correction
+fits absolute levels better but lowers the near-arm slope to 0.37, because
+it fits structure that does not carry over between neighbouring pointings.
+Over the observed pointings the correction ranges from $-0.13$ to
+$+0.26$\,dex (median $+0.06$). The correction enters $Z_{\rm pred}$ and, through it, $f_{\rm pred}$, so the
 two constraints that use them stay mutually consistent.
 
 \begin{deluxetable}{ccrccr}
@@ -543,22 +518,31 @@ The fit weights each pixel by the inverse of a photon-noise variance
 Here $s(\lambda)$ is the absolute spectral sensitivity of the instrument
 (flux per detected count), $t_{\rm exp}$ is the exposure time and
 $N_{\rm eff}$ is the effective number of fibres of the median. A floor of 5\%
-of the row median prevents the variance from vanishing. The weights are
-normalised to unit mean over the good pixels of each row. This preserves the
-relative weighting across wavelength and leaves the overall scale of the
-objective unchanged, so the regularisation strengths keep their meaning. The
-red carries about three times the blue's weight: the sky is brighter there,
-but the sensitivity is about seven times better, so the variance is lower.
-Compared with uniform weights this lowers the photon $\chi^2$ by 11--14\% over
-the full band in all three arms. The blue continuum is not traded away: it
-improves by 2--4\% as well.
+of the median of the spectrum prevents the variance from vanishing. The
+weights are normalised to unit mean over the good pixels of each spectrum.
+This preserves the relative weighting across wavelength and leaves the
+overall scale of the objective unchanged, so the regularisation strengths
+keep their meaning. The red carries about three times the blue's weight: the
+sky is brighter there, but the sensitivity is about seven times better, so
+the variance is lower. Compared with uniform weights this lowers the $\chi^2$
+by 11--14\% over the full band in all three arms, and by 2--4\% in the blue.
+
+The same variance with $N_{\rm eff}=1$ is the photon noise of a single
+fibre. It is the yardstick for the sky prediction
+(Section~\ref{sec:evaluation}): the median spectra are cleaner than any one
+fibre, but the sky model is subtracted from individual fibres, so the
+residual of the model only matters in comparison with the single-fibre
+noise. A $\chi^2$ of 1 against this noise means that the model error equals
+it. For a typical observation, the single-fibre noise in a 0.5\,\AA{} pixel
+is about 8\% of the sky flux over the full band and 9\% in the blue.
 
 Pixels near the emission lines of the science target (Balmer lines, [N\,\textsc{ii}],
 [S\,\textsc{ii}], [O\,\textsc{iii}] and others) carry no information about
-the sky and are given zero weight in the science spectrum. The windows are
-centred on the measured H$\alpha$ velocity of the field. None of these lines
-is in the basis. If they were not masked, the fit would absorb them, mostly
-into the OH templates.
+the sky and are given zero weight. The windows are centred on the measured
+H$\alpha$ velocity of the field and are masked in all three spectra of an
+observation, so that the three fits use identical pixels. None of these
+lines is in the basis; unmasked, they would be absorbed mostly into the OH
+templates.
 
 \subsection{Estimation}
 \label{sec:estimation}
@@ -577,60 +561,39 @@ non-negative least-squares problem
 \end{split}
   \label{eq:qp}
 \end{equation}
-The terms are:
-\begin{itemize}
-  \item $\mathbf{W}$ is the diagonal matrix of pixel weights
-        (Section~\ref{sec:noise});
-  \item $\mathbf{D}^{(2)}$ is the second-difference operator on adjacent
-        spline coefficients, with $\lambda_{\rm m} = \lambda_{\rm z} = 0.1$
-        per unit of scaled flux;
-  \item $\mathbf{G}\vect{c}\le\vect{h}$ collects the linear identifiability
-        constraints of Section~\ref{sec:constraints}.
-\end{itemize}
-The problem is convex. It is solved with the interior-point conic solver
-Clarabel \citep{Goulart2024}.
+Here $\mathbf{W}$ is the diagonal matrix of pixel weights
+(Section~\ref{sec:noise}), $\mathbf{D}^{(2)}$ is the second-difference
+operator on adjacent spline coefficients, with
+$\lambda_{\rm m} = \lambda_{\rm z} = 0.1$ per unit of scaled flux, and
+$\mathbf{G}\vect{c}\le\vect{h}$ collects the linear identifiability
+constraints of Section~\ref{sec:constraints}. The problem is convex and is
+solved with the interior-point conic solver Clarabel \citep{Goulart2024}.
 
-The columns of $\mathbf{A}$ differ by many orders of magnitude in scale, so
-the problem is rescaled before the solve:
-\begin{enumerate}
-  \item The data are divided by
-        $d = \max(\mathrm{rms}(\mathbf{W}^{1/2}\vect{y}),1)$.
-  \item Each column $k$ is divided by $d\,s_k$, with
-        $s_k = \lVert(\mathbf{W}^{1/2}\mathbf{A})_{:,k}\rVert_2$.
-  \item The regularisation operators are rescaled consistently,
-        $\mathbf{D}^{(2)}\to\mathbf{D}^{(2)}\,\mathrm{diag}(1/s)$.
-\end{enumerate}
-The solution is transformed back afterwards. The homogeneous constraints are
-invariant under this rescaling; those with a right-hand side are rescaled
-with the data.
+Because the columns of $\mathbf{A}$ differ in scale by many orders of
+magnitude, the problem is rescaled before the solve. The data are divided by
+$d = \max(\mathrm{rms}(\mathbf{W}^{1/2}\vect{y}),1)$, each column $k$ by
+$d\,s_k$ with $s_k = \lVert(\mathbf{W}^{1/2}\mathbf{A})_{:,k}\rVert_2$, and
+the regularisation operators consistently,
+$\mathbf{D}^{(2)}\to\mathbf{D}^{(2)}\,\mathrm{diag}(1/s)$. The solution is
+transformed back afterwards. Constraints without a right-hand side are
+unchanged by the rescaling; those with one are rescaled with the data.
 
 \subsubsection{Alternating refinement of continuum, LSF and lines}
 
 The LSF, the continuum and the line amplitudes constrain one another, and the
-problem is not jointly convex in all three. They are therefore refined
-alternately. The sequence is:
-\begin{enumerate}
-  \item \emph{O$_2$ pre-fit} of the $b$-band shape.
-  \item \emph{Joint seed}: Equation~(\ref{eq:qp}) with all families, at the
-        nominal LSF.
-  \item \emph{Refinement cycles}, five in total. In each cycle:
-    \begin{enumerate}
-      \item the continuum block is refitted with the line model held fixed.
-            Pixels within $\pm2$\,\AA{} of the lines that carry 99\% of the
-            line flux are down-weighted by a factor
-            $5\times10^{-4}$, and residual outliers are down-weighted with a
-            Huber weight beyond $3\sigma$. All continuum constraints of
-            Section~\ref{sec:constraints} are imposed in this step;
-      \item the LSF of Equation~(\ref{eq:lsf}) is refitted in each channel to the
-            data minus continuum, given the current line amplitudes;
-      \item the line templates are re-rendered with the new LSF, and the
-            line block is refitted to the data minus continuum.
-    \end{enumerate}
-    A cycle is committed only if all three stages succeed; otherwise the fit
-    returns the last committed state.
-\end{enumerate}
-The final coefficients, uncertainties and component spectra refer to the
-last committed LSF.
+problem is not jointly convex in all three, so they are refined alternately.
+The fit starts with a pre-fit of the O$_2$ $b$-band shape and a joint solve
+of Equation~(\ref{eq:qp}) with all families at the nominal LSF. Five
+refinement cycles follow. Each cycle first refits the continuum block with
+the line model held fixed, imposing all continuum constraints of
+Section~\ref{sec:constraints}; pixels within $\pm2$\,\AA{} of the lines that
+carry 99\% of the line flux are down-weighted by $5\times10^{-4}$, and
+residual outliers by a Huber weight beyond $3\sigma$. It then refits the LSF
+of Equation~(\ref{eq:lsf}) in each channel to the data minus continuum, and
+finally re-renders the line templates with the new LSF and refits the line
+block. A cycle is kept only if all three stages succeed; otherwise the fit
+returns the last kept state, to which the final coefficients, uncertainties
+and component spectra refer.
 
 \subsection{Identifiability constraints}
 \label{sec:constraints}
@@ -638,22 +601,23 @@ last committed LSF.
 The data term alone does not determine several of the partitions the
 transfer depends on. Both continuum families are built on the solar spectrum,
 so the fit can move flux between moonlight and zodiacal light almost freely:
-their \emph{sum} is well constrained, but the \emph{division} is not. On 200
-sky spectra stratified in lunar phase, the unconstrained fit:
-\begin{itemize}
-  \item put the two colours in the wrong order on 164 of 168 moon-up
-        spectra. The fitted moonlight had a log--log slope of $+0.21$
-        where the physics gives $-3.7$, and the fitted zodiacal light
-        $-4.04$ where the physics gives $-0.3$;
-  \item gave the moon family 45\% of the continuum with the Moon $37^\circ$
-        below the horizon;
-  \item produced a ``zodiacal light'' whose amplitude correlated with lunar
-        illumination at $\rho = +0.95$, and with the tabulated $B_{500}$ at
-        only $\rho = 0.09$.
-\end{itemize}
-The inside of the diffuse block is not identifiable either. All constraints
-below are hard linear inequalities in the same cone as $\vect{c}\ge0$.
-Unlike penalties, they never trade against the likelihood.
+their \emph{sum} is well constrained, but the \emph{division} is not. We
+measure the colour of a component by its log--log slope, the slope of
+$\log$ flux against $\log\lambda$. On 200 sky spectra stratified in lunar
+phase, the unconstrained fit put the two colours in the wrong order on 164
+of 168 moon-up spectra, with a fitted moonlight slope of $+0.21$ where the
+physics gives $-3.7$ and a zodiacal slope of $-4.04$ where it gives $-0.3$.
+It gave the moon family 45\% of the continuum with the Moon $37^\circ$ below
+the horizon, and it produced a ``zodiacal light'' whose amplitude correlated
+with lunar illumination at $\rho = +0.95$ and with the tabulated $B_{500}$ at
+only $\rho = 0.09$. The split within the diffuse block is not identifiable
+either.
+
+All constraints below are hard linear inequalities in the same cone as
+$\vect{c}\ge0$; unlike penalties, they never trade against the likelihood.
+A constraint \emph{binds} when the solution lies exactly on its bound, and
+the quantity it limits is then \emph{pinned}: set by the constraint rather
+than measured.
 
 \paragraph{(a) Adjacent-knot ratio bounds.} For each continuum spline family
 $f\in\{\rm moon, zodi\}$ and each adjacent pair of coefficients,
@@ -662,18 +626,14 @@ $f\in\{\rm moon, zodi\}$ and each adjacent pair of coefficients,
   \qquad \beta = 0.7 .
 \end{equation}
 This limits how fast a family's multiplier may change with wavelength, so
-neither family can take on the colour of the other.
-\begin{itemize}
-  \item With $K$ basis functions the total permitted swing across the band
-        is $\beta^{-(K-1)}$, so the value of $\beta$ is specific to 15 moon
-        and 5 zodiacal basis functions.
-  \item The bounds also forbid a spline that falls to zero within the band
-        and re-emerges. The unconstrained fit used exactly this to reach a
-        lower residual, collapsing the moon multiplier across
-        $5100$--$6900$\,\AA.
-  \item Together with non-negativity, each bound makes a block either
-        entirely positive or identically zero.
-\end{itemize}
+neither family can take on the colour of the other. With $K$ basis functions
+the total permitted swing across the band is $\beta^{-(K-1)}$, so the value
+of $\beta$ is specific to the 15 moon and 5 zodiacal basis functions. The
+bounds also forbid a spline that falls to zero within the band and
+re-emerges, which the unconstrained fit used to lower its residual by
+collapsing the moon multiplier across $5100$--$6900$\,\AA. Together with
+non-negativity, they make each family either entirely positive or
+identically zero.
 
 \paragraph{(b) Moon-share bracket.} With the component integrals
 $u = \int T_{\rm moon}\vect{c}_{\rm moon}\,\dd\lambda$ and
@@ -702,41 +662,28 @@ from growing with the Moon. An absolute anchor does:
 \begin{equation}
   \kappa_z^{-1}\,C\,Z_{\rm pred} \;\le\; v \;\le\; \kappa_z\,C\,Z_{\rm pred},
 \end{equation}
-with $\kappa_z = 2$ and $C = 1.6$.
-\begin{itemize}
-  \item The calibration $C$ recentres the model on the dark-time data, where
-        the fitted zodiacal light is set by the data. There the median of
-        $\log_{10}(v/C Z_{\rm pred})$ is $-0.06$.
-  \item The width $\kappa_z$ is set by the dark-time scatter of that ratio,
-        about 0.15\,dex. A tighter bracket would clip real variation.
-  \item This is the only constraint with a non-zero right-hand side, so
-        $Z_{\rm pred}$ must be on the flux scale of the data being fitted.
-\end{itemize}
+with $\kappa_z = 2$ and $C = 1.6$. The calibration $C$ recentres the model
+on dark time, where the zodiacal light is set by the data; there the median
+of $\log_{10}(v/C Z_{\rm pred})$ is $-0.06$. The width $\kappa_z$ matches
+the dark-time scatter of that ratio, about 0.15\,dex, so a tighter bracket
+would clip real variation. Because $Z_{\rm pred}$ enters with a non-zero
+right-hand side, it must be on the flux scale of the data being fitted.
 
-The anchor binds from above on most moon-up rows, and this is correct.
-Releasing it to $\kappa_z = 100$ on 294 spectra stratified in lunar
-illumination re-partitions a conserved continuum:
-\begin{itemize}
-  \item the freed zodiacal light rises by 0.19\,dex, while the moonlight
-        falls by 0.11\,dex and the diffuse block by 0.44\,dex;
-  \item the total continuum is conserved to 0.5\%, and the median residual
-        improves by only 0.6\%;
-  \item the excess follows the Moon, not the ecliptic. With FLI the
-        fractional lunar illumination, its partial correlations are
-        \[
-        \begin{gathered}
-          \rho({\rm excess},{\rm FLI}\,|\,B_{500}) = +0.73,\\
-          \rho({\rm excess}, B_{500}\,|\,{\rm FLI}) = -0.32 ,
-        \end{gathered}
-        \]
-        and the second has the wrong sign for zodiacal light.
-\end{itemize}
-The released flux is moonlight leaking into the zodiacal family, and the
-anchor is what prevents it.
+The anchor binds from above on most moon-up observations, and this is
+correct. Releasing it to $\kappa_z = 100$ on 294 spectra stratified in lunar
+illumination only re-partitions a conserved continuum. The freed zodiacal
+light rises by 0.19\,dex while the moonlight falls by 0.11\,dex and the
+diffuse block by 0.44\,dex; the total continuum is conserved to 0.5\%, and
+the median residual improves by only 0.6\%. The excess follows the Moon, not
+the ecliptic: with FLI the fractional lunar illumination, its partial
+correlations are $\rho({\rm excess},{\rm FLI}\,|\,B_{500}) = +0.73$ and
+$\rho({\rm excess}, B_{500}\,|\,{\rm FLI}) = -0.32$, and the second has the
+wrong sign for zodiacal light. The released flux is moonlight leaking into
+the zodiacal family, which the anchor prevents.
 
 \paragraph{(d) Diffuse species-ratio bracket.} Without further constraints
 the fitted FeO/HO$_2$ flux ratio spreads over 10\,dex, and HO$_2$ is driven
-to exactly zero on 23\% of rows. HO$_2$ emits only 5\% of its flux
+to exactly zero on 23\% of observations. HO$_2$ emits only 5\% of its flux
 below 9800\,\AA{} and is a featureless red continuum within the band. This
 spread is not information: the three arms of one exposure, which look at the
 same airglow a few degrees apart, disagree about the ratio by 0.63\,dex at
@@ -750,26 +697,21 @@ FeO and O$_2$:
 \end{gathered}
 \end{equation}
 Each side of a ratio bound is one linear inequality, $A_k - R\,A_0 \le 0$.
-\begin{itemize}
-  \item \emph{Centre.} Centring on the PALACE reference shares instead costs
-        26\% of the blue $\chi^2$, against 0.7\% for the sample median;
-        this is the site difference of Section~\ref{sec:diffuse} in numbers.
-  \item \emph{Width.} The width is nearly free, because the scatter it
-        removes is degeneracy.
-  \item \emph{Effect.} On 500 stratified rows the 5--95\% span of the ratio
-        collapses from 10.3 to 0.40\,dex, and near-zero HO$_2$ rows fall
-        from 23\% to 0.2\%, for $+2.5\%$ in blue $\chi^2$ and no measurable
-        full-band cost. The constraint moves the split between the diffuse
-        and zodiacal families but hardly their sum: the per-row change in
-        $\log_{10}$ of zodi plus diffuse is below 0.012 at the 90th
-        percentile.
-\end{itemize}
+Centring on the PALACE reference shares instead would cost 26\% of the blue
+$\chi^2$, against 0.7\% for the sample median; this is the site difference of
+Section~\ref{sec:diffuse} in numbers. The width costs almost nothing, because
+the scatter it removes is degeneracy. On 500 stratified observations the
+5--95\% span of the ratio collapses from 10.3 to 0.40\,dex and near-zero
+HO$_2$ falls from 23\% to 0.2\% of observations, for $+2.5\%$ in blue
+$\chi^2$ and no measurable full-band cost. The constraint moves the split
+between the diffuse and zodiacal families but hardly their sum: the change in
+$\log_{10}$ of zodi plus diffuse is below 0.012 at the 90th percentile.
 
 \paragraph{(e) Moon-gated cap on the diffuse block.} The diffuse species are
 mesospheric chemiluminescence and cannot depend on the Moon. Yet the ratio
 $A_{\rm diff}/A_{\rm OH}$ rises with the predicted moonlight fraction at
-$\rho = +0.72$, while airmass and OH brightness give $|\rho| < 0.1$. On
-full-moon rows about three quarters of the fitted FeO is moonlight.
+$\rho = +0.72$, while airmass and OH brightness give $|\rho| < 0.1$. At full
+Moon about three quarters of the fitted FeO is moonlight.
 Normalising by OH makes the leak measurable, because OH is the
 best-determined airglow amplitude and is itself insensitive to the Moon. The
 cap is
@@ -779,32 +721,23 @@ cap is
 with $c_0 = -0.649$, the dark-time median of the ratio, and
 $W = 0.15$\,dex. $A_{\rm OH}$ is a constant
 in the continuum step, because the line model is held fixed there, so the cap
-is one inequality with a right-hand side; it is re-installed in every cycle.
-Three choices are forced by measurement:
-\begin{itemize}
-  \item \emph{The cap is one-sided}, because the leak has one direction.
-  \item \emph{It applies only where $f_{\rm pred} > 0.6$}, because the
-        dark-time scatter of the ratio (0.22\,dex) is real. An ungated cap
-        costs 15--32\% of the blue $\chi^2$.
-  \item \emph{It caps the whole block rather than FeO alone.} A cap on FeO
-        alone made the ratio bracket (d) bind instead and left half of the
-        gated rows above the bound.
-\end{itemize}
-On 1000 random rows the cap:
-\begin{itemize}
-  \item binds on 70\% of gated rows, and no gated row remains above it;
-  \item reduces FeO by 54\% and the block by 42\% on gated rows;
-  \item sends 98.6\% of the released flux to the moon family and none to the
-        zodiacal family (the anchor protects the latter), with the continuum
-        total conserved to 0.03\%;
-  \item costs 1.3\% of the blue $\chi^2$ on binding rows and nothing
-        measurable elsewhere;
-  \item removes 77\% of the moon-attributable excess of the 580--610\,nm
-        feature.
-\end{itemize}
-The residual correlation is structural: the ratio in the lowest gated
-moon-brightness quartile already lies below the cap, so a flat ceiling cannot
-remove it.
+is one inequality with a right-hand side, re-installed in every cycle. The
+cap is one-sided, because the leak has one direction. It applies only where
+$f_{\rm pred} > 0.6$, because the dark-time scatter of the ratio (0.22\,dex)
+is real and an ungated cap costs 15--32\% of the blue $\chi^2$. It caps the
+whole block rather than FeO alone, because a cap on FeO alone made the ratio
+bracket (d) bind instead and left half of the gated observations above the
+bound.
+
+On 1000 random observations the cap binds on 70\% of the gated ones and
+leaves none above it. It reduces FeO by 54\% and the block by 42\% there,
+sends 98.6\% of the released flux to the moon family and none to the
+zodiacal family (which the anchor protects), and conserves the continuum
+total to 0.03\%. It costs 1.3\% of the blue $\chi^2$ where it binds and
+nothing measurable elsewhere, and it removes 77\% of the moon-attributable
+excess of the 580--610\,nm feature. The remaining correlation is
+structural: in the faintest quartile of gated moonlight the ratio already
+lies below the cap, so a flat ceiling cannot remove it.
 
 \paragraph{What the constraints do.} Table~\ref{tab:constraint_effect}
 summarises the effect of constraints (a)--(c) on the 200-spectrum test set.
@@ -836,12 +769,12 @@ Near--far moonlight disagreement, median & 0.055 & 0.0045 & \nodata \\
 \end{deluxetable}
 
 \begin{deluxetable}{lcccccc}
-\tablecaption{Fraction of rows on each bound of the zodiacal anchor (c) and of
-the moon-share bracket (b).\label{tab:occupancy}}
+\tablecaption{Fraction of observations on each bound of the zodiacal anchor
+(c) and of the moon-share bracket (b).\label{tab:occupancy}}
 \tablehead{\colhead{} & \multicolumn{3}{c}{Zodiacal anchor} &
   \multicolumn{3}{c}{Moon share} \\
   \cline{2-4}\cline{5-7}
-  \colhead{Rows} & \colhead{ceiling} & \colhead{floor} & \colhead{interior} &
+  \colhead{Observations} & \colhead{ceiling} & \colhead{floor} & \colhead{interior} &
   \colhead{ceiling} & \colhead{floor} & \colhead{interior}}
 \startdata
 Moon up   & 87.5\% & 1.2\%  & 11.2\% & 1.2\%  & 5.0\% & 93.8\% \\
@@ -857,26 +790,22 @@ collapse described in (a).
 \subsection{Retry on reversal}
 \label{sec:retry}
 
-A row is \emph{reversed} when its fitted moonlight is redder than its fitted
-zodiacal light, $s_{\rm moon} > s_{\rm zodi}$, where $s$ is the log--log
-slope of the reconstructed component. The test is applied only where both
-families carry flux, $0.05\le u/(u+v)\le0.95$. A reversed row is mislabelled
-rather than noisy: its moon coefficients describe zodiacal light.
-\begin{itemize}
-  \item \emph{How often.} After constraints (a)--(c), reversals are
-        near-ties (all within 2.0 of the boundary in the separation metric)
-        and occur on 1--5\% of testable spectra. They are more frequent at
-        low lunar illumination and low lunar altitude, and 3.6 times more
-        frequent in the science arm than in the far arm, consistent with
-        faint-source continuum in the science fibres.
-  \item \emph{Recovery.} The amplitudes of a reversed row are nearly right,
-        because the data barely distinguish the two branches
-        ($\rho({\rm moon},{\rm zodi}) = -0.95$). Refitting only the reversed
-        rows with a tighter ratio bound, $\beta = 0.85$, recovers every one
-        of them in a test set of 18, for a median $\chi^2$ increase of
-        2.8\%, while the moonlight fraction changes only in the fourth
-        decimal.
-\end{itemize}
+A spectrum is \emph{reversed} when its fitted moonlight is redder than its
+fitted zodiacal light, $s_{\rm moon} > s_{\rm zodi}$, where $s$ is the
+log--log slope of the reconstructed component. The test is applied only
+where both families carry flux, $0.05\le u/(u+v)\le0.95$. A reversed spectrum
+is mislabelled rather than noisy: its moon coefficients describe zodiacal
+light. After constraints (a)--(c), reversals are near-ties (all within 2.0
+of the boundary in the separation metric) and occur on 1--5\% of testable
+spectra. They are more frequent at low lunar illumination and altitude, and
+3.6 times more frequent in the science arm than in the far arm, consistent
+with faint-source continuum in the science fibres. Their amplitudes are
+nearly right, because the data barely distinguish the two branches
+($\rho({\rm moon},{\rm zodi}) = -0.95$). Refitting a reversed spectrum with
+a tighter ratio bound, $\beta = 0.85$, recovered all 18 in a test set, for a
+median $\chi^2$ increase of 2.8\% and a change in the moonlight fraction only
+in the fourth decimal.
+
 The decomposition therefore retries every reversed spectrum at
 $\beta = 0.85$ and keeps the retry if it is no longer reversed. The retry
 and its outcome are recorded in the flags (Section~\ref{sec:outputs}). The
@@ -911,24 +840,61 @@ are therefore also kept for the moon and zodiacal families.
 \subsection{Outputs and reliability flags}
 \label{sec:outputs}
 
-For each spectrum the decomposition returns:
-\begin{itemize}
-  \item the coefficients $\vect{c}$ and marginal errors $\vect\sigma$;
-  \item the moon and zodiacal covariance blocks;
-  \item the component spectra, reconstructed with the final LSF and summing
-        to the model;
-  \item the fitted LSF and the O$_2$ band shape;
-  \item summary statistics;
-  \item a reliability bit mask.
-\end{itemize}
-The flags make the judgements of Section~\ref{sec:selection} available per
-row. Production sky subtraction cannot discard a row, because every science
-exposure needs a sky spectrum, so the flags are how a consumer learns that a
-coefficient is unreliable, or that it reflects a constraint rather than the
-data. The flags are of two kinds (Table~\ref{tab:flags}). Each constraint
-flag is evaluated against the solver's own constraint functional, integrated
-over the same good pixels the solve used. Pinned rows therefore sit exactly
-on their bound.
+For each spectrum the decomposition returns the coefficients $\vect{c}$ and
+their marginal errors, the moon and zodiacal covariance blocks, the
+component spectra (reconstructed with the final LSF and summing to the
+model), the fitted LSF and O$_2$ band shape, summary statistics and a
+reliability bit mask.
+
+Figures~\ref{fig:example-decomp-up} and~\ref{fig:example-decomp-down} show
+the decomposition of a near-arm spectrum with the Moon up and with the Moon
+down. With the Moon up, scattered moonlight is the brightest continuum
+component, several times the zodiacal light in the blue, and carries the
+solar absorption lines; the diffuse airglow continuum is an order of
+magnitude fainter. The OH forest dominates redward of 6000\,\AA, reaching
+tens of times the continuum at the line peaks. With the Moon down, the sky
+continuum is several times fainter and is carried by the zodiacal light,
+with the diffuse continuum a factor of a few below it; the moonlight sits at
+the floor set by constraint (b), about 1\% of the continuum. In both cases
+the residual is flat over most of the band. Its largest excursions are in
+the far blue, where the instrument is least sensitive, at the masked nebular
+lines, and among the strongest OH and telluric features beyond 9000\,\AA.
+
+\begin{figure*}
+\centering
+\includegraphics[width=\textwidth]{figures/example_decomp_moonup.pdf}
+\caption{Decomposition of a near-arm sky spectrum with the Moon up
+(Section~\ref{sec:decomp}). Black: observed spectrum; red: total model
+(Equation~\ref{eq:model}); blue: moonlight; purple: zodiacal light; orange:
+diffuse airglow continuum; light gray: OH and O$_2$ airglow; dark gray:
+atomic lines. The insets zoom on 3900--4200, 6200--6500 and
+8400--8700\,\AA. The bottom panel is the residual, observed minus model,
+over a range that clips its largest spikes. Gray vertical bands mark the
+nebular emission-line windows given zero weight in the fits of all three
+arms (Section~\ref{sec:noise}). The observation lies at the 25th percentile
+of the fit $\chi^2$ among moon-up observations: a typical good fit, not the
+best one.}
+\label{fig:example-decomp-up}
+\end{figure*}
+
+\begin{figure*}
+\centering
+\includegraphics[width=\textwidth]{figures/example_decomp_moondown.pdf}
+\caption{As Figure~\ref{fig:example-decomp-up}, for an observation with the
+Moon below the horizon, selected in the same way. The moonlight sits at the
+floor of the moon-share bracket (Section~\ref{sec:constraints}), and the
+zodiacal light and diffuse continuum carry the continuum.}
+\label{fig:example-decomp-down}
+\end{figure*}
+
+The flags make the judgements of Section~\ref{sec:selection} available for
+every observation. Production sky subtraction cannot discard an observation,
+because every science exposure needs a sky spectrum, so the flags are how a
+user learns that a coefficient is unreliable or reflects a constraint rather
+than the data. The flags are errors or warnings (Table~\ref{tab:flags}).
+Each constraint flag is evaluated with the solver's own constraint function,
+over the same pixels the fit used, so a pinned quantity sits exactly on its
+bound.
 
 \begin{deluxetable}{llL{9.6cm}}
 \tablecaption{Reliability flags.\label{tab:flags}}
@@ -957,9 +923,9 @@ Warning & reversal untestable & a family carries too little flux to test \\
 \subsection{Selection of the training sample}
 \label{sec:selection}
 
-The transfer is trained only on rows whose coefficients mean what their names
-say. A row is rejected if any of its three spectra fails one of the
-following tests:
+The transfer is trained only on observations whose coefficients mean what
+their names say. An observation is rejected if any of its three spectra
+fails one of the following tests:
 \begin{enumerate}
   \item \emph{Field exclusion}: pointings within $10^\circ$ of the Large and
         Small Magellanic Clouds, where bright stellar populations and ionised
@@ -972,8 +938,8 @@ following tests:
         the sample.
   \item \emph{Reversal}: moon/zodiacal reversal after the retry.
   \item \emph{Coefficient runaway}: hard limits on FeO and K\,\textsc{i},
-        and a robust limit on the per-row mean OH coefficient. The latter
-        catches rows whose OH block ran away by many orders of magnitude.
+        and a robust limit on the mean OH coefficient, which catches
+        spectra whose OH block ran away by many orders of magnitude.
   \item \emph{Diffuse collapse}: all three diffuse species below $10^{-3}$
         of their median. The fit put no diffuse continuum at all and let the
         zodiacal family carry it. The distribution is bimodal, with nothing
@@ -986,19 +952,19 @@ following tests:
         ($\kappa = 8$) of the concatenated three-arm coefficient vector, and
         of the OH block with $\kappa = 6$ on a robust scale.
 \end{enumerate}
-These tests are a training-sample selection only. In production every row is
-predicted, and the flags of Table~\ref{tab:flags} report what the tests would
-have concluded.
+These tests select the training sample only. In production every
+observation is predicted, and the flags of Table~\ref{tab:flags} report
+what the tests would have concluded.
 
 %======================================================================
 \section{Geometric normalisation and effective extinction}
 \label{sec:geometry}
 
-The three pointings of a row are simultaneous but have different zenith
+The three arms of an observation are simultaneous but have different zenith
 angles, so each sees a different slant path through the emitting layers and
-the atmosphere. This part of the difference between the pointings is known
-physics. It is removed in closed form before the transfer, so the network
-does not have to learn it from limited data.
+the atmosphere. This part of the difference between the arms is known
+physics, and it is removed in closed form before the transfer so that the
+network does not have to learn it from limited data.
 
 \subsection{Scaling law}
 
@@ -1117,23 +1083,17 @@ sight. It has zero mean in the logarithm and is uncorrelated with the
 airmass difference. The intrinsic emissivity cancels, because both arms
 measure the same coefficient at the same instant. The fitted $k_{\rm eff}$
 absorbs the multiple-scattering correction, the site aerosol level and any
-error in the assumed layer height. The estimator has four safeguards:
-\begin{itemize}
-  \item \emph{Fixed layer height.} Because of the degeneracy above, only
-        $k_{\rm eff}$ is fitted.
-  \item \emph{Column-level selection.} Coefficients are selected whole.
-        A per-row amplitude threshold would select on the outcome: the arm
-        at lower airmass has the smaller van Rhijn factor and passes the
-        threshold only when it carries a positive fluctuation, which
-        correlates the residual with the sign of $\Delta X$. In tests this
-        inflated $k_{\rm eff}$ by a factor of 1.8.
-  \item \emph{Clustered errors.} Errors are clustered on rows, because all
-        coefficients of a row share one fluctuation.
-  \item \emph{Stability checks.} Split-half values and the intercept, which
-        should vanish, are monitored. A significant intercept indicates a
-        throughput offset between the sky channels.
-\end{itemize}
-The fitted values are interpolated in wavelength over well-constrained bins.
+error in the assumed layer height. Because of the degeneracy above, the
+layer height is fixed and only $k_{\rm eff}$ is fitted. Coefficients enter
+the fit whole, for all observations or none: an amplitude threshold per
+observation would select on the outcome, since the arm at lower airmass has
+the smaller van Rhijn factor and passes the threshold only when it carries a
+positive fluctuation, which correlates the residual with the sign of
+$\Delta X$ (in tests this inflated $k_{\rm eff}$ by a factor of 1.8). Errors
+are clustered by observation, because all coefficients of an observation
+share one fluctuation. Split-half values and the intercept, which should
+vanish, are monitored; a significant intercept indicates a throughput
+offset between the sky channels. The fitted values are interpolated in wavelength over well-constrained bins.
 Elsewhere the generic site curve is used. The result is clipped to
 $[0, k_{\rm stellar}]$, since multiple scattering makes the stellar curve an
 upper bound.
@@ -1153,22 +1113,37 @@ difference enters extinction only at the percent level.
 
 \subsection{Formulation}
 
-Given the near- and far-arm coefficient vectors of a row and the observing
-context of all three pointings, the transfer predicts the science-pointing
-coefficients $\hat{\vect c}_{\rm sci}$. The predicted sky is then
-$\hat y_{\rm sci}(\lambda) = \mathbf{A}^{\rm row}_{\rm sci}\,\hat{\vect c}_{\rm sci}$,
+Given the coefficients of the near and far arms of an observation, and the
+observing \emph{context} of all three arms (features describing the
+pointing, lunar, solar and ecliptic geometry, time and solar activity;
+Section~\ref{sec:ctx}), the transfer predicts the science-arm coefficients
+$\hat{\vect c}_{\rm sci}$. The predicted sky is
+$\hat y_{\rm sci}(\lambda) = \mathbf{A}^{\rm obs}_{\rm sci}\,\hat{\vect c}_{\rm sci}$,
 reconstructed with the science spectrum's own LSF and transmission. The
-transfer works in the geometry-normalised frame of
-Section~\ref{sec:geometry}.
+transfer works in the zenith-equivalent frame of
+Section~\ref{sec:geometry}, and its target, the \emph{truth}, is the
+decomposition of the science spectrum itself.
+
+The coefficients span many decades, so the network does not see them
+directly. Each is mapped by an invertible transform to a \emph{score}, a
+number of order unity (Section~\ref{sec:compression}). An error measured on
+the scores is said to be in \emph{score space}; there every coefficient
+counts equally, however little flux it carries. An error measured on the
+reconstructed spectra is in \emph{flux space}; there each coefficient counts
+in proportion to the flux it contributes, which is what matters for sky
+subtraction.
 
 \subsection{Coefficient groups}
 
-The 388 coefficients are routed into six groups whose members share a
-physical driver (Table~\ref{tab:groups}). Each group has its own output head,
-blend weight and loss term. Moonlight and zodiacal light form separate
-groups because they depend on disjoint context sets, lunar geometry and
-ecliptic geometry respectively. A single head for both would have to
-reconcile them on one output.
+The 388 coefficients are divided into six \emph{groups} whose members share
+a physical driver (Table~\ref{tab:groups}). The groups follow the emitter
+families, except that the atomic lines are split into mesopause (atomic)
+and thermospheric (ionospheric) lines and the O$_2$ band joins OH in the
+mesospheric group. Each group has its own output \emph{head} (the final
+network layers that predict its scores), its own blend weight
+(Section~\ref{sec:blend}) and its own loss term. Moonlight and zodiacal
+light form separate groups because they depend on disjoint context, lunar
+and ecliptic geometry respectively.
 
 \begin{deluxetable}{lrL{6.2cm}L{5.6cm}}
 \tablecaption{Coefficient groups of the transfer.\label{tab:groups}}
@@ -1191,22 +1166,19 @@ Atomic & 3 & K\,\textsc{i}, Na\,\textsc{i}\,D, [O\,\textsc{i}] 5577 &
 \label{sec:compression}
 
 Each group block $\vect c_g$ is mapped to a score vector $\vect s_g$ by an
-invertible transform, fitted on the training rows:
-\begin{enumerate}
-  \item Division by a robust per-coefficient scale $\vect\rho_g$, the median
-        of the positive training values in the near arm.
-  \item An elementwise transform $f_g$: $\operatorname{asinh}$ for the
-        mesospheric group, whose coefficients span many decades and include
-        lines near zero, and $\sqrt{\cdot}$ for all other groups.
-  \item Standardisation, followed for the moon group by a rotation onto its
-        principal components:
-        $\vect s_g = \big((\vect u_g-\vect\mu_g)/\vect\sigma_g\big)\,\mathbf{B}_g$.
-        The components are ranked by their correlation between the arms on
-        held-out rows. All 15 are retained, so the rotation decorrelates the
-        spline coefficients without reducing their number.
-\end{enumerate}
-The scores of all three arms are then robust-scaled (median and
-interquartile range, fitted on training rows). The inverse transform
+invertible transform fitted on the training observations. The coefficients
+are first divided by a robust scale $\vect\rho_g$, the median of the
+positive training values in the near arm. An elementwise transform $f_g$
+follows: $\operatorname{asinh}$ for the mesospheric group, whose
+coefficients span many decades and include lines near zero, and
+$\sqrt{\cdot}$ for the other groups. The result $\vect u_g$ is standardised,
+and for the moon group rotated onto its principal components,
+$\vect s_g = \big((\vect u_g-\vect\mu_g)/\vect\sigma_g\big)\,\mathbf{B}_g$
+(for the other groups $\mathbf{B}_g$ is the identity). All 15 moon
+components are kept, so the rotation decorrelates the spline coefficients
+without reducing their number. Finally the scores of all three arms are
+robust-scaled by their training median and interquartile range. The inverse
+transform
 \begin{equation}
   \hat{\vect c}_g = f_g^{-1}\!\big(\hat{\vect s}_g\,\mathbf{B}_g^{\top}\odot\vect\sigma_g + \vect\mu_g\big)\odot\vect\rho_g
 \end{equation}
@@ -1220,16 +1192,25 @@ Each pointing is described by 42 context features (Table~\ref{tab:ctx}),
 computed for the science pointing and for both sky pointings. Positions of
 the Sun and Moon are topocentric at Las Campanas at the exposure mid-time. The
 helio-ecliptic longitude uses the geocentric Sun. Three features come from
-the physical model of Section~\ref{sec:mzmodel}:
-\begin{itemize}
-  \item the predicted ratio of moonlight at the science pointing to that at
-        the near pointing, set to zero with the Moon down;
-  \item $\log_{10}Z_{\rm pred}$;
-  \item $f_{\rm pred}$.
-\end{itemize}
-The last two are exactly the quantities that define the decomposition's
-zodiacal anchor and moon-share bracket. They are therefore what a head needs
-to reproduce a constrained amplitude.
+the physical model of Section~\ref{sec:mzmodel}: the predicted ratio of
+moonlight at the science pointing to that at the near pointing (zero with
+the Moon down), $\log_{10}Z_{\rm pred}$ and $f_{\rm pred}$. The last two are
+exactly the quantities that define the zodiacal anchor and the moon-share
+bracket, and so what a head needs to reproduce a pinned amplitude.
+
+Figure~\ref{fig:context-amplitude} shows how the fitted amplitudes vary with
+twelve of these features, and why the heads are given different context.
+The moonlight is bimodal: it sits at the floor of the moon-share bracket
+with the Moon down and rises by three decades with the Moon up, following
+lunar altitude, phase and illumination closely. The zodiacal light is
+nearly constant within about 0.3\,dex and varies mainly with solar
+elongation and ecliptic latitude. OH and the atomic lines brighten toward
+low altitude and high airmass, as the van Rhijn factor predicts, and OH
+fades during the first half of the night. The ionospheric lines fade by
+about an order of magnitude through the night, as the F region recombines
+after dusk. The diffuse species vary only weakly, mostly with altitude; the
+O$_2$ continuum still rises slightly with lunar phase, a remnant of the
+moonlight leak that constraint (e) limits.
 
 \begin{deluxetable}{lrL{11.6cm}}
 \tablecaption{Context features, per pointing (42).\label{tab:ctx}}
@@ -1261,22 +1242,32 @@ Physical model & 3 & predicted moonlight ratio science/near;
 \enddata
 \end{deluxetable}
 
+\begin{figure*}
+\centering
+\includegraphics[width=\textwidth]{figures/context_vs_amplitude.pdf}
+\caption{Fitted amplitude (Equation~\ref{eq:amplitude}) of each sky
+component against twelve context features (Table~\ref{tab:ctx}). Rows, top
+to bottom: moonlight, zodiacal light, the three diffuse species (HO$_2$,
+FeO, O$_2$), OH, and the ionospheric and atomic lines, as $\log_{10}$ of the
+amplitude. The O$_2$ $b$ band is excluded, because its template is fitted
+separately for each spectrum. Airmass and the 87\,km van Rhijn factor are
+shown over $[1,2]$, which contains nearly all of the data set, and time is
+given in hours from local midnight. Each panel is a density of all three
+arms of the training observations, from white (no data) to black.}
+\label{fig:context-amplitude}
+\end{figure*}
+
 \subsection{Architecture}
 \label{sec:arch}
 
-The network (Figure~\ref{fig:arch}) is built on three principles:
-\begin{itemize}
-  \item the two sky arms are encoded by the same network with shared
-        weights, so an arm's embedding does not depend on which telescope
-        produced it;
-  \item each physically distinct group has its own head;
-  \item the anisotropic groups (zodiacal light and diffuse continuum)
-        bypass the shared trunk through isolated branches, which see their
-        physical drivers directly.
-\end{itemize}
-The notation is:
-$\vect s^{\rm nr}, \vect s^{\rm fr}\in\mathbb{R}^{388}$ are the scaled
-scores of the two sky arms, and $\vect x^{\rm nr}, \vect x^{\rm fr},
+The network (Figure~\ref{fig:arch}) follows three principles. The two sky
+arms are encoded by the same network with shared weights, so an arm's
+encoding does not depend on which telescope produced it. Each group has its
+own head. And the zodiacal and diffuse-continuum groups bypass the shared
+layers (the \emph{trunk}) through isolated branches that see their physical
+drivers directly.
+Below, $\vect s^{\rm nr}, \vect s^{\rm fr}\in\mathbb{R}^{388}$ are the
+scores of the two sky arms and $\vect x^{\rm nr}, \vect x^{\rm fr},
 \vect x^{\rm sci}\in\mathbb{R}^{42}$ the scaled context vectors. All hidden
 layers use layer normalisation \citep{Ba2016} and GELU activations
 \citep{Hendrycks2016}.
@@ -1293,7 +1284,7 @@ with widths $430\to768\to384$.
 $\vect e^{\rm ctx} = \mathrm{MLP}_{\rm ctx}(\vect x^{\rm sci})$, with width
 96.
 
-\paragraph{Symmetric fusion.} The arm embeddings are combined as
+\paragraph{Symmetric fusion.} The arm encodings are combined as
 \begin{equation}
   \vect z = \big[\tfrac12(\vect e^{\rm nr}+\vect e^{\rm fr});\;
   \vect e^{\rm nr}-\vect e^{\rm fr};\;
@@ -1332,20 +1323,16 @@ bypasses the trunk. It reads 9 moon-scattering features and the two arms'
 continuum scores ($9\times3 + 2\times3 = 33$ inputs), through widths
 $128\to64$ and a head $64\to64\to3$. It was introduced because the continuum
 residuals depended non-linearly on moon geometry (a random-forest regression
-of the per-row residual on the context reached $R^2 = 0.70$), which the shared
-trunk did not represent.
+of the residual on the context reached $R^2 = 0.70$), which the shared trunk
+did not represent.
 
 \paragraph{Additive moon--zodiacal coupling.} Moonlight and zodiacal light
 both depend on the joint state of lunar scattering and ecliptic geometry. To
 let the two heads share that information without breaking the isolation of
-the zodiacal branch, a coupling branch reads:
-\begin{itemize}
-  \item the union of their context features (20 features from three
-        pointings);
-  \item the moon and zodiacal scores of both sky arms.
-\end{itemize}
-This gives $20\times3 + 2\times(15+5) = 100$ inputs, which pass through
-widths $64\to32$. The resulting latent $\vect\ell$ is added to both outputs
+the zodiacal branch, a coupling branch reads the union of their context
+features (20 features from the three arms) and the moon and zodiacal scores
+of both sky arms, $20\times3 + 2\times(15+5) = 100$ inputs, through widths
+$64\to32$. The resulting latent $\vect\ell$ is added to both outputs
 through linear projections $P_{\rm moon}\in\mathbb{R}^{15\times32}$ and
 $P_{\rm zodi}\in\mathbb{R}^{5\times32}$. The projections are initialised to
 zero, so at the start of training the coupled network computes exactly the
@@ -1449,7 +1436,7 @@ $\Delta_g = 0$ for the others.
   {inverse scaling and transform $\;\to\;$ $\times$ science geometry factor
    $\;\to\;$ rules and bias calibration\\
    $\;\to\;$ ensemble mean $\hat{\vect c}_{\rm sci}$
-   $\;\to\;$ $\hat y_{\rm sci}(\lambda) = \mathbf{A}^{\rm row}_{\rm sci}\hat{\vect c}_{\rm sci}$};
+   $\;\to\;$ $\hat y_{\rm sci}(\lambda) = \mathbf{A}^{\rm obs}_{\rm sci}\hat{\vect c}_{\rm sci}$};
 \draw[arr] (blend) -- (final);
 \end{tikzpicture}
 \caption{Architecture of the transfer network. Grey: inputs; blue: shared
@@ -1526,42 +1513,51 @@ Atomic      & \yes & & & \\
 \label{sec:blend}
 
 A good first estimate of the science coefficients is an interpolation between
-the two sky arms. The blend term of Equation~(\ref{eq:output}) makes that estimate
-explicit, and the heads predict a residual on top of it.
-\begin{itemize}
-  \item \emph{Isotropic groups.} For the mesospheric, ionospheric and atomic
-        groups, whose transfer is isotropic on the LVM baseline, $\alpha_g$
-        is a learned scalar clipped to $[10^{-3}, 1-10^{-3}]$.
-  \item \emph{Anisotropic groups.} For the moon, zodiacal and continuum
-        groups it depends on the science context,
-        \begin{equation}
-          \alpha_g(\vect x^{\rm sci}) = \sigma\big(\vect w_g\cdot\vect x^{\rm sci}_\alpha + b_g\big),
-        \end{equation}
-        where $\vect x^{\rm sci}_\alpha$ contains the horizon step, the
-        ecliptic latitude and the airmass. The weights $\vect w_g$ are
-        initialised to zero and $b_g$ to the logit of the initial blend, so
-        training starts from a context-independent blend. Extending the
-        context-dependent blend to all six groups degrades the ionospheric
-        group.
-  \item \emph{Learning rate.} The loss is nearly flat in $\alpha$: the head
-        absorbs the systematic part of a mis-set blend, but not the per-row
-        arm noise that the blend passes through. A wrong $\alpha$ therefore
-        costs accuracy while generating little gradient, and the sigmoid
-        damps it further. The blend parameters are therefore trained with a
-        learning rate 30 times that of the rest of the network. With this,
-        $\alpha$ reaches the same optimum from either side of the
-        initialisation instead of remaining where it started.
-  \item \emph{Learned values.} The blend weights favour the near arm for
-        every group, between about 0.79 (mesospheric) and 0.95
-        (ionospheric). Directly copying the near arm is also a better naive
-        predictor than the arm mean for all six groups. The zodiacal blend
-        sits near 0.9 rather than the 0.5 an isotropic emitter would
-        suggest, consistent with the zodiacal family also carrying continuum
-        that is not zodiacal light.
-\end{itemize}
-The blend predictor reads only the science context. It can learn regime
-dependence, but not which arm is better placed, which would require the
-difference between the arms' contexts.
+the two sky arms. The blend term of Equation~(\ref{eq:output}) makes that
+estimate explicit, and the heads predict a correction on top of it. For the
+mesospheric, ionospheric and atomic groups, whose transfer is isotropic on
+the LVM baseline, the blend weight $\alpha_g$ is a learned scalar clipped to
+$[10^{-3}, 1-10^{-3}]$. For the moon, zodiacal and continuum groups it
+depends on the science context,
+\begin{equation}
+  \alpha_g(\vect x^{\rm sci}) = \sigma\big(\vect w_g\cdot\vect x^{\rm sci}_\alpha + b_g\big),
+\end{equation}
+where $\vect x^{\rm sci}_\alpha$ contains the horizon step, the ecliptic
+latitude and the airmass. The weights $\vect w_g$ start at zero and $b_g$ at
+the logit of the initial blend, so training starts from a
+context-independent blend. Extending the context-dependent blend to all six
+groups degrades the ionospheric group. The blend reads only the science
+context, so it can learn how the best mixture depends on conditions, but not
+which arm is better placed.
+
+The loss is nearly flat in $\alpha$: the head absorbs the systematic part of
+a mis-set blend, but not the arm noise the blend passes through. A wrong
+$\alpha$ therefore costs accuracy while generating little gradient, and the
+sigmoid damps it further. The blend parameters are therefore trained with a
+learning rate 30 times that of the rest of the network, which lets $\alpha$
+reach the same optimum from either side of its starting value.
+
+Figure~\ref{fig:blend-alpha} shows how the blend weights evolve during
+training. All six favour the near arm. The ionospheric, moon and atomic
+weights settle within a few tens of epochs at 0.90--0.96; the continuum
+weight settles near 0.87, and the zodiacal weight climbs slowly to the same
+value. The mesospheric weight keeps falling for most of the training and
+ends near 0.55, close to an equal mix of the two arms. Copying the near arm
+is also a better naive predictor than the arm mean for all six groups. A
+zodiacal weight near 0.9, rather than the 0.5 a smooth, isotropic emitter
+would suggest, is consistent with the zodiacal family also carrying
+continuum that is not zodiacal light.
+
+\begin{figure}
+\centering
+\includegraphics[width=\columnwidth]{figures/training_blend_alpha.pdf}
+\caption{Near-arm blend weight $\alpha_g$ (Equation~\ref{eq:output})
+against training epoch, one line per group (Table~\ref{tab:groups}),
+averaged over the ten ensemble members. For the moon, zodiacal and
+continuum groups, whose weight depends on the context, the line is the
+median over the validation observations.}
+\label{fig:blend-alpha}
+\end{figure}
 
 \subsection{Loss}
 \label{sec:loss}
@@ -1573,47 +1569,37 @@ the robust scaling makes residuals comparable across coefficients of very
 different amplitude.
 
 \paragraph{Flux-space term.} For $g\in\{\text{moon, zodi, continuum}\}$ the
-predicted and target scores are passed through a differentiable
-implementation of the inverse transform:
-\begin{enumerate}
-  \item robust scaling;
-  \item rotation;
-  \item standardisation;
-  \item elementwise square;
-  \item multiplication by the science-pointing geometry factor.
-\end{enumerate}
-Both are then projected onto the continuum templates $\mathbf{T}_g$ of the
-sample's own basis, on the full native wavelength grid. The per-row term is
+predicted and target scores are converted back to coefficients by a
+differentiable version of the inverse transform of
+Section~\ref{sec:compression}, multiplied by the science-arm geometry
+factor, and projected onto the group's templates $\mathbf{T}_g$ on the full
+native wavelength grid. For observation $r$ the term is
 \begin{equation}
   \mathcal{L}^{\rm flux}_{g,r} = s_g\,\frac{1}{n_\lambda}\sum_{\lambda}
   w_{r\lambda}\,\big[(\hat{\vect c}_{g,r}-\vect c_{g,r})^{\!\top}\mathbf{T}_g\big]_\lambda^2 ,
 \end{equation}
-The terms are:
-\begin{itemize}
-  \item $w_{r\lambda} = 1/(y_{r\lambda}\,s(\lambda))$ is the photon-noise
-        weight of the total observed science flux, with a variance floor of
-        5\% of the row median, normalised to unit mean per row;
-  \item $s_g$ matches the median per-row flux term to the median per-row
-        score-space term, so the group weights below keep their meaning.
-\end{itemize}
-Unlike a score-space loss with inverse-variance weights, this term couples
-the weight of a row to the brightness of its target. A given score error on a
-bright-Moon row, where the sky subtraction is most at risk, costs up to
-$10^5$ times more than on a dark row, matching its effect on the delivered
-spectrum. Each group is compared through its own templates only; no sum of
-groups is constrained.
+where $w_{r\lambda} = 1/(y_{r\lambda}\,s(\lambda))$ is the photon-noise
+weight of the observed science flux (Section~\ref{sec:noise}), with a
+variance floor of 5\% of the median and normalised to unit mean for each
+observation, and $s_g$ scales the median flux term to the median
+score-space term so that the group weights below keep their meaning. Unlike
+a score-space loss, this term weights each observation by the brightness of
+its target: a given score error with a bright Moon, where the sky
+subtraction is most at risk, costs up to $10^5$ times more than in dark
+time, in proportion to its effect on the delivered spectrum. Each group is
+compared through its own templates only.
 
 \paragraph{Log-amplitude term.} The flux term is absolute and is dominated by
-the brightest rows. For the moon group, a scale-free companion penalises
+the brightest observations. For the moon group, a scale-free companion penalises
 fractional amplitude errors equally at all brightnesses:
 \begin{equation}
   \mathcal{L}^{\rm amp}_{{\rm moon},r} = \lambda_{\rm amp}\left[\log\frac{\sum_\lambda\hat f_r(\lambda)+\epsilon}{\sum_\lambda f_r(\lambda)+\epsilon}\right]^2,
   \qquad \lambda_{\rm amp} = 5,
 \end{equation}
 Here $f$ is the moon flux and $\epsilon$ is 5\% of its median training
-amplitude, so rows far below typical brightness do not dominate the ratio.
-The zodiacal group has no such term. Its amplitude is set by the anchor on
-most moon-up rows, so an additional amplitude penalty would only trade
+amplitude, so that very faint moonlight does not dominate the ratio. The
+zodiacal group has no such term: its amplitude is pinned by the anchor on
+most moon-up observations, so an amplitude penalty would only trade
 spectral shape for an amplitude the network already reproduces.
 
 \paragraph{Score-space term.} For the mesospheric, ionospheric and atomic
@@ -1627,13 +1613,11 @@ and linear beyond. The per-element weights $w^{\rm pe} = 1/\sigma_s^2$
 propagate the decomposition uncertainties (Section~\ref{sec:uncertainties})
 through the transform to first order,
 $\sigma_{s,k} = \lVert\nabla_{\vect c_g} s_k\rVert\,\sigma_{\vect c_g}$,
-divided by the robust score scale. Two further details:
-\begin{itemize}
-  \item $\sigma_s$ has a floor at 5\% (20\% for the mesospheric and atomic
-        groups, whose uncertainty distributions have tails spanning three to
-        six decades) of the per-coefficient median;
-  \item the weights are normalised to unit mean over the training rows.
-\end{itemize}
+divided by the robust score scale. The score uncertainty $\sigma_s$ has a
+floor at 5\% of its median for each coefficient (20\% for the mesospheric
+and atomic groups, whose uncertainties have tails spanning three to six
+decades), and the weights are normalised to unit mean over the training
+observations.
 
 \paragraph{Total.} The total loss is
 \begin{equation}
@@ -1641,9 +1625,9 @@ divided by the robust score scale. Two further details:
   \Big\langle \mathcal{L}_{g,r}\Big\rangle_r ,
 \end{equation}
 with group weights $m_{\rm moon} = 3$, $m_{\rm zodi} = 2$ and $m_g = 1$
-otherwise, and $\mathcal{L}_{g,r}$ the flux (plus amplitude) term or the score term as
-appropriate. Rows are weighted uniformly: per-regime reweighting was tested
-and did not help.
+otherwise, and $\mathcal{L}_{g,r}$ the flux (plus amplitude) term or the
+score term as appropriate. Observations are weighted uniformly; reweighting
+by regime was tested and did not help.
 
 \subsection{Constraint-derived amplitudes}
 \label{sec:rules}
@@ -1651,63 +1635,52 @@ and did not help.
 In each half of the sample one continuum amplitude is fixed by a constraint
 of the decomposition rather than by the data (Table~\ref{tab:occupancy}).
 There the target is a known function of geometry, so it is derived at
-prediction time instead of learned. Both rules have three properties:
-\begin{itemize}
-  \item they rescale a whole coefficient block and leave the predicted
-        spectral shape unchanged;
-  \item they are idempotent;
-  \item they are linear in the coefficients, so the ensemble mean of
-        members that satisfy them satisfies them too.
-\end{itemize}
-The zodiacal rule is applied first, because the moonlight rule reads the
-predicted zodiacal amplitude.
+prediction time instead of learned. Both rules rescale a whole coefficient
+block and leave the predicted spectral shape unchanged. Both are idempotent,
+and both are linear in the coefficients, so the ensemble mean of members
+that satisfy them satisfies them too. The zodiacal rule is applied first,
+because the moonlight rule reads the predicted zodiacal amplitude.
 
 \paragraph{Bright Moon: the zodiacal ceiling.} Where the anchor binds, the
-zodiacal integral equals $\kappa_z C Z_{\rm pred}$ exactly. With $S$ fitted
-on the training rows, the rule acts in two ways:
-\begin{itemize}
-  \item it clips the predicted zodiacal amplitude to $S Z_{\rm pred}$ on
-        every row. This is a hard upper bound on the fitted value, exceeded
-        on 0.01\% of rows and never by more than 0.002\,dex, so clipping can
-        only move a prediction toward the truth;
-  \item on rows with $f_{\rm pred} > 0.6$ it sets the amplitude to the
-        ceiling when the network already predicts at least 90\% of it.
-\end{itemize}
-The second condition preserves genuinely interior rows, which the network
-places well below the ceiling. The loss is left unchanged on these rows. The
-network learns the ceiling, and its own prediction is what separates pinned
-from interior rows.
+zodiacal amplitude equals $\kappa_z C Z_{\rm pred}$ exactly. With a
+constant $S$ fitted on the training observations, the rule clips the
+predicted zodiacal amplitude to $S Z_{\rm pred}$ everywhere. This is a hard
+upper bound on the fitted value, exceeded by 0.01\% of observations and
+never by more than 0.002\,dex, so clipping can only move a prediction toward
+the truth. Where $f_{\rm pred} > 0.6$, the rule also sets the amplitude to
+the ceiling if the network already predicts at least 90\% of it. This second
+condition leaves alone the observations that are genuinely below the
+ceiling, which the network places well below it. The loss is unchanged: the
+network learns the ceiling, and its own prediction separates pinned from
+unpinned observations.
 
 \paragraph{Dark time: the moonlight floor.} Where the moon-share bracket has
-collapsed onto its floor, the moonlight is not measured (Section~\ref{sec:constraints}):
-\begin{itemize}
-  \item \emph{Training.} The flux loss is made amplitude-blind on these rows:
-        the prediction is rescaled to the true integral before the flux term
-        (with the scale factor kept in the gradient, so that the amplitude
-        gradient vanishes identically), and the log-amplitude term is
-        dropped. Only the shape is trained.
-  \item \emph{Prediction.} The amplitude is restored from the near arm's
-        measured moonlight-to-zodiacal ratio,
-        \begin{equation}
-        \begin{split}
-          \textstyle\int{\rm moon}_{\rm sci} = {}&\mathrm{clip}\big(
-          (\textstyle\int{\rm moon}/\!\int{\rm zodi})_{\rm nr},\,0,\,R\big)\\
-          &\times\textstyle\int{\rm zodi}_{\rm sci},
-        \end{split}
-        \end{equation}
-        with the fitted constant $R\approx\epsilon/(1-\epsilon)$ as a
-        fallback when the near arm is unusable. The ratio is transferred,
-        rather than set to $R$, because the moon share of dark rows is
-        bimodal: 96\% of such rows sit on the floor and about 3\% want no
-        moonlight at all.
-  \item \emph{Gate.} The regime is selected by
-        $f_{\rm pred}\le\epsilon/\kappa_f$, not by lunar altitude. Scattered
-        moonlight with the Moon a few degrees below the horizon is real, and
-        the horizon taper multiplies phase and separation: a thin crescent
-        $2^\circ$ down contributes nothing, while a full Moon $5^\circ$ down
-        still does. No fixed altitude cut matches the predicted-fraction
-        gate in both coverage and exactness (Table~\ref{tab:moongate}).
-\end{itemize}
+collapsed onto its floor, the moonlight is not measured
+(Section~\ref{sec:constraints}). In training, the flux loss is made blind to
+the amplitude on these observations: the prediction is rescaled to the true
+amplitude before the flux term (with the scale factor kept in the gradient,
+so that the amplitude gradient vanishes identically), and the
+log-amplitude term is dropped, so only the shape is trained. At prediction,
+the amplitude is restored from the near arm's measured
+moonlight-to-zodiacal ratio,
+\begin{equation}
+\begin{split}
+  \textstyle\int{\rm moon}_{\rm sci} = {}&\mathrm{clip}\big(
+  (\textstyle\int{\rm moon}/\!\int{\rm zodi})_{\rm nr},\,0,\,R\big)\\
+  &\times\textstyle\int{\rm zodi}_{\rm sci},
+\end{split}
+\end{equation}
+with the fitted constant $R\approx\epsilon/(1-\epsilon)$ as a fallback when
+the near arm is unusable. The ratio is transferred, rather than set to $R$,
+because the dark-time moon share is bimodal: 96\% of these observations sit
+on the floor and about 3\% want no moonlight at all.
+
+The regime is selected by $f_{\rm pred}\le\epsilon/\kappa_f$, not by lunar
+altitude. Scattered moonlight with the Moon a few degrees below the horizon
+is real, and the horizon taper multiplies phase and separation: a thin
+crescent $2^\circ$ down contributes nothing, while a full Moon $5^\circ$ down
+still does. No fixed altitude cut matches this gate in both coverage and
+exactness (Table~\ref{tab:moongate}).
 
 \begin{deluxetable}{lccc}
 \tablecaption{Dark-time gate.\label{tab:moongate}}
@@ -1719,125 +1692,313 @@ $h_{\rm moon}\le-4^\circ$ & 47.0\% & 96.1\% & 3.9\% \\
 $h_{\rm moon}\le-12^\circ$ & 41.4\% & 95.7\% & 4.2\% \\
 $f_{\rm pred}\le\epsilon/\kappa_f = 0.0067$ & 47.8\% & 96.2\% & 3.7\% \\
 \enddata
-\tablecomments{Fraction of rows covered, fraction of covered rows actually
-pinned at the moon-share floor, and fraction whose amplitude differs from the
-floor by more than 0.05\,dex.}
+\tablecomments{Fraction of observations covered, fraction of covered
+observations actually pinned at the moon-share floor, and fraction whose
+amplitude differs from the floor by more than 0.05\,dex.}
 \end{deluxetable}
 
-\paragraph{Degenerate continuum.} The dark rows that want no moonlight are
-failed fits rather than a physical state. Their median reduced $\chi^2$ is 15
-times that of healthy dark rows, and all of their continuum is in the
-zodiacal family. They are flagged at prediction time using only the two sky
-arms: both arms have a moonlight-to-zodiacal ratio below $R/2$. This flag has
-88\% precision at 95\% recall, affects 1.9\% of rows, and never fires with
-the Moon up.
+\paragraph{Degenerate continuum.} The dark-time observations that want no
+moonlight are failed fits rather than a physical state. Their median
+$\chi^2$ is 15 times that of other dark-time observations, and all of their
+continuum is in the zodiacal family. They are flagged at prediction time
+from the two sky arms alone, when both have a moonlight-to-zodiacal ratio
+below $R/2$. The flag has 88\% precision at 95\% recall, affects 1.9\% of
+observations, and never fires with the Moon up.
 
 \subsection{Bias calibration}
 \label{sec:calibration}
 
 After training, a multiplicative bias correction is fitted on the training
-and validation rows and applied at prediction time:
-\begin{itemize}
-  \item \emph{Moon and zodiacal groups.} The correction is per coefficient,
-        $\ell_k = \bar c^{\rm true}_k/\bar c^{\rm pred}_k$, clipped to
-        $[0.7,1.4]$. A single factor cannot remove the spectral tilt of the
-        bias.
-        \begin{itemize}
-          \item The moon correction is fitted only on rows where the
-                moonlight amplitude is predicted by the network rather than
-                derived by the dark-time rule.
-          \item The zodiacal correction is fitted separately in three
-                lunar-altitude regimes, with smooth transitions between them.
-        \end{itemize}
-  \item \emph{Other groups.} A single factor per group is fitted on the
-        flux-weighted amplitude $A_g = \vect c_g\cdot\vect v_g$, clipped to
-        $[0.5, 2]$. For a group whose templates carry very different flux,
-        the unweighted mean coefficient is a different functional from the
-        flux amplitude, and the two can disagree in sign. Across the 357 OH
-        templates the integrals span nine decades and are anti-correlated
-        with coefficient size.
-\end{itemize}
+and validation observations and applied at prediction time. For the moon and
+zodiacal groups it is one factor per coefficient,
+$\ell_k = \bar c^{\rm true}_k/\bar c^{\rm pred}_k$, clipped to $[0.7,1.4]$,
+because a single factor cannot remove the spectral tilt of the bias. The
+moon correction is fitted only where the network, not the dark-time rule,
+predicts the amplitude, and the zodiacal correction is fitted separately in
+three lunar-altitude regimes with smooth transitions between them. For the
+other groups a single factor per group is fitted on the amplitude
+(Equation~\ref{eq:amplitude}), clipped to $[0.5, 2]$. For a group whose
+templates carry very different flux, the unweighted mean coefficient is a
+different quantity from the amplitude, and the two can disagree in sign:
+across the 357 OH templates the integrals span nine decades and are
+anti-correlated with coefficient size.
 
 \subsection{Training}
+\label{sec:training}
 
-\begin{itemize}
-  \item \emph{Splits.} Rows are grouped by night and assigned to training,
-        validation and test sets stratified by lunar phase. Whole nights are
-        held out because the sky of neighbouring exposures within a night is
-        correlated, and a random split would leak.
-  \item \emph{Optimisation.} Each network is trained with AdamW
-        \citep{Loshchilov2019}:
-        \begin{itemize}
-          \item learning rate $10^{-3}$, weight decay $2\times10^{-4}$ and
-                gradient clipping at 1;
-          \item batch size 512;
-          \item up to 400 epochs, with early stopping on the validation loss
-                and a patience of 100 epochs.
-        \end{itemize}
-        The blend parameters form a separate parameter group without weight
-        decay and with the raised learning rate of Section~\ref{sec:blend}.
-  \item \emph{Ensemble.} The prediction is the mean over an ensemble of ten
-        networks trained with different random seeds on the same split. The
-        ensemble spread is reported as an epistemic uncertainty.
-\end{itemize}
+Observations are grouped by night and assigned to training, validation and
+test sets, stratified by lunar phase. Whole nights are kept together because
+the sky of neighbouring exposures within a night is correlated, and a random
+split would leak. We call the validation and test observations together the
+\emph{held-out} observations: none of them is used to fit network weights.
+
+Each network is trained with AdamW \citep{Loshchilov2019}, with learning
+rate $10^{-3}$, weight decay $2\times10^{-4}$, gradient clipping at 1 and
+batches of 512, for up to 400 epochs with early stopping on the validation
+loss and a patience of 100 epochs. The blend parameters have no weight decay
+and the raised learning rate of Section~\ref{sec:blend}. The prediction is
+the mean of an ensemble of ten networks trained with different random seeds
+on the same split, and the ensemble spread is reported as an uncertainty.
+
+Figure~\ref{fig:training-loss} shows the training and validation loss of
+each member. The training loss falls by more than an order of magnitude and
+is still falling slowly at 400 epochs. The validation loss flattens after
+about 100 epochs at roughly twenty times the training loss, and its minimum
+is reached anywhere between about 90 and 400 epochs depending on the member;
+the brief spikes shared by both curves are single unstable epochs, from
+which training recovers.
+
+\begin{figure*}
+\centering
+\includegraphics[width=\textwidth]{figures/training_loss.pdf}
+\caption{Training loss (left) and validation loss (right) of the loss of
+Section~\ref{sec:loss} against epoch, on a logarithmic scale, one line per
+ensemble member. Open circles mark each member's epoch of lowest validation
+loss, whose weights are kept.}
+\label{fig:training-loss}
+\end{figure*}
 
 \subsection{Evaluation}
 \label{sec:evaluation}
 
-Three considerations govern how the transfer is assessed.
+The deliverable is a sky spectrum, so the transfer is judged in flux space,
+on reconstructed spectra. Coefficient errors can mislead: score-space
+metrics are dominated by the 358 mesospheric coefficients, and they can
+disagree in sign with flux-space metrics on the same predictions. The
+residual $y_{\rm sci} - \hat y_{\rm sci}$ of the predicted sky is compared
+with three references. The first is the decomposition's own fit to
+$y_{\rm sci}$, which is the floor: the transfer predicts the coefficients of
+that fit, so it cannot describe the spectrum better. The second is the
+photon noise of a single fibre (Section~\ref{sec:noise}), the level below
+which a sky error no longer matters. The third is the sky itself. All
+numbers below are for the 2888 held-out observations.
 
-\paragraph{Flux space.} The deliverable is a sky spectrum, and coefficient
-errors can be misleading in flux. Coefficient-space metrics are dominated by
-the 358 mesospheric coefficients, and they can disagree in sign with flux
-metrics measured on the same predictions. The transfer is therefore judged
-on reconstructed spectra: the photon-weighted $\chi^2$ of
-$y_{\rm sci} - \hat y_{\rm sci}$, compared with the decomposition's own fit
-to $y_{\rm sci}$. That comparison sets the floor below which no transfer of
-decomposition coefficients can go.
+Figure~\ref{fig:chi2-heldout} compares the prediction with the first two
+references. Over the full band the median $\chi^2$ of the prediction is
+1.27 against the single-fibre noise, and that of the decomposition's own fit
+is 0.92, a ratio of 1.38. In the blue the medians are 0.87 and 0.68, a ratio
+of 1.28. The typical residual of the predicted sky is therefore 1.13 times
+the single-fibre noise per pixel over the full band and 0.93 times it in the
+blue, where the decomposition alone reaches 0.96 and 0.82. If the transfer
+error adds in quadrature to the decomposition residual, it amounts to about
+0.6 of the single-fibre noise over the full band and 0.44 in the blue, or
+about 5\% and 4\% of the sky per pixel. About a third of the observations
+have a prediction $\chi^2$ below 1 over the full band, and half in the blue.
 
-\paragraph{The sky-arm floor.} A natural reference is the disagreement
-between the two sky arms, $\Delta = \tfrac12\,\mathrm{rms}(\vect c^{\rm nr}-\vect c^{\rm fr})$.
-If each arm carries independent noise $\sigma$, then $\Delta\approx0.71\sigma$.
-A perfect predictor still scores an error $\sigma$ against a science truth
-carrying its own noise, so the floor for a group whose truth is as noisy as
-the arms is ${\rm err}/\Delta\approx\sqrt2$, not 1. Values well below 1 mean
-that the head uses context the arms do not carry.
+The upper panels of Figure~\ref{fig:chi2-heldout} show that both
+distributions peak below $\chi^2=1$, and that the prediction's is shifted
+to higher values with a longer tail. The lower panels pair the two numbers
+observation by observation. Most observations lie just above the diagonal,
+at a median ratio of 1.23 over the full band and 1.10 in the blue: the
+prediction stays close to the floor whatever the absolute $\chi^2$. The
+observations well above the diagonal are transfer failures, the only kind
+the transfer can reduce; 13\% of observations exceed twice their
+decomposition $\chi^2$ over the full band, and 9\% in the blue. The
+observations far to the right are those the decomposition itself fits
+poorly, so their truth is not reliable either.
 
-\paragraph{Filtered and unfiltered rows.} The selection of
-Section~\ref{sec:selection} does not run in production. A change aimed at
-pathological rows can appear neutral on the filtered test set because the
-selection has already removed most of its targets. Conversely, a pathology
-that is rare in training need not be rare in delivery. Changes are measured
-on the population whose behaviour they are meant to change, and what cannot
-be fixed is flagged.
+Figure~\ref{fig:residual-heldout} shows where in wavelength the error lies,
+now relative to the sky. The top panel is the sky-subtracted science
+spectrum. Its large spikes, at H$\alpha$, H$\beta$, [O\,\textsc{iii}] and
+[O\,\textsc{ii}], are the nebular emission of the science fields that sky
+subtraction exists to reveal, not sky residual. Away from them, the
+residual scatters around zero with the largest excursions at the brightest
+OH lines and in the far blue, and the median residual of an observation is
+typically 1.8\% of its sky level (5.5\% at the 84th percentile). Integrated
+over the band, the predicted sky matches the observed flux to 1.5\% at the
+median, 3.7\% at the 84th percentile. The three lower panels isolate the
+transfer by comparing the predicted continuum components with the
+decomposition of the science spectrum. The moonlight error dominates: it
+grows toward the blue, where scattered moonlight is brightest, and reaches
+$\pm1$ in these units near 4000\,\AA, where the bright-Moon continuum is
+about 5. The zodiacal and diffuse errors stay within about $\pm0.3$ and
+$\pm0.2$, respectively. For all three components the median error of an
+observation is narrowly distributed around zero, within or near the
+single-fibre noise.
+
+Figure~\ref{fig:atlas} condenses the comparison into percentile bands at
+each wavelength, separately for the Moon down (1090 observations,
+$f_{\rm pred}\le1/150$) and the Moon up (1798). Here the whole predicted sky
+is compared with the full decomposition of the science spectrum. The
+residual is therefore the transfer error alone: it contains neither the
+emission of the science field nor the residual of the decomposition's own
+fit. The median is consistent with zero at every wavelength. Its magnitude
+is typically 3\% of the single-fibre noise with the Moon down and 2\% with
+the Moon up, and nowhere more than 26\% and 38\%. As a fraction of the sky
+it is about 0.2\% in each of the blue, red and near-infrared ranges, with
+the prediction slightly high. The 68\% range lies inside the single-fibre
+noise on 97\% of pixels in both regimes, so for a typical observation the
+transfer error is below the photon noise of one fibre almost everywhere.
+The exceptions are the bright lines: [O\,\textsc{i}]\,5577 and 6300,
+Na\,\textsc{i}\,D and the OH bands beyond 7300\,\AA, where the line flux far
+exceeds the continuum and a small fractional error in the line amplitude is
+still large in flux. The 95\% range extends past the noise. With the Moon up
+it follows the moonlight, widening toward the blue. With the Moon down it is
+skewed to positive values, so the largest errors in dark time are
+under-predictions of the sky.
+
+\begin{figure*}
+\centering
+\includegraphics[width=0.75\textwidth]{figures/batch_chi2_panels.pdf}
+\caption{Reduced $\chi^2$ of the predicted science sky on the held-out
+observations, against the photon noise of a single 900\,s fibre
+(Section~\ref{sec:noise}), with the nebular-line windows excluded. Left:
+full band; right: the blue ($\lambda<6000$\,\AA). Top: distribution of the
+$\chi^2$ of the prediction (colour) and of the decomposition's own fit to
+the same spectra (gray); the dashed line marks $\chi^2=1$. The range is cut
+at $q_{75}+3\,\mathrm{IQR}$ of the two distributions, or at their 99th
+percentile if smaller; the annotation gives the medians, their ratio and the
+number of observations beyond the cut. Bottom: the two values paired for
+each observation; the solid line is equality. A lower $\chi^2$ in the blue
+does not mean a better prediction there: the sky is fainter, so the
+single-fibre noise is a larger fraction of the flux.}
+\label{fig:chi2-heldout}
+\end{figure*}
+
+\begin{figure*}
+\centering
+\includegraphics[height=0.72\textheight]{figures/batch_residual_panels.pdf}
+\caption{Residuals of the predicted science sky on the held-out
+observations, in units of $10^{-14}$\,erg\,s$^{-1}$\,cm$^{-2}$\,\AA$^{-1}$.
+Top: the sky-subtracted science spectrum, observed minus predicted. Below:
+decomposed minus predicted moonlight, zodiacal light and diffuse continuum
+of the science spectrum. Gray lines are 200 observations spaced evenly
+through the sample; the gray envelope is the RMS over all held-out
+observations at each wavelength, and the red band is the $\pm1\sigma$
+photon noise of a single 900\,s fibre (median over observations). Right:
+distribution of the median residual of each observation, with the
+two-tailed 68.3, 95.5 and 99.7\% ranges (solid, dashed, dotted), the median
+(dash-dotted) and the single-fibre noise (red).}
+\label{fig:residual-heldout}
+\end{figure*}
+
+\begin{figure*}
+\centering
+\includegraphics[width=\textwidth]{figures/wavelength_residual_atlas.pdf}
+\caption{Decomposition minus prediction of the science sky at each
+wavelength, for the held-out observations with the Moon down (top, 1090
+observations) and up (bottom, 1798), in units of
+$10^{-14}$\,erg\,s$^{-1}$\,cm$^{-2}$\,\AA$^{-1}$. The truth is the full
+decomposition of the science spectrum, so the residual contains only the
+transfer error. The black line is the median over observations, and the dark
+and light gray bands are the 68\% and 95\% ranges (the 16th--84th and
+2.3rd--97.7th percentiles). The red band is the $\pm1\sigma$ photon noise of
+a single 900\,s fibre at the median decomposed flux of the regime. The
+dotted line marks zero. Note the different vertical scales.}
+\label{fig:atlas}
+\end{figure*}
+
+Figure~\ref{fig:amplitude-error-context} breaks the error down by component
+and by context, as the error in amplitude (Equation~\ref{eq:amplitude}) on
+the test observations. It asks whether any regime is systematically
+mispredicted. None is: the median error stays within 0.01\,dex (2\%) of zero for
+every component in every context bin, with HO$_2$ alone showing a small,
+consistent over-prediction of about 0.005\,dex. The scatter, the 16th--84th
+percentile range, is about $\pm0.02$--$0.05$\,dex (5--10\%) for moonlight
+and the diffuse species, $\pm0.01$--$0.03$\,dex for zodiacal light, OH and
+the ionospheric lines, and $\pm0.01$\,dex for the atomic lines, and it
+changes little with context.
+
+\begin{figure*}
+\centering
+\includegraphics[width=\textwidth]{figures/amplitude_error_vs_context.pdf}
+\caption{Amplitude error of the prediction against context, for the same
+components and context features as Figure~\ref{fig:context-amplitude}:
+$\Delta_g=\log_{10}(A_g^{\rm pred}/A_g^{\rm true})$, positive for an
+over-prediction, on the test observations, with the decomposition of the
+science spectrum as truth. Each panel divides its context feature into
+eight quantile bins and shows the median $\Delta_g$ (black) and the
+16th--84th percentile range (gray) against zero (dashed). A median that
+departs from zero marks a regime the transfer has not learned; the width of
+the band is the scatter.}
+\label{fig:amplitude-error-context}
+\end{figure*}
+
+Two cautions apply when reading such numbers. First, the truth carries its
+own noise. A useful reference is the disagreement between the two sky arms,
+$\Delta = \tfrac12\,\mathrm{rms}(\vect c^{\rm nr}-\vect c^{\rm fr})$, which
+is $0.71\sigma$ if each arm carries independent noise $\sigma$. A perfect
+predictor still scores an error $\sigma$ against a truth as noisy as the
+arms, so the floor for such a group is ${\rm err}/\Delta\approx\sqrt2$, not
+1; values well below 1 mean that the head uses context the arms do not
+carry. Second, the selection of Section~\ref{sec:selection} does not run in
+production. A change aimed at pathological observations can look neutral on
+the selected test set, because the selection has already removed most of
+its targets, and a pathology that is rare in training need not be rare in
+delivery. Changes are therefore measured on the population whose behaviour
+they are meant to change, and what cannot be fixed is flagged.
 
 \subsection{Prediction}
 
 At prediction time the inputs are the near and far spectra of an exposure,
-their decompositions, and the context of all three pointings. The steps are:
-\begin{enumerate}
-  \item the sky coefficients are normalised (Section~\ref{sec:normalisation})
-        and transformed to scores;
-  \item each ensemble member predicts the science scores
-        with Equation~(\ref{eq:output});
-  \item the scores are inverted to coefficients and multiplied by the
-        science-pointing geometry factors;
-  \item the rules of Section~\ref{sec:rules} and the calibration of
-        Section~\ref{sec:calibration} are applied;
-  \item the members are averaged;
-  \item the science sky spectrum is reconstructed with the science
-        spectrum's LSF and transmission.
-\end{enumerate}
-A reliability mask in the vocabulary of Table~\ref{tab:flags} accompanies
-each prediction:
-\begin{itemize}
-  \item diffuse collapse is evaluated from the predicted coefficients;
-  \item moon/zodiacal reversal is evaluated from the reconstructed continua;
-  \item the degenerate-continuum flag is evaluated from the sky arms.
-\end{itemize}
-The constraint warnings do not apply to a prediction. They describe how the
-decomposition shaped the training targets, which is a property of the sample
-rather than of the prediction.
+their decompositions, and the context of all three arms. The sky
+coefficients are normalised (Section~\ref{sec:normalisation}) and
+transformed to scores, each ensemble member predicts the science scores
+with Equation~(\ref{eq:output}), and the scores are inverted to coefficients
+and multiplied by the science-arm geometry factors. The rules of
+Section~\ref{sec:rules} and the calibration of Section~\ref{sec:calibration}
+are applied, the members are averaged, and the science sky spectrum is
+reconstructed with the science spectrum's LSF and transmission.
+
+Each prediction carries a reliability mask in the vocabulary of
+Table~\ref{tab:flags}: diffuse collapse is evaluated from the predicted
+coefficients, moon/zodiacal reversal from the reconstructed continua, and
+the degenerate-continuum flag from the sky arms. The constraint warnings do
+not apply to a prediction; they describe how the decomposition shaped the
+training targets.
+
+Figures~\ref{fig:pipeline-moon} and~\ref{fig:pipeline-zodi} follow two
+observations through the whole procedure: the decompositions of the two sky
+arms, the predicted science sky with its components, and the delivered
+sky-subtracted spectrum. In the first, with the Moon up, moonlight dominates
+the continuum in both arms, and the two arms and the prediction look alike.
+The predicted sky follows the observed science spectrum closely: the
+residual stays near zero across the band, with its largest excursions in the
+far blue and among the strongest OH lines beyond 9000\,\AA, the same places
+where the decomposition itself leaves residuals
+(Figure~\ref{fig:example-decomp-up}). The second observation was chosen to
+test the transfer on a large difference between the arms. The Moon is far
+below the horizon ($h_{\rm moon}=-32.9^\circ$, illumination 0.01), so the
+moonlight of both arms sits at the floor of the moon-share bracket, and the
+difference between the arms comes from zodiacal light, whose brightness
+depends on ecliptic latitude. The near and far arms differ by 0.36\,dex (a
+factor of 2.3) in median flux and by 0.49\,dex (a factor of 3.1) in
+zodiacal-light amplitude, so the transfer has to decide from context alone
+how much of each to carry into the science pointing. The residual is again
+flat in the continuum. Its many spikes are the nebular emission of this
+science field, which the sky subtraction reveals: the Balmer lines,
+[O\,\textsc{ii}], [O\,\textsc{iii}], [N\,\textsc{ii}], [S\,\textsc{ii}] and
+[S\,\textsc{iii}] 9069, 9531. The decomposition also finds this science
+spectrum harder to fit than the first, with a fit $\chi^2$ about six times
+higher.
+
+\begin{figure*}
+\centering
+\includegraphics[width=\textwidth]{figures/full_pipeline_example.pdf}
+\caption{The procedure end to end for an observation with the Moon up. Top
+two panels: decompositions of the near- and far-arm spectra, with the
+colours of Figure~\ref{fig:example-decomp-up} (black observed, red total
+model, blue moonlight, purple zodiacal light, orange diffuse continuum,
+light gray OH and O$_2$, dark gray atomic lines). Third panel: the observed
+science spectrum with the predicted sky and its predicted components; no
+decomposition of the science spectrum enters here. Fourth panel: the
+delivered sky-subtracted spectrum, observed minus predicted. Bottom: the
+science panel zoomed on the windows of Figure~\ref{fig:example-decomp-up}.
+The observation lies at the 25th percentile of the science-spectrum fit
+$\chi^2$ among moon-up observations.}
+\label{fig:pipeline-moon}
+\end{figure*}
+
+\begin{figure*}
+\centering
+\includegraphics[width=\textwidth]{figures/full_pipeline_example_near_far_contrast.pdf}
+\caption{As Figure~\ref{fig:pipeline-moon}, for an observation chosen for a
+large difference between the sky arms. The Moon is far below the horizon,
+the moonlight (blue) sits at the floor of the moon-share bracket, and the
+difference between the arms is carried by zodiacal light (purple). The
+spikes in the residual are the nebular lines of the science field.}
+\label{fig:pipeline-zodi}
+\end{figure*}
 
 %======================================================================
 \bibliography{sky_subtraction_method}{}

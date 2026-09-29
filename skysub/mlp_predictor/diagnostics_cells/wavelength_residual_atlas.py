@@ -16,8 +16,10 @@
 #   * moon band residuals (700-1000 nm mineral features) -> moon head is
 #     picking the wrong knot amplitudes.
 #
-# NB: this reuses the SAME reconstruction path full_spectrum_batch_rmse uses,
-# on the every10 corpus files (fast: ~1 s per row after basis build).
+# Data: by default the per-component reconstructions full_spectrum_batch_rmse
+# hands over (batch_recon_for_atlas) -- every held-out row it scored, so the
+# two cells describe the same sample.  Only without that handoff does this cell
+# fall back to drawing and reconstructing its own every10 sample.
 import time as _time
 from pathlib import Path
 from sky_decomp.moon_zodi_model import LSF_FWHM_TO_SIGMA
@@ -107,9 +109,14 @@ if _USE_HANDOFF:
         _chi2_max_arm = np.nanmax(np.vstack(
             [np.asarray(filtered_triplet[_k], dtype=np.float64)
              for _k in _k_chi2]), axis=0)
+    _atlas_source = (f"{_handoff['split']} split, batch-RMSE "
+                     f"reconstructions")
     print(f"  [atlas] reusing the batch-RMSE reconstructions: {_n_pick} rows "
           f"of the '{_handoff['split']}' split, no re-reconstruction")
 else:
+    _atlas_source = 'every10 sample, own reconstructions'
+    print('  [atlas] no batch-RMSE handoff (run full_spectrum_batch_rmse first '
+          'for the held-out sample); reconstructing an every10 sample instead')
     e10_triplet = build_triplet_coef_dataset(
         input_fits_path=EVERY10_INPUT,
         sky_near_decomp_fits_path=EVERY10_NEAR,
@@ -481,6 +488,9 @@ for _sname, _smask in _atlas_subsets:
     _a['med'] = np.nanmedian(_r, axis=0)
     _a['p16'] = np.nanpercentile(_r, 16, axis=0)
     _a['p84'] = np.nanpercentile(_r, 84, axis=0)
+    # 2-sigma-equivalent (95.4%) band, drawn behind the 68% one.
+    _a['p02'] = np.nanpercentile(_r, 2.275, axis=0)
+    _a['p98'] = np.nanpercentile(_r, 97.725, axis=0)
     _a['truth_med'] = np.nanmedian(_t, axis=0)
     _a['denom'] = np.where(np.abs(_a['truth_med']) > 1e-30, _a['truth_med'], np.nan)
     _a['sig'] = _sigma_one_fibre(_a['truth_med'])
@@ -492,10 +502,10 @@ for _sname, _smask in _atlas_subsets:
 # sets its noise band, so it belongs on the same figure.
 _n_sub = len(_atlas_agg)
 _atlas_rows = 2 * _n_sub + 1
-_titles = ([f"Median pred - true (absolute) -- {_a['name']} (n={_a['n']}), "
-            f"68% band + 1-fibre photon noise" for _a in _atlas_agg]
-           + [f"Median (pred - true) / truth -- {_a['name']} (n={_a['n']}), "
-              f"68% band + 1-fibre photon noise" for _a in _atlas_agg]
+_titles = ([f"Median true - pred (absolute) -- {_a['name']} (n={_a['n']}), "
+            f"68%/95% bands + 1-fibre photon noise" for _a in _atlas_agg]
+           + [f"Median (true - pred) / truth -- {_a['name']} (n={_a['n']}), "
+              f"68%/95% bands + 1-fibre photon noise" for _a in _atlas_agg]
            + ['Median truth flux per subset (sets each band above)'])
 _fig = make_subplots(rows=_atlas_rows, cols=1, shared_xaxes=True,
                      subplot_titles=tuple(_titles),
@@ -507,8 +517,9 @@ _SUB_COLOURS = [('rgba(0,120,220,{a})', 'steelblue'),
 
 
 def _atlas_band_panel(_row, _lo, _hi, _centre, _sig, _cband, _cline,
-                      _name_band, _name_line, _show_legend, _hover_line):
-    """Noise band (behind), then the 68% band, then the median line."""
+                      _name_band, _name_line, _show_legend, _hover_line,
+                      _lo2=None, _hi2=None, _name_band2=None):
+    """Noise band (behind), then the 95% and 68% bands, then the median line."""
     if _sig is not None:
         # Added first so it renders underneath.  Two traces: an invisible
         # upper edge, then the lower edge filling to it.
@@ -521,6 +532,14 @@ def _atlas_band_panel(_row, _lo, _hi, _centre, _sig, _cband, _cline,
             name=f'+/-1 sigma, ONE {ATLAS_EXPTIME_S:.0f} s fibre',
             hovertemplate='%{x:.0f} A<br>sigma_1fib %{y:.4g}<extra></extra>',
             showlegend=_show_legend), row=_row, col=1)
+    if _lo2 is not None:
+        _fig.add_trace(go.Scatter(x=_wave_ref_recon, y=_hi2,
+            mode='lines', line=dict(color=_cband.format(a=0.0)),
+            hoverinfo='skip', showlegend=False), row=_row, col=1)
+        _fig.add_trace(go.Scatter(x=_wave_ref_recon, y=_lo2,
+            mode='lines', line=dict(color=_cband.format(a=0.0)),
+            fill='tonexty', fillcolor=_cband.format(a=0.10),
+            name=_name_band2, showlegend=_show_legend), row=_row, col=1)
     _fig.add_trace(go.Scatter(x=_wave_ref_recon, y=_hi,
         mode='lines', line=dict(color=_cband.format(a=0.0)),
         hoverinfo='skip', showlegend=False), row=_row, col=1)
@@ -538,25 +557,33 @@ def _atlas_band_panel(_row, _lo, _hi, _centre, _sig, _cband, _cline,
                    row=_row, col=1)
 
 
+# Drawn as true - pred (2026-09-29), the same sense as the batch-RMSE figure's
+# panels (observed / decomposition minus prediction). Only the drawing is
+# negated -- the stored `_resid` stacks and every printed statistic below keep
+# pred - true -- so the 16th/84th (and 2.3/97.7th) percentiles swap roles as
+# band edges.
 for _k, _a in enumerate(_atlas_agg):
     _cband, _cline = _SUB_COLOURS[_k % len(_SUB_COLOURS)]
     # Absolute.
     _atlas_band_panel(
-        _k + 1, _a['p16'], _a['p84'], _a['med'], _a['sig'], _cband, _cline,
+        _k + 1, -_a['p84'], -_a['p16'], -_a['med'], _a['sig'], _cband, _cline,
         f"68% band -- {_a['name']}", f"median residual -- {_a['name']}",
         _show_legend=(_k == 0),
-        _hover_line='%{x:.0f} A<br>median resid %{y:.4g}<extra></extra>')
+        _hover_line='%{x:.0f} A<br>median resid %{y:.4g}<extra></extra>',
+        _lo2=-_a['p98'], _hi2=-_a['p02'], _name_band2=f"95% band -- {_a['name']}")
     # Fractional.
     _sig_frac = None if _a['sig'] is None else _a['sig'] / _a['denom']
     _atlas_band_panel(
-        _n_sub + _k + 1, _a['p16'] / _a['denom'], _a['p84'] / _a['denom'],
-        _a['med'] / _a['denom'], _sig_frac, _cband, _cline,
+        _n_sub + _k + 1, -_a['p84'] / _a['denom'], -_a['p16'] / _a['denom'],
+        -_a['med'] / _a['denom'], _sig_frac, _cband, _cline,
         f"fractional 68% band -- {_a['name']}",
         f"median fractional residual -- {_a['name']}",
         _show_legend=False,
-        _hover_line='%{x:.0f} A<br>median frac %{y:.3%}<extra></extra>')
-    _fig.update_yaxes(title_text='pred - true (1e-14)', row=_k + 1, col=1)
-    _fig.update_yaxes(title_text='(pred - true) / truth', range=[-0.5, 0.5],
+        _hover_line='%{x:.0f} A<br>median frac %{y:.3%}<extra></extra>',
+        _lo2=-_a['p98'] / _a['denom'], _hi2=-_a['p02'] / _a['denom'],
+        _name_band2=f"fractional 95% band -- {_a['name']}")
+    _fig.update_yaxes(title_text='true - pred (1e-14)', row=_k + 1, col=1)
+    _fig.update_yaxes(title_text='(true - pred) / truth', range=[-0.5, 0.5],
                       row=_n_sub + _k + 1, col=1)
     # Reference panel: this subset's median truth flux.
     _fig.add_trace(go.Scatter(x=_wave_ref_recon, y=_a['truth_med'],
@@ -571,7 +598,7 @@ _fig.update_layout(height=300 * _atlas_rows + 130, width=1200,
                    legend=dict(orientation='h', yanchor='bottom', y=1.015,
                                xanchor='left', x=0.0, font=dict(size=10)),
                    title=f'Wavelength residual atlas (n = {_n_pick} rows, '
-                         f'test-representative every10 sample)')
+                         f'{_atlas_source})')
 _fig.show()
 
 # How much of the range is already below the noise it will be subtracted
