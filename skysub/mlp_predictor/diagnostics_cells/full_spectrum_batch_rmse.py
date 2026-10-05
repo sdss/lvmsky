@@ -76,6 +76,17 @@ else:
     # they overlap into a band, and the RMS envelope and the right-column
     # histograms -- both computed from ALL rows -- are what the eye reads.
     MAX_RESID_LINES = 60
+    # Sky-arm residual correction (mlp_predictor.sky_arm_correction): each
+    # row's near and far decomposition residual, inverse-variance weighted,
+    # scaled per pixel by predicted-science-model / arm-model, applied in full
+    # up to RESIDUAL_CORRECTION_MAX_A and tapered to zero over the next 100 A.  Applied to panel 1 (obs - pred) and scored as
+    # a second chi2 next to the uncorrected one; sci_residuals and every other
+    # statistic stay uncorrected.  RESIDUAL_SMOOTHING_A is 'auto' (3-pixel
+    # median on faint rows only, the measured optimum), a running-median
+    # width in A, or 0.
+    RESIDUAL_CORRECTION = False
+    RESIDUAL_CORRECTION_MAX_A = 5000.0
+    RESIDUAL_SMOOTHING_A = 'auto'
 
     # Rows whose PER-COMPONENT reconstruction is kept for wavelength_residual_
     # atlas to reuse.  None (the default since 2026-09-29) hands over EVERY row
@@ -313,6 +324,7 @@ else:
     _cerr_sci_sel  = (np.asarray(coef_err_sci_all, dtype=np.float64)[sel_ft]
                       if _pix_sigma_sci_all is None else None)
     sci_resid_rows = []
+    sci_corr_rows = []         # per-row near-continuum correction (or None)
     sci_wave_rows = []
     sci_obs_rows = []          # observed sci flux, for the photon chi2 below
     # DECOMPOSITION SELF-FIT residual: recon(coef_sci_TRUE) - observed sci.
@@ -504,6 +516,21 @@ else:
     print(f"  recon setup: {_time.perf_counter() - _t_recon0:.2f} s "
           f"(one-time basis build + FITS precache)")
 
+    # Sky-arm residual correction inputs, built once and inherited by the
+    # forked workers: the arms' fibre counts (their stack noise) and the
+    # absolute sensitivity on the shared grid.
+    if RESIDUAL_CORRECTION:
+        from mlp_predictor.sky_arm_correction import (
+            SkyArm as _SkyArm, arm_photon_variance as _arm_var,
+            sky_arm_residual_correction as _sky_arm_corr)
+        from mlp_predictor.noise import load_absolute_sensitivity as _load_sens_rc
+        with fits.open(EVAL_INPUT, memmap=True) as _h_rc:
+            _nf_rc = {a: np.asarray(_h_rc["META"].data[f"fibers_sky_{a}_used"],
+                                    dtype=np.float64)[np.asarray(sel_rows, dtype=int)]
+                      for a in ("near", "far")}
+        _sens_rc = (np.asarray(_load_sens_rc(wave_arr), dtype=np.float64)
+                    if wave_arr.ndim == 1 else None)
+
     # The per-row work, factored out of the loop so it can run over a
     # process pool.  It closes over the hoisted model cache, the FITS
     # precache and the telluric lookup; `cell_parallel` forks, so the child
@@ -568,6 +595,20 @@ else:
 
         sci_resid = flux_sci_pred - flux_sci_true
         _o_sci_rmse = float(np.sqrt(np.nanmean(sci_resid ** 2)))
+        _o_corr = None
+        if RESIDUAL_CORRECTION:
+            _solar = lambda comps: (np.asarray(comps.get("moon", 0.0), dtype=np.float64)
+                                    + np.asarray(comps.get("zodi", 0.0), dtype=np.float64)) / FACTOR
+            _arms_rc = [
+                _SkyArm(flux_near_true, flux_near_recon, _solar(comps_near),
+                        _arm_var(flux_near_true, wave_row, [_nf_rc["near"][i]], sens=_sens_rc)),
+                _SkyArm(flux_far_true, flux_far_recon, _solar(comps_far),
+                        _arm_var(flux_far_true, wave_row, [_nf_rc["far"][i]], sens=_sens_rc)),
+            ]
+            _o_corr = _sky_arm_corr(
+                wave_row, flux_sci_pred, _solar(comps_sci), _arms_rc,
+                max_wavelength=RESIDUAL_CORRECTION_MAX_A,
+                smoothing=RESIDUAL_SMOOTHING_A).astype(np.float32)
         # float32 from here on: at 2900 rows the eight per-row stacks
         # are 2.3 GB in float64 and half that in float32, and they feed
         # medians, percentiles and plots -- 7 significant digits is far
@@ -654,7 +695,7 @@ else:
                 _o_resid, _o_wave, _o_obs, _o_selfres,
                 _dmoon.astype(np.float32), _dzodi.astype(np.float32),
                 _ddiffuse.astype(np.float32), _dlines.astype(np.float32),
-                _o_cdelta, _o_ctrue)
+                _o_cdelta, _o_ctrue, _o_corr)
 
     _t_loop0 = _time.perf_counter()
     _atlas_cpred, _atlas_ctrue = [], []
@@ -671,6 +712,7 @@ else:
         sci_zodi_resid_rows.append(_o[11])
         sci_diffuse_resid_rows.append(_o[12])
         sci_lines_resid_rows.append(_o[13])
+        sci_corr_rows.append(_o[16])
         if _o[14] is not None:
             _atlas_cpred.append(_o[14])
             _atlas_ctrue.append(_o[15])
@@ -800,6 +842,8 @@ else:
     # what a user of the prediction gets; `sci_resid_arr` itself keeps the
     # pred - observed sign it is stored and returned with.
     sci_skysub_arr = -sci_resid_arr
+    if RESIDUAL_CORRECTION:
+        sci_skysub_arr = sci_skysub_arr - np.vstack(sci_corr_rows) * FACTOR
     # Panels 2-5 likewise show decomposition - predicted, the same sense as
     # panel 1. The per-row lists keep pred - recon(true), which is what the
     # atlas handoff self-check above compares against, so only these display
@@ -888,30 +932,40 @@ else:
             print("  [sigma band] rows are not on a common wavelength grid; "
                   "the band is omitted from the spectrum panels.")
 
+    # With the sky-arm correction on, panel 1 shows the CORRECTED sky-subtracted
+    # spectra and panel 2 the same rows UNCORRECTED, on a shared y-axis, so
+    # the two can be compared stroke for stroke.
+    _show_uncorr = bool(RESIDUAL_CORRECTION) and bool(sci_corr_rows) and sci_corr_rows[0] is not None
+    _n_resid_rows = 6 if _show_uncorr else 5
+    _resid_titles = [
+        (f"SCI sky-subtracted, WITH sky-arm correction: observed - pred - corr (n={n_use})"
+         if _show_uncorr else f"SCI sky-subtracted: observed - pred (n={n_use})"),
+        "median residual / row (±1,2,3σ)",
+    ]
+    if _show_uncorr:
+        _resid_titles += [f"SCI sky-subtracted, NO correction: observed - pred (n={n_use})", ""]
+    _resid_titles += [
+        "Moon component: recon(sci coef) - pred", "",
+        "Zodi component: recon(sci coef) - pred", "",
+        "Diffuse continuum (HO2 + FeO + O2ac): recon(sci coef) - pred", "",
+        "Lines (OH + atom + ORC + O2): recon(sci coef) - pred", "",
+    ]
     fig_resid = _make_subplots_resid(
-        rows=5, cols=2,
+        rows=_n_resid_rows, cols=2,
         shared_xaxes=False,
         column_widths=[0.82, 0.18],
         horizontal_spacing=0.03,
         vertical_spacing=0.04,
-        subplot_titles=(
-            f"SCI sky-subtracted: observed - pred (n={n_use})",
-            "median residual / row (±1,2,3σ)",
-            "Moon component: recon(sci coef) - pred",
-            "",
-            "Zodi component: recon(sci coef) - pred",
-            "",
-            "Diffuse continuum (HO2 + FeO + O2ac): recon(sci coef) - pred",
-            "",
-            "Lines (OH + atom + ORC + O2): recon(sci coef) - pred",
-            "",
-        ),
+        subplot_titles=tuple(_resid_titles),
     )
     # Share the wavelength x-axis across the four spectrum panels only; the
     # right-column histograms keep independent x-axes because per-component
     # median residuals live on very different scales.
-    for _r in range(2, 6):
+    for _r in range(2, _n_resid_rows + 1):
         fig_resid.update_xaxes(matches="x", row=_r, col=1)
+    if _show_uncorr:
+        # Same y-range for corrected and uncorrected: the comparison is the point.
+        fig_resid.update_yaxes(matches="y", row=2, col=1)
 
     def _expnum_str(i):
         if _expnum_sel is None:
@@ -923,8 +977,10 @@ else:
         return f" | expnum {_e}"
 
     _wave_ref32 = np.asarray(wave_ref, dtype=np.float32)
-    _panels = [
-        ("total",   sci_skysub_arr),
+    _panels = [("total",   sci_skysub_arr)]
+    if _show_uncorr:
+        _panels.append(("total_uncorrected", -sci_resid_arr))
+    _panels += [
         ("moon",    sci_moon_arr),
         ("zodi",    sci_zodi_arr),
         ("diffuse", sci_diffuse_arr),
@@ -1134,13 +1190,17 @@ else:
                     row=_row_i, col=2,
                 )
 
-    fig_resid.update_xaxes(title_text="Wavelength [Å]", row=4, col=1)
-    fig_resid.update_xaxes(title_text="Median residual", row=4, col=2)
-    fig_resid.update_yaxes(title_text="Observed - Predicted sky", row=1, col=1)
-    fig_resid.update_yaxes(title_text="Decomposition - predicted moon",    row=2, col=1)
-    fig_resid.update_yaxes(title_text="Decomposition - predicted zodi",    row=3, col=1)
-    fig_resid.update_yaxes(title_text="Decomposition - predicted diffuse", row=4, col=1)
-    fig_resid.update_yaxes(title_text="Decomposition - predicted lines",   row=5, col=1)
+    _o = 1 if _show_uncorr else 0      # row offset of the component panels
+    fig_resid.update_xaxes(title_text="Wavelength [Å]", row=_n_resid_rows, col=1)
+    fig_resid.update_xaxes(title_text="Median residual", row=_n_resid_rows, col=2)
+    fig_resid.update_yaxes(title_text=("Obs - pred - corr" if _show_uncorr
+                                       else "Observed - Predicted sky"), row=1, col=1)
+    if _show_uncorr:
+        fig_resid.update_yaxes(title_text="Obs - pred (uncorrected)", row=2, col=1)
+    fig_resid.update_yaxes(title_text="Decomposition - predicted moon",    row=2 + _o, col=1)
+    fig_resid.update_yaxes(title_text="Decomposition - predicted zodi",    row=3 + _o, col=1)
+    fig_resid.update_yaxes(title_text="Decomposition - predicted diffuse", row=4 + _o, col=1)
+    fig_resid.update_yaxes(title_text="Decomposition - predicted lines",   row=5 + _o, col=1)
     fig_resid.update_layout(
         template="plotly_white",
         title=(f"SCI + per-component residuals (n={n_use} spectra"
@@ -1150,7 +1210,7 @@ else:
                f"right-column histograms show the per-row median residual "
                f"across ALL {n_use} rows, with empirical ±1σ/2σ/3σ "
                f"percentiles."),
-        height=1500,
+        height=1500 + (300 if _show_uncorr else 0),
         margin=dict(l=80, r=20, t=110, b=60),
         showlegend=False,
         bargap=0.05,
@@ -1235,6 +1295,8 @@ else:
     _chi2_blue = None
     _chi2_self = None
     _chi2_self_blue = None
+    _chi2_corr = None
+    _chi2_corr_blue = None
     if _chi2_ok and sci_obs_rows:
         _obs_a = np.vstack(sci_obs_rows)
         _res_a = np.vstack(sci_resid_rows)
@@ -1293,6 +1355,15 @@ else:
                       else np.full(_chi2_ph.shape, np.nan))
         _c2b = _chi2_blue[np.isfinite(_chi2_blue)]
 
+        # The same chi2 with the sky-arm residual correction applied: the
+        # stored residual is pred - obs, so obs - pred - corr = -(res + corr).
+        if RESIDUAL_CORRECTION and sci_corr_rows and sci_corr_rows[0] is not None:
+            _pull2_c = np.where(_good, (_res_a + np.vstack(sci_corr_rows)) ** 2 / _var_c2, np.nan)
+            _chi2_corr = np.nanmean(_pull2_c, axis=1)
+            _chi2_corr_blue = (np.nanmean(_pull2_c[:, _blue_m], axis=1) if _n_blue_pix
+                               else np.full(_chi2_corr.shape, np.nan))
+            del _pull2_c
+
         # DECOMPOSITION SELF-FIT chi2, the reference distribution (2026-09-11).
         # Identical noise model, identical pixels, identical mask -- the only
         # difference is that the coefficients are the FITTED ones rather than
@@ -1329,6 +1400,17 @@ else:
         _n_c2_rows = int(_obs_a.shape[0])
         del _pull2, _var_c2, _res_a, _obs_a, _good
 
+        # What the chi2 FIGURE plots as "Prediction": the corrected chi2 when the
+        # sky-arm correction is on (the uncorrected one is overlaid as a red
+        # outline), the plain one otherwise.  The returned chi2_photon /
+        # chi2_photon_blue stay uncorrected either way.
+        _c2_corr_on = _chi2_corr is not None
+        _plot_ph = _chi2_corr if _c2_corr_on else _chi2_ph
+        _plot_blue = _chi2_corr_blue if _c2_corr_on else _chi2_blue
+        _c2f_plot = _plot_ph[np.isfinite(_plot_ph)]
+        _c2b_plot = _plot_blue[np.isfinite(_plot_blue)]
+        _pred_label = "Prediction + sky-arm corr." if _c2_corr_on else "Prediction"
+
         _figc = _make_subplots_resid(
             rows=2, cols=2, column_widths=[0.5, 0.5], horizontal_spacing=0.10,
             vertical_spacing=0.13,
@@ -1339,7 +1421,7 @@ else:
                 "full band: decomposition vs prediction, per row",
                 f"blue < {CHI2_BLUE_MAX_A:.0f} A: decomposition vs prediction"))
 
-        def _c2_panel(_v, _vs, _col, _colour):
+        def _c2_panel(_v, _vs, _col, _colour, _vu=None):
             """Two overlaid linear chi2 histograms: reconstruction vs self-fit.
 
             `_v`  = chi2 of the ML reconstruction against the photon noise.
@@ -1368,7 +1450,10 @@ else:
             _vf = _vf[np.isfinite(_vf)]
             _vsf = np.asarray(_vs, dtype=np.float64)
             _vsf = _vsf[np.isfinite(_vsf)]
-            _both = np.concatenate([_vf, _vsf]) if _vsf.size else _vf
+            _vuf = (np.asarray(_vu, dtype=np.float64) if _vu is not None
+                    else np.empty(0))
+            _vuf = _vuf[np.isfinite(_vuf)]
+            _both = np.concatenate([_vf, _vsf, _vuf])
             _lo = 0.0
             if _both.size:
                 _q25, _q75 = np.percentile(_both, [25, 75])
@@ -1390,8 +1475,18 @@ else:
                     hovertemplate=("self-fit chi2_red=%{x:.3g}"
                                    "<br>n=%{y}<extra></extra>")),
                     row=1, col=_col)
+            if _vuf.size:
+                # Uncorrected prediction as an outline, for the before/after.
+                _figc.add_trace(go.Histogram(
+                    x=_vuf, xbins=_bins, name="Prediction, no correction",
+                    marker=dict(color="rgba(0,0,0,0)",
+                                line=dict(color="#e31a1c", width=1.5)),
+                    legendgroup="uncorr", showlegend=(_col == 1),
+                    hovertemplate=("uncorrected chi2_red=%{x:.3g}"
+                                   "<br>n=%{y}<extra></extra>")),
+                    row=1, col=_col)
             _figc.add_trace(go.Histogram(
-                x=_vf, xbins=_bins, name="Prediction",
+                x=_vf, xbins=_bins, name=_pred_label,
                 marker=dict(color=_colour), opacity=0.75,
                 legendgroup="recon", showlegend=(_col == 1),
                 hovertemplate=("recon chi2_red=%{x:.3g}"
@@ -1407,6 +1502,8 @@ else:
                 _n_out = int(np.sum(_vf > _hi))
                 _med_r = float(np.median(_vf))
                 _txt = f"Pred. median {_med_r:.3g}"
+                if _vuf.size:
+                    _txt += f"<br>No-corr. median {float(np.median(_vuf)):.3g}"
                 if _vsf.size:
                     _med_s = float(np.median(_vsf))
                     _txt += (f"<br>Decomp. median {_med_s:.3g}"
@@ -1502,17 +1599,17 @@ else:
                 showarrow=False, xanchor="left", align="left",
                 font=dict(size=10, color="#666666"), row=2, col=_col)
 
-        _c2_panel(_c2f, _c2fs, 1, "#1f78b4")
-        _c2_panel(_c2b, _c2bs, 2, "#6a3d9a")
+        _c2_panel(_c2f_plot, _c2fs, 1, "#1f78b4", _c2f if _c2_corr_on else None)
+        _c2_panel(_c2b_plot, _c2bs, 2, "#6a3d9a", _c2b if _c2_corr_on else None)
         # NOT _c2f/_c2fs: those are each filtered by their OWN finite mask, so
         # they can differ in length and are not row-aligned.  The scatter pairs
         # rows, so it must take the raw n_use-long vectors and apply one JOINT
         # mask itself.
         if _chi2_self is not None:
-            _c2_scatter(_chi2_ph, _chi2_self, 1, "#1f78b4")
+            _c2_scatter(_plot_ph, _chi2_self, 1, "#1f78b4")
         if _chi2_self_blue is not None:
-            _c2_scatter(_chi2_blue, _chi2_self_blue, 2, "#6a3d9a")
-        _q = np.nanpercentile(_chi2_ph, [10, 90])
+            _c2_scatter(_plot_blue, _chi2_self_blue, 2, "#6a3d9a")
+        _q = np.nanpercentile(_plot_ph, [10, 90])
         _figc.update_layout(
             template="plotly_white",
             height=(420 if _chi2_self is None else 840), barmode="overlay",
@@ -1525,8 +1622,15 @@ else:
                              f"shot noise of one {CHI2_EXPTIME_S:.0f} s "
                              f"{_c2_mode}, which is what the sky model will be "
                              f"subtracted from.  p10/p50/p90 = "
-                             f"{_q[0]:.3g} / {float(np.nanmedian(_chi2_ph)):.3g} / "
-                             f"{_q[1]:.3g}."
+                             f"{_q[0]:.3g} / {float(np.nanmedian(_plot_ph)):.3g} / "
+                             f"{_q[1]:.3g}"
+                             + (f" WITH the sky-arm residual correction ("
+                                + ("full band" if not np.isfinite(RESIDUAL_CORRECTION_MAX_A)
+                                   else f"to {RESIDUAL_CORRECTION_MAX_A:.0f} A")
+                                + "); red outline = "
+                                f"the same rows uncorrected, median "
+                                f"{float(np.nanmedian(_chi2_ph)):.3g}."
+                                if _c2_corr_on else ".")
                              + ("" if _chi2_self is None else
                                 f"  Grey = the DECOMPOSITION'S OWN fit on the "
                                 f"same rows and the same noise, median "
@@ -1552,7 +1656,8 @@ else:
             for _cc in (1, 2):
                 _figc.update_xaxes(title_text=r"$\text{Decomposition self-fit }\chi^2$",
                                    row=2, col=_cc)
-                _figc.update_yaxes(title_text=r"$\text{Prediction }\chi^2$", row=2, col=_cc)
+                _figc.update_yaxes(title_text=(r"$\text{Prediction + corr. }\chi^2$" if _c2_corr_on
+                                               else r"$\text{Prediction }\chi^2$"), row=2, col=_cc)
         _figc.show()
         print(f"  [chi2] ABSOLUTE reduced chi2 vs the {_c2_mode} photon "
               f"model: median {float(np.nanmedian(_chi2_ph)):.4g}, "
@@ -1582,6 +1687,17 @@ else:
                      else f", {(float(np.nanmedian(_chi2_blue)) / float(np.nanmedian(_chi2_self_blue))):.2f}x blue"))
             print(f"  [chi2] a ratio near 1 means the ML transfer is no longer "
                   f"the error source on these rows -- the decomposition is.")
+        if _chi2_corr is not None:
+            print(f"  [chi2] WITH SKY-ARM RESIDUAL CORRECTION ("
+                  + ("full band" if not np.isfinite(RESIDUAL_CORRECTION_MAX_A)
+                     else f"to {RESIDUAL_CORRECTION_MAX_A:.0f} A + 100 A taper")
+                  + f", smoothing {RESIDUAL_SMOOTHING_A!r}): median "
+                  f"{float(np.nanmedian(_chi2_corr)):.4g} full band, "
+                  f"{float(np.nanmedian(_chi2_corr_blue)):.4g} blue"
+                  f"   (uncorrected {float(np.nanmedian(_chi2_ph)):.4g} / "
+                  f"{float(np.nanmedian(_chi2_blue)):.4g}; rows made worse: "
+                  f"{100 * np.nanmean(_chi2_corr > _chi2_ph):.1f}% full, "
+                  f"{100 * np.nanmean(_chi2_corr_blue > _chi2_blue):.1f}% blue)")
         if CHI2_SINGLE_FIBRE and _nfib is not None:
             _fac = float(np.nanmedian(_nfib)) * (2.0 / np.pi)
             print(f"  [chi2] single-fibre sigma; the rows are stacks of a "
@@ -1623,4 +1739,7 @@ else:
         # this corpus rather than carried over as a hard-coded constant.
         "chi2_self": _chi2_self,
         "chi2_self_blue": _chi2_self_blue,
+        # With the sky-arm residual correction (None unless RESIDUAL_CORRECTION).
+        "chi2_photon_corrected": _chi2_corr,
+        "chi2_photon_blue_corrected": _chi2_corr_blue,
     }

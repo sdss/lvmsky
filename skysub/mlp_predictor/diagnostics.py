@@ -181,6 +181,23 @@ def _base_globals() -> dict:
     }
 
 
+def _float_literal(value) -> str:
+    """Source literal for a float that may be infinite."""
+    v = float(value)
+    return repr(v) if np.isfinite(v) else ("float('inf')" if v > 0 else "float('-inf')")
+
+
+def _smoothing_literal(value) -> str:
+    """Source literal for a sky-arm-correction smoothing argument."""
+    if value is None:
+        return "0.0"
+    if isinstance(value, str):
+        if value != "auto":
+            raise ValueError(f"residual_smoothing_A must be 'auto', a width in A, or None; got {value!r}")
+        return "'auto'"
+    return repr(float(value))
+
+
 @dataclass
 class DiagnosticsContext:
     """Runtime state each diagnostic cell reads.
@@ -546,13 +563,26 @@ class Diagnostics:
 
     def full_spectrum_single_row(self, row: int | None = None,
                                  expnum: int | None = None,
-                                 show_moon_zodi_model: bool = True) -> dict:
+                                 show_moon_zodi_model: bool = True,
+                                 residual_correction: bool = False,
+                                 residual_smoothing_A: float | str | None = "auto",
+                                 residual_max_A: float = 5000.0) -> dict:
         """Reconstruct a single every10 row.  Pass ``row`` (every10 index)
         or ``expnum`` (looked up via the every10 META FITS).
 
-        ``show_moon_zodi_model`` overlays the frozen physical Moon/Zodi model
-        (``sky_decomp.moon_zodi_model``) on the near/far/sci flux panels and
-        prints its fit/model amplitude table; set False to skip it.
+        ``residual_correction`` subtracts, in the 4th panel (observed -
+        predicted), the sky arms' own decomposition residual: near and far,
+        inverse-variance weighted and scaled per pixel by the predicted
+        science model over the arm's model
+        (``mlp_predictor.sky_arm_correction``).  Panel 4 then shows the
+        uncorrected spectrum in gray and the corrected one in red, and the
+        corrected chi2 is printed.  Default False.
+        ``residual_smoothing_A`` ``'auto'`` (default: 3-pixel median on faint
+        rows only, the measured optimum), a running-median width in Angstrom,
+        or 0 for unsmoothed.
+        ``residual_max_A`` the correction is applied in full up to this and
+        tapered to zero over the next 100 A (default 5000 A); pass
+        ``float('inf')`` for the full band.
         """
         if expnum is not None and row is not None:
             raise TypeError("pass row OR expnum, not both")
@@ -566,12 +596,21 @@ class Diagnostics:
                 (r"^REQUESTED_ROW\s*=\s*\d+", f"REQUESTED_ROW = {int(row)}"),
                 (r"^SHOW_MOON_ZODI_MODEL\s*=\s*(?:True|False)",
                  f"SHOW_MOON_ZODI_MODEL = {bool(show_moon_zodi_model)}"),
+                (r"^RESIDUAL_CORRECTION\s*=\s*(?:True|False)",
+                 f"RESIDUAL_CORRECTION = {bool(residual_correction)}"),
+                (r"^RESIDUAL_SMOOTHING_A\s*=\s*.*$",
+                 f"RESIDUAL_SMOOTHING_A = {_smoothing_literal(residual_smoothing_A)}"),
+                (r"^RESIDUAL_CORRECTION_MAX_A\s*=\s*.*$",
+                 f"RESIDUAL_CORRECTION_MAX_A = {_float_literal(residual_max_A)}"),
             ],
         )
 
     def full_spectrum_batch_rmse(self, size: int | None = None, seed: int = 42,
                                  stroked: int = 60, n_workers: int = 8,
-                                 split: str = "heldout") -> dict:
+                                 split: str = "heldout",
+                                 residual_correction: bool = False,
+                                 residual_smoothing_A: float | str | None = "auto",
+                                 residual_max_A: float = 5000.0) -> dict:
         """Full-spectrum RMSE over the held-out rows.
 
         ``size``    rows evaluated.  ``None`` (default) takes EVERY gated row
@@ -593,6 +632,19 @@ class Diagnostics:
                     default), ``'test'``, ``'val'``, or ``'all'``.  ``'all'``
                     restores the pre-2026-09-23 behaviour of scoring training
                     rows too, which made the numbers optimistic.
+        ``residual_correction`` subtracts each row's sky-arm decomposition
+                    residual (``mlp_predictor.sky_arm_correction``: near and
+                    far, inverse-variance weighted, scaled per pixel by the
+                    predicted science model over the arm model) from the first
+                    residual panel, and
+                    prints and returns the corrected chi2 next to the
+                    uncorrected one.  ``sci_residuals`` and the other
+                    statistics stay uncorrected.
+        ``residual_smoothing_A`` ``'auto'`` (default: 3-pixel median on faint
+                    rows only), a running-median width in Angstrom, or 0.
+        ``residual_max_A`` the correction is applied in full up to this and
+                    tapered to zero over the next 100 A (default 5000 A);
+                    ``float('inf')`` for the full band.
         """
         if split not in ("heldout", "test", "val", "all"):
             raise ValueError(
@@ -608,6 +660,12 @@ class Diagnostics:
                  f"    _EVAL_SPLIT = {split!r}"),
                 (r"^\s*MAX_RESID_LINES\s*=\s*\d+",
                  f"    MAX_RESID_LINES = {max(int(stroked), 0)}"),
+                (r"^\s*RESIDUAL_CORRECTION\s*=\s*(?:True|False)",
+                 f"    RESIDUAL_CORRECTION = {bool(residual_correction)}"),
+                (r"^\s*RESIDUAL_SMOOTHING_A\s*=\s*.*$",
+                 f"    RESIDUAL_SMOOTHING_A = {_smoothing_literal(residual_smoothing_A)}"),
+                (r"^\s*RESIDUAL_CORRECTION_MAX_A\s*=\s*.*$",
+                 f"    RESIDUAL_CORRECTION_MAX_A = {_float_literal(residual_max_A)}"),
             ],
         )
 

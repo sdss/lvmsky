@@ -401,7 +401,7 @@ _med_frac = _med   / _denom
 # from 6.1% to 0.6% where it was measured -- but moon_alt is what
 # naive_baseline and ensemble_spread_calibration use, so which one ran is
 # printed rather than left implicit.
-MOON_DOWN_FRAC_MAX_ATLAS = 0.02 / 3.0
+MOON_DOWN_FRAC_MAX_ATLAS = 0.02/3.0
 _ctx_names_split = [str(_c).lower() for _c in e10_triplet['ctx_names']]
 _ctx_sci_split = np.asarray(e10_triplet['ctx_sci'], dtype=np.float64)[sel_pos]
 _moon_up_atlas = None

@@ -1,62 +1,3 @@
-%% AASTeX v7 manuscript, typeset two-column.  Every display fits a single
-%% column; drop [twocolumn] for the one-column manuscript layout, or add
-%% [linenumbers] for review.
-\documentclass[twocolumn]{aastex701}
-
-\usepackage{amsmath}
-\usepackage{bm}
-\usepackage{array}
-\newcolumntype{L}[1]{>{\raggedright\arraybackslash}p{#1}}
-\usepackage{tikz}
-\usetikzlibrary{positioning,arrows.meta,fit,calc,backgrounds}
-
-\newcommand{\vect}[1]{\bm{#1}}
-\newcommand{\dd}{\mathrm{d}}
-\newcommand{\yes}{$\checkmark$}
-
-\shorttitle{LVM sky subtraction}
-\shortauthors{Drory}
-
-\begin{document}
-
-\title{Sky Subtraction for the Local Volume Mapper:\\
-Physical Decomposition and Learned Sky-to-Science Transfer}
-
-\author{Niv Drory}
-\affiliation{The University of Texas at Austin, Austin, TX, USA}
-\email{droryn@eid.utexas.edu}
-
-\begin{abstract}
-We describe a sky-subtraction procedure for the SDSS-V Local Volume Mapper
-(LVM) in which the sky spectrum at the science pointing is predicted from two
-simultaneous sky pointings. Each of the three spectra of an exposure is first
-decomposed into physically distinct emitters --- OH and O$_2$ airglow, atomic
-lines, the diffuse airglow continuum, scattered moonlight and zodiacal light
---- by a constrained quadratic program. The program fits the instrumental
-line-spread function and the telluric attenuation of the airglow jointly with
-the amplitudes, and it uses hard linear constraints to make the
-moonlight/zodiacal-light and diffuse-continuum partitions identifiable. The
-resulting coefficient vectors are normalised for line-of-sight geometry and
-extinction in closed form, and a neural network with physically motivated
-coefficient groups, isolated branches for the anisotropic emitters and an
-explicit arm-blend prior predicts the science-pointing coefficients from the
-two sky pointings and the observing context. Amplitudes that the
-decomposition fixes by constraint rather than by data are derived from
-geometry at prediction time instead of being learned. The predicted
-coefficients are reconstructed into a full-resolution sky spectrum and
-subtracted from the science exposure. On 2888 observations not used in
-training, the predicted sky leaves a residual with a median reduced $\chi^2$
-of 1.27 against the photon noise of a single fibre, compared with 0.92 for
-the decomposition's own fit to the same spectra. The error added by the
-prediction is about 0.6 times that noise, or 5\% of the sky per pixel, and
-the integrated sky flux is reproduced to 1.5\% at the median.
-\end{abstract}
-
-%% Replace with Unified Astronomy Thesaurus concepts and their IDs.
-\keywords{Night sky brightness --- Airglow --- Zodiacal light ---
-Astronomy data reduction --- Neural networks}
-
-%======================================================================
 \section{Problem statement}
 \label{sec:problem}
 
@@ -85,12 +26,12 @@ pointing from those at the two sky pointings and from the observing geometry
 (Section~\ref{sec:ml}). The prediction is turned back into a sky spectrum on
 the native pixel grid and subtracted from the science spectrum.
 
-The natural yardstick for the result is the photon noise of a single fibre,
-because the sky model is subtracted from individual fibres. On observations
+The natural yardstick for the result is the photon noise of a single fiber,
+because the sky model is subtracted from individual fibers. On observations
 not used in training, the predicted sky reaches a median reduced $\chi^2$ of
 1.27 against that noise, where the decomposition's own fit to the same
 spectra reaches 0.92; the prediction thus adds an error of about 0.6 times
-the single-fibre noise, or about 5\% of the sky per pixel
+the single-fiber noise, or about 5\% of the sky per pixel
 (Section~\ref{sec:evaluation}).
 
 %======================================================================
@@ -99,8 +40,8 @@ the single-fibre noise, or about 5\% of the sky per pixel
 
 \paragraph{Instrument.} The LVM instrument comprises separate telescopes for
 science, for two sky fields (east and west) and for spectrophotometric
-standards, all feeding fibre bundles into spectrographs with three channels
-($b$, $r$, $z$) covering $3600$--$9800$\,\AA. The fibre diameter is
+standards, all feeding fiber bundles into spectrographs with three channels
+($b$, $r$, $z$) covering $3600$--$9800$\,\AA. The fiber diameter is
 $35.3''$. We call the three pointings of an exposure its \emph{arms}: the
 science arm and two sky arms. The sky arm closer to the science field on the
 sky is the \emph{near} arm and the other the \emph{far} arm. This assignment
@@ -108,18 +49,18 @@ changes from exposure to exposure and does not depend on which physical
 telescope is used.
 
 \paragraph{Spectra.} The inputs are the reduced, flux-calibrated frames of
-the LVM data reduction pipeline (DRP). The DRP divides every fibre by a model
+the LVM data reduction pipeline (DRP). The DRP divides every fiber by a model
 telluric transmission evaluated along the \emph{science} line of sight, which
 matters for the decomposition (Section~\ref{sec:telluric}). For each exposure
 we form three spectra on a common grid of $N_\lambda = 12\,401$ pixels at
-$\Delta\lambda = 0.5$\,\AA: the median over the fibres of each sky telescope,
-and the median over the science fibres after rejecting fibres whose Gaia DR3
-\citep{GaiaDR3} predicted stellar $G$-band flux exceeds 1\% of the fibre's
+$\Delta\lambda = 0.5$\,\AA: the median over the fibers of each sky telescope,
+and the median over the science fibers after rejecting fibers whose Gaia DR3
+\citep{GaiaDR3} predicted stellar $G$-band flux exceeds 1\% of the fiber's
 measured flux plus sky. The median is a robust estimate of the
 sky-dominated spectrum, with the variance of a mean over
-$N_{\rm eff} = (2/\pi)\,n_{\rm fib}$ fibres, where $n_{\rm fib}$ is the
-number of fibres combined. Each spectrum carries the per-pixel line-spread
-function (LSF) width of its fibre bundle.
+$N_{\rm eff} = (2/\pi)\,n_{\rm fib}$ fibers, where $n_{\rm fib}$ is the
+number of fibers combined. Each spectrum carries the per-pixel line-spread
+function (LSF) width of its fiber bundle.
 
 \paragraph{Metadata.} Each exposure provides the pointing coordinates and
 airmass of all three telescopes, the exposure mid-time and duration, the
@@ -247,14 +188,14 @@ pointings, and the transfer would be asked to predict atmospheric absorption
 disguised as mesospheric emission. Two corrections avoid this. First, each
 line template is attenuated at its own centre wavelength by the PALACE
 molecular transmission, evaluated from high-resolution line optical depths at
-the airmass $X_{\rm src}$ of the fibre being fitted,
+the airmass $X_{\rm src}$ of the fiber being fitted,
 \begin{equation}
   t_\ell = \exp\!\Big\{-X_{\rm src}\big[\tau_\ell^{\rm dry}
   + (w/w_0)\,\tau_\ell^{\rm H_2O}\big]\Big\},
 \end{equation}
 where $w$ is the PWV and $w_0 = 2.5$\,mm is the reference water column.
 Second, every template is divided by the smooth transmission
-$T_{\rm DRP}(\lambda;\,X_{\rm sci},w)$ that the DRP removed from all fibres
+$T_{\rm DRP}(\lambda;\,X_{\rm sci},w)$ that the DRP removed from all fibers
 along the science line of sight, so that model and data are compared in the
 frame in which the data are delivered. The design matrix of a spectrum is
 therefore $\mathbf{A}^{\rm obs} = \mathbf{A}(X_{\rm src}, w)/T_{\rm
@@ -432,7 +373,7 @@ spectrum broadened by 30\,km\,s$^{-1}$ and Doppler-shifted by the dust
 velocity $v_{\rm z}$; the exponent 0.26 is the zodiacal reddening; the
 factor $1/2$ in the extinction reflects forward scattering into the beam of
 an extended source; and $f$ is the empirical correction described below.
-Both spectra are multiplied by the fibre solid angle and projected onto the
+Both spectra are multiplied by the fiber solid angle and projected onto the
 LVM grid with the LSF of the spectrum. The constraints use two numbers from
 the model:
 the zodiacal integral $Z_{\rm pred} = \int S_{\rm zodi}\,\dd\lambda$ and the
@@ -517,7 +458,7 @@ The fit weights each pixel by the inverse of a photon-noise variance
 \end{equation}
 Here $s(\lambda)$ is the absolute spectral sensitivity of the instrument
 (flux per detected count), $t_{\rm exp}$ is the exposure time and
-$N_{\rm eff}$ is the effective number of fibres of the median. A floor of 5\%
+$N_{\rm eff}$ is the effective number of fibers of the median. A floor of 5\%
 of the median of the spectrum prevents the variance from vanishing. The
 weights are normalised to unit mean over the good pixels of each spectrum.
 This preserves the relative weighting across wavelength and leaves the
@@ -528,12 +469,12 @@ the variance is lower. Compared with uniform weights this lowers the $\chi^2$
 by 11--14\% over the full band in all three arms, and by 2--4\% in the blue.
 
 The same variance with $N_{\rm eff}=1$ is the photon noise of a single
-fibre. It is the yardstick for the sky prediction
+fiber. It is the yardstick for the sky prediction
 (Section~\ref{sec:evaluation}): the median spectra are cleaner than any one
-fibre, but the sky model is subtracted from individual fibres, so the
-residual of the model only matters in comparison with the single-fibre
+fiber, but the sky model is subtracted from individual fibers, so the
+residual of the model only matters in comparison with the single-fiber
 noise. A $\chi^2$ of 1 against this noise means that the model error equals
-it. For a typical observation, the single-fibre noise in a 0.5\,\AA{} pixel
+it. For a typical observation, the single-fiber noise in a 0.5\,\AA{} pixel
 is about 8\% of the sky flux over the full band and 9\% in the blue.
 
 Pixels near the emission lines of the science target (Balmer lines, [N\,\textsc{ii}],
@@ -799,7 +740,7 @@ light. After constraints (a)--(c), reversals are near-ties (all within 2.0
 of the boundary in the separation metric) and occur on 1--5\% of testable
 spectra. They are more frequent at low lunar illumination and altitude, and
 3.6 times more frequent in the science arm than in the far arm, consistent
-with faint-source continuum in the science fibres. Their amplitudes are
+with faint-source continuum in the science fibers. Their amplitudes are
 nearly right, because the data barely distinguish the two branches
 ($\rho({\rm moon},{\rm zodi}) = -0.95$). Refitting a reversed spectrum with
 a tighter ratio bound, $\beta = 0.85$, recovered all 18 in a test set, for a
@@ -946,7 +887,7 @@ fails one of the following tests:
         between $10^{-6}$ and $10^{-2}$ of the median.
   \item \emph{Science-continuum colour excess}: the red/blue continuum colour
         of the science spectrum exceeds that of the sky arms by more than
-        0.05. The fibre carries continuum that the sky model cannot
+        0.05. The fiber carries continuum that the sky model cannot
         represent, and the moon family has absorbed it.
   \item \emph{Outlier clipping}: iterative $\kappa\sigma$ clipping
         ($\kappa = 8$) of the concatenated three-arm coefficient vector, and
@@ -1084,10 +1025,10 @@ airmass difference. The intrinsic emissivity cancels, because both arms
 measure the same coefficient at the same instant. The fitted $k_{\rm eff}$
 absorbs the multiple-scattering correction, the site aerosol level and any
 error in the assumed layer height. Because of the degeneracy above, the
-layer height is fixed and only $k_{\rm eff}$ is fitted. Coefficients enter
-the fit whole, for all observations or none: an amplitude threshold per
-observation would select on the outcome, since the arm at lower airmass has
-the smaller van Rhijn factor and passes the threshold only when it carries a
+layer height is fixed and only $k_{\rm eff}$ is fitted. We fit all observations at once; 
+an amplitude threshold per observation would select on the outcome, 
+since the arm at lower airmass has the smaller van Rhijn factor and passes 
+the threshold only when it carries a
 positive fluctuation, which correlates the residual with the sign of
 $\Delta X$ (in tests this inflated $k_{\rm eff}$ by a factor of 1.8). Errors
 are clustered by observation, because all coefficients of an observation
@@ -1769,19 +1710,19 @@ residual $y_{\rm sci} - \hat y_{\rm sci}$ of the predicted sky is compared
 with three references. The first is the decomposition's own fit to
 $y_{\rm sci}$, which is the floor: the transfer predicts the coefficients of
 that fit, so it cannot describe the spectrum better. The second is the
-photon noise of a single fibre (Section~\ref{sec:noise}), the level below
+photon noise of a single fiber (Section~\ref{sec:noise}), the level below
 which a sky error no longer matters. The third is the sky itself. All
 numbers below are for the 2888 held-out observations.
 
 Figure~\ref{fig:chi2-heldout} compares the prediction with the first two
 references. Over the full band the median $\chi^2$ of the prediction is
-1.27 against the single-fibre noise, and that of the decomposition's own fit
+1.27 against the single-fiber noise, and that of the decomposition's own fit
 is 0.92, a ratio of 1.38. In the blue the medians are 0.87 and 0.68, a ratio
 of 1.28. The typical residual of the predicted sky is therefore 1.13 times
-the single-fibre noise per pixel over the full band and 0.93 times it in the
+the single-fiber noise per pixel over the full band and 0.93 times it in the
 blue, where the decomposition alone reaches 0.96 and 0.82. If the transfer
 error adds in quadrature to the decomposition residual, it amounts to about
-0.6 of the single-fibre noise over the full band and 0.44 in the blue, or
+0.6 of the single-fiber noise over the full band and 0.44 in the blue, or
 about 5\% and 4\% of the sky per pixel. About a third of the observations
 have a prediction $\chi^2$ below 1 over the full band, and half in the blue.
 
@@ -1814,7 +1755,7 @@ $\pm1$ in these units near 4000\,\AA, where the bright-Moon continuum is
 about 5. The zodiacal and diffuse errors stay within about $\pm0.3$ and
 $\pm0.2$, respectively. For all three components the median error of an
 observation is narrowly distributed around zero, within or near the
-single-fibre noise.
+single-fiber noise.
 
 Figure~\ref{fig:atlas} condenses the comparison into percentile bands at
 each wavelength, separately for the Moon down (1090 observations,
@@ -1823,12 +1764,12 @@ is compared with the full decomposition of the science spectrum. The
 residual is therefore the transfer error alone: it contains neither the
 emission of the science field nor the residual of the decomposition's own
 fit. The median is consistent with zero at every wavelength. Its magnitude
-is typically 3\% of the single-fibre noise with the Moon down and 2\% with
+is typically 3\% of the single-fiber noise with the Moon down and 2\% with
 the Moon up, and nowhere more than 26\% and 38\%. As a fraction of the sky
 it is about 0.2\% in each of the blue, red and near-infrared ranges, with
-the prediction slightly high. The 68\% range lies inside the single-fibre
+the prediction slightly high. The 68\% range lies inside the single-fiber
 noise on 97\% of pixels in both regimes, so for a typical observation the
-transfer error is below the photon noise of one fibre almost everywhere.
+transfer error is below the photon noise of one fiber almost everywhere.
 The exceptions are the bright lines: [O\,\textsc{i}]\,5577 and 6300,
 Na\,\textsc{i}\,D and the OH bands beyond 7300\,\AA, where the line flux far
 exceeds the continuum and a small fractional error in the line amplitude is
@@ -1841,7 +1782,7 @@ under-predictions of the sky.
 \centering
 \includegraphics[width=0.75\textwidth]{figures/batch_chi2_panels.pdf}
 \caption{Reduced $\chi^2$ of the predicted science sky on the held-out
-observations, against the photon noise of a single 900\,s fibre
+observations, against the photon noise of a single 900\,s fiber
 (Section~\ref{sec:noise}), with the nebular-line windows excluded. Left:
 full band; right: the blue ($\lambda<6000$\,\AA). Top: distribution of the
 $\chi^2$ of the prediction (colour) and of the decomposition's own fit to
@@ -1851,7 +1792,7 @@ percentile if smaller; the annotation gives the medians, their ratio and the
 number of observations beyond the cut. Bottom: the two values paired for
 each observation; the solid line is equality. A lower $\chi^2$ in the blue
 does not mean a better prediction there: the sky is fainter, so the
-single-fibre noise is a larger fraction of the flux.}
+single-fiber noise is a larger fraction of the flux.}
 \label{fig:chi2-heldout}
 \end{figure*}
 
@@ -1865,10 +1806,10 @@ decomposed minus predicted moonlight, zodiacal light and diffuse continuum
 of the science spectrum. Gray lines are 200 observations spaced evenly
 through the sample; the gray envelope is the RMS over all held-out
 observations at each wavelength, and the red band is the $\pm1\sigma$
-photon noise of a single 900\,s fibre (median over observations). Right:
+photon noise of a single 900\,s fiber (median over observations). Right:
 distribution of the median residual of each observation, with the
 two-tailed 68.3, 95.5 and 99.7\% ranges (solid, dashed, dotted), the median
-(dash-dotted) and the single-fibre noise (red).}
+(dash-dotted) and the single-fiber noise (red).}
 \label{fig:residual-heldout}
 \end{figure*}
 
@@ -1883,7 +1824,7 @@ decomposition of the science spectrum, so the residual contains only the
 transfer error. The black line is the median over observations, and the dark
 and light gray bands are the 68\% and 95\% ranges (the 16th--84th and
 2.3rd--97.7th percentiles). The red band is the $\pm1\sigma$ photon noise of
-a single 900\,s fibre at the median decomposed flux of the regime. The
+a single 900\,s fiber at the median decomposed flux of the regime. The
 dotted line marks zero. Note the different vertical scales.}
 \label{fig:atlas}
 \end{figure*}
@@ -1999,9 +1940,3 @@ difference between the arms is carried by zodiacal light (purple). The
 spikes in the residual are the nebular lines of the science field.}
 \label{fig:pipeline-zodi}
 \end{figure*}
-
-%======================================================================
-\bibliography{sky_subtraction_method}{}
-\bibliographystyle{aasjournalv7}
-
-\end{document}
