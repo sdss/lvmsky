@@ -94,7 +94,10 @@ else:
     # temperature tilt when LINE_SCALING_TILT), and per atomic line family and
     # O2 -- on a LINEAR high-pass of width LINE_SCALING_HIGHPASS_A that removes
     # the science continuum; robust (Huber) with a LINE_SCALING_PRIOR (1 sigma,
-    # fractional) pull toward the prediction.  Scored like the correction above.
+    # fractional) pull toward the prediction.  Na D, K I, [O I] 6300/6364 and
+    # N I keep their predicted brightness, and the red nebular lines are masked
+    # (see the module notes on protecting the science signal).  Scored like
+    # the correction above.
     LINE_SCALING = False
     LINE_SCALING_HIGHPASS_A = 25.0
     LINE_SCALING_PRIOR = 0.1
@@ -556,7 +559,9 @@ else:
             sky_arm_residual_correction as _sky_arm_corr)
         from mlp_predictor.sky_line_scaling import (
             line_templates as _line_templates,
-            sky_line_scaling_correction as _line_scale)
+            sky_line_scaling_correction as _line_scale,
+            NEBULAR_LINES_RED as _NEB_RED, UNMEASURED_VELOCITY_KM_S as _NEB_V)
+        from mlp_predictor.data import science_line_mask_rows as _sci_mask_ls
         from mlp_predictor.noise import load_absolute_sensitivity as _load_sens_rc
         with fits.open(EVAL_INPUT, memmap=True) as _h_rc:
             _nf_rc = {a: np.asarray(_h_rc["META"].data[f"fibers_sky_{a}_used"],
@@ -652,11 +657,15 @@ else:
                 _lc, _li = _line_scale(
                     wave_row, flux_sci_true, _sky_now, _tpl,
                     variance=_arm_var(flux_sci_true, wave_row, None, sens=_sens_rc),
-                    mask=(None if sci_line_mask_sel is None else sci_line_mask_sel[i]),
+                    # The decomposition's science-line mask plus the red nebular
+                    # lines it leaves out, slid by this row's Halpha velocity:
+                    # unmasked, a weak line on an OH line leaks into that band.
+                    mask=_sci_mask_ls(EVAL_INPUT, wave_row, flux_sci_true, flux_near_true,
+                                      extra_lines=_NEB_RED, widen_if_unmeasured_km_s=_NEB_V),
                     highpass_A=LINE_SCALING_HIGHPASS_A, prior_sigma=LINE_SCALING_PRIOR,
                     return_info=True)
                 _o_corr = (_lc if _o_corr is None else _o_corr + _lc).astype(np.float32)
-                _o_line_scales = _li["scales"]
+                _o_line_scales = dict(_li["scales"], accepted=bool(_li["accepted"]))
         # float32 from here on: at 2900 rows the eight per-row stacks
         # are 2.3 GB in float64 and half that in float32, and they feed
         # medians, percentiles and plots -- 7 significant digits is far
@@ -1777,11 +1786,12 @@ else:
                   f"{100 * np.nanmean(_chi2_corr_blue > _chi2_blue):.1f}% blue, "
                   f"{100 * np.nanmean(_chi2_corr_red > _chi2_red):.1f}% red)")
             if LINE_SCALING and any(d is not None for d in sci_line_scale_rows):
-                _names = sorted({k for d in sci_line_scale_rows if d for k in d})
+                _names = sorted({k for d in sci_line_scale_rows if d for k in d} - {"accepted"})
                 _txt = ", ".join(
                     f"{k} {np.nanmedian([d.get(k, np.nan) for d in sci_line_scale_rows if d]):.3f}"
                     for k in _names if not k.endswith("_tilt"))
                 print(f"  [line scaling] median fitted scale per template: {_txt}")
+
         if CHI2_SINGLE_FIBRE and _nfib is not None:
             _fac = float(np.nanmedian(_nfib)) * (2.0 / np.pi)
             print(f"  [chi2] single-fibre sigma; the rows are stacks of a "

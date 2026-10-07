@@ -2319,7 +2319,8 @@ def _science_mask_reference_from_hdul(_h, wave, label):
     return _dp._science_mask_lsf_reference(wave, lsf)
 
 
-def science_line_mask_rows(input_fits_path, wave, flux_sci, flux_sky):
+def science_line_mask_rows(input_fits_path, wave, flux_sci, flux_sky, *,
+                          extra_lines=(), widen_if_unmeasured_km_s=0.0):
     """Per-row science-line mask, True where decompose_parallel zeroed the fit.
 
     ``flux_sci`` / ``flux_sky`` are the rows' science and near-arm spectra (any
@@ -2327,6 +2328,12 @@ def science_line_mask_rows(input_fits_path, wave, flux_sci, flux_sky):
     (n_wave,).  Reproduces `decompose_parallel._science_line_mask_for_row`:
     windows sized from the stack's reference FWHM, centred on the measured
     Halpha velocity, or at rest when the line is not measurable.
+
+    ``extra_lines`` (``(name, air wavelength)`` pairs) adds windows of the same
+    size and velocity for more lines, and ``widen_if_unmeasured_km_s`` widens
+    THOSE windows by that velocity when Halpha gives none.  The decomposition's
+    own mask is unchanged by both; they exist for consumers that need a wider
+    mask, such as `mlp_predictor.sky_line_scaling` (its `NEBULAR_LINES_RED`).
     """
     _dp = _decompose_parallel_module()
     wave = np.asarray(wave, dtype=np.float64)
@@ -2334,12 +2341,17 @@ def science_line_mask_rows(input_fits_path, wave, flux_sci, flux_sky):
     sky = np.atleast_2d(np.asarray(flux_sky, dtype=np.float64))
     ref = science_mask_reference_fwhm(input_fits_path, wave)
     static, _ = _dp.science_line_mask(wave, ref)
+    extra = tuple((str(n), float(l)) for n, l in extra_lines)
     out = np.empty(sci.shape, dtype=bool)
     for i in range(sci.shape[0]):
         v = (_dp.measure_halpha_velocity(wave, sci[i], sky[i])
              if _dp.SCIENCE_LINE_MASK_CENTRE_ON_HALPHA else 0.0)
         out[i] = static if v == 0.0 else _dp.science_line_mask(
             wave, ref, centre_velocity_km_s=v)[0]
+        if extra:
+            out[i] |= _dp.science_line_mask(
+                wave, ref, lines=extra, centre_velocity_km_s=v,
+                velocity_km_s=(float(widen_if_unmeasured_km_s) if v == 0.0 else 0.0))[0]
     return out if np.ndim(flux_sci) > 1 else out[0]
 
 

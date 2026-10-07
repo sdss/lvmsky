@@ -97,3 +97,55 @@ def test_no_templates_means_no_correction():
     assert np.all(corr == 0.0)
     with pytest.raises(ValueError):
         sky_line_scaling_correction(WAVE[:-1], sky, sky, _templates())
+
+
+def test_the_guard_drops_a_correction_that_raises_the_chi2():
+    T = _templates()
+    rng = np.random.default_rng(7)
+    noise = rng.normal(0.0, 0.05, WAVE.size)
+    # The data: OH_a 5% brighter than predicted, no science continuum.
+    sky = 5.0 + T["OH_a"] + T["OH_b"]
+    obs = 5.0 + 1.05 * T["OH_a"] + T["OH_b"] + noise
+    # Templates with a broad pedestal the high-pass cannot see and the data do
+    # not contain: the scale is fitted right on the lines, but applying it to
+    # the pedestal adds a broad error larger than what the lines gain.
+    T_bad = dict(T, OH_a=T["OH_a"] + 200.0)
+    r0 = obs - sky
+    c_off, _ = _fit(obs, sky, T_bad, prior_sigma=1.0, guard=False)
+    assert np.sum((r0 - c_off) ** 2) > np.sum(r0 ** 2)          # it would make things worse
+    c_on, i_on = _fit(obs, sky, T_bad, prior_sigma=1.0, guard=True)
+    assert not i_on["accepted"] and np.all(c_on == 0.0)
+    # The same data with honest templates: the correction helps and is kept.
+    c_ok, i_ok = _fit(obs, sky, T, prior_sigma=1.0, guard=True)
+    assert i_ok["accepted"] and np.sum((r0 - c_ok) ** 2) < np.sum(r0 ** 2)
+
+
+def test_science_safe_defaults():
+    import inspect
+    from mlp_predictor import sky_line_scaling as sls
+    assert set(sls.FIXED_FAMILIES) == {"ATOM_Na", "ATOM_K", "ATOM_Or", "ATOM_N"}
+    assert inspect.signature(sls.line_templates).parameters["exclude"].default == sls.FIXED_FAMILIES
+    p = inspect.signature(sls.sky_line_scaling_correction).parameters
+    assert p["guard"].default is False                 # not safe with science light
+    assert p["science_noise"].default > 0
+
+
+def test_red_nebular_lines_are_masked_and_widened_without_a_velocity():
+    from astropy.io import fits
+    from mlp_predictor.data import science_line_mask_rows
+    from mlp_predictor.sky_line_scaling import NEBULAR_LINES_RED
+    wave = np.arange(3600.0, 9800.0, 0.5)
+    lsf = np.full((1, wave.size), 2.5, dtype=np.float32)
+    stack = fits.HDUList([fits.PrimaryHDU(), fits.ImageHDU(wave, name="WAVE"),
+                          fits.ImageHDU(lsf, name="LSF_SCI"), fits.ImageHDU(lsf, name="LSF_SKY_NEAR"),
+                          fits.ImageHDU(lsf, name="LSF_SKY_FAR")])
+    flat = np.ones_like(wave)                         # no Halpha: no measurable velocity
+    plain = science_line_mask_rows(stack, wave, flat, flat)
+    ext = science_line_mask_rows(stack, wave, flat, flat, extra_lines=NEBULAR_LINES_RED)
+    wide = science_line_mask_rows(stack, wave, flat, flat, extra_lines=NEBULAR_LINES_RED,
+                                  widen_if_unmeasured_km_s=150.0)
+    at = lambda m, lam: bool(m[np.argmin(np.abs(wave - lam))])
+    assert not at(plain, 9068.6) and at(ext, 9068.6)  # [S III] is not in the decomposition's mask
+    assert not at(ext, 9068.6 + 6.0) and at(wide, 9068.6 + 6.0)   # +-150 km/s is +-4.5 A here
+    assert plain.sum() < ext.sum() < wide.sum()
+    assert np.all(ext[plain])                          # the decomposition's windows are kept

@@ -45,26 +45,58 @@ The fit is weighted least squares with two safeguards:
 The correction ``sum_b d_b * T_b`` (unfiltered templates) is ADDED to the
 predicted sky, just like :func:`~mlp_predictor.sky_arm_correction.sky_arm_residual_correction`.
 
-Na D and K I are NOT rescaled by default (``exclude``): stars have the same
-lines in absorption at the same wavelengths, so starlight under the sky line
-biases its scale directly.  With a G-star spectrum injected at 5x the sky
-continuum, rescaling Na D raised the chi2 in the Na D window from 0.16 to 5.3.
-Left at the prediction it stays at 0.26 either way.
+Protecting the science signal
+-----------------------------
+Tested by injecting PHOENIX G2 V, K3 V, K3 III, M2 V and M3 III spectra at
+0.3-10x the sky continuum, and 15 red nebular lines at 0.5x and 3x the sky
+continuum.  Velocities were random within +-150 km/s (stars) and +-300 km/s
+(lines), on 120 uncrowded held-out rows.  Four measures are needed, and all are
+defaults:
+
+* ``FIXED_FAMILIES`` keep their predicted brightness.  Science [O I]
+  6300/6364 coincides with the sky line: rescaled, it lost up to 100% of its
+  flux.  Na D and K I are stellar absorption lines (5x G star: Na D window
+  chi2 0.16 -> 5.3).  N I 5199 sits on stellar Mg b: its scale moved by up to
+  0.5 under a bright star.
+* The callers mask ``NEBULAR_LINES_RED`` as well as the decomposition's
+  science lines, slid by the measured Halpha velocity and widened by
+  ``UNMEASURED_VELOCITY_KM_S`` when there is none.  Unmasked, weak lines on
+  OH lines lost a median of 1-2% and up to 8%.
+* ``science_noise`` adds 10% of the local science continuum to the noise.
+  Stellar lines survive any high-pass, because they are as narrow as the sky
+  lines; this lowers their pull.
+* No chi2 guard (``guard=False``): see its parameter note.
+
+With these, the recovered flux of every nebular line changes by <= 0.6% at
+the median (5th percentile >= -4%) at 0.5x, and by <= 0.3% at 3x.  A star
+changes the correction by 0.14-0.6% of its own flux (RMS in the red).  The OH
+band scales move by <= 0.03 at 1x and <= 0.16 at 10x the sky continuum.
 
 Measured (600 held-out rows of the palacecorr corpus, after the full-band
-sky-arm correction, median single-fibre photon chi2, science lines masked):
+sky-arm correction, median single-fibre photon chi2 on the decomposition's
+science-line mask):
 
-    red >= 6000 A     0.459 -> 0.284      decomposition's own fit 0.725
+    red >= 6000 A     0.460 -> 0.301      decomposition's own fit 0.725
     OH-line pixels    1.187 -> 0.203                              0.614
-    full band         0.364 -> 0.260                              0.931
+    full band         0.364 -> 0.270                              0.931
 
-* The fitted scales match the science decomposition's own band brightness:
-  the median error is 0.1-0.6%, against the 1.5-2.7% the prediction misses.
-* A 5x G star moves the OH bands by <= 1.5%.
+* The fitted OH scales match the science decomposition's own band
+  brightness: the median error is 0.1-0.6%, against the 1.5-2.7% the
+  prediction misses.
 * The result barely depends on the settings: high-pass 10-50 A, prior
-  0.03-0.3 and Huber on/off all agree to 0.003.
-* The tilt helps on OH pixels (0.223 -> 0.203).  A single scale for all OH is
-  clearly worse (0.293).
+  0.03-0.3 and Huber on/off agree to 0.003.  The tilt helps on OH pixels
+  (0.223 -> 0.203); a single scale for all OH is clearly worse (0.293).
+* The science protections cost red 0.284 -> 0.301, mostly because sky
+  [O I] 6300/6364 is no longer rescaled.  They leave OH pixels unchanged.
+* On 8.0% of rows the raw red chi2 rises, by at most 7.6%.  This is NOT line
+  damage.  Those rows already carry a broad positive offset between the lines
+  (+2.1% of the sky continuum: continuum light, mostly on crowded fields).
+  It meets the small broad part of the correction (line wings, blends), whose
+  sign is opposite.  With broad offsets removed (100 A high-pass), the same
+  48 rows improve from 0.275 to 0.143, and only 1.5% of all rows get worse.
+  Confining the correction to the line regions lowers the raw count but
+  throws away real line correction: line-scale chi2 0.147 -> 0.197 at
+  lines > 1x continuum.
 """
 from __future__ import annotations
 
@@ -73,7 +105,31 @@ from typing import Mapping, Optional, Sequence
 import numpy as np
 from scipy.ndimage import uniform_filter1d
 
-__all__ = ["oh_group_labels", "line_templates", "sky_line_scaling_correction"]
+__all__ = ["oh_group_labels", "line_templates", "sky_line_scaling_correction",
+           "NEBULAR_LINES_RED", "UNMEASURED_VELOCITY_KM_S", "FIXED_FAMILIES"]
+
+# Nebular lines that fall among the sky lines and are NOT in the decomposition's
+# science-line mask.  Unmasked, a weak one sitting on an OH line is partly
+# absorbed into that band's scale.  Callers mask them, slid by the measured
+# Halpha velocity: `data.science_line_mask_rows(..., extra_lines=NEBULAR_LINES_RED,
+# widen_if_unmeasured_km_s=UNMEASURED_VELOCITY_KM_S)`.
+NEBULAR_LINES_RED = (
+    ("HeI5876", 5875.62), ("[OI]6300", 6300.30), ("[OI]6364", 6363.78),
+    ("HeI6678", 6678.15), ("HeI7065", 7065.19), ("[ArIII]7136", 7135.79),
+    ("[FeII]7155", 7155.16), ("HeI7281", 7281.35), ("[OII]7320", 7319.99),
+    ("[OII]7330", 7330.20), ("[NiII]7378", 7377.83), ("[ArIII]7751", 7751.06),
+    ("P16", 8502.48), ("P15", 8545.38), ("P14", 8598.39), ("[FeII]8617", 8616.95),
+    ("P13", 8665.02), ("P12", 8750.47), ("P11", 8862.78), ("P10", 9014.91),
+    ("[SIII]9069", 9068.60), ("P9", 9229.01), ("[SIII]9531", 9530.60),
+    ("P8", 9545.97),
+)
+# Widening of those windows when Halpha is too weak for a velocity.
+UNMEASURED_VELOCITY_KM_S = 150.0
+# Families that keep their predicted brightness: each coincides with a science
+# feature that the fit cannot tell apart from the sky line.  Na D and K I are
+# stellar absorption lines, [O I] 6300/6364 is nebular emission at the sky
+# wavelength, and N I 5199 (0.1% of the line flux) sits on stellar Mg b / MgH.
+FIXED_FAMILIES = ("ATOM_Na", "ATOM_K", "ATOM_Or", "ATOM_N")
 
 _E_SCALE = 1000.0          # cm^-1: the tilt regressor's unit of upper-level energy
 
@@ -105,7 +161,7 @@ def oh_group_labels(model):
 
 
 def line_templates(model, mats, coef, *, tilt=True, min_band_fraction=0.01,
-                   atoms=True, o2=True, exclude=("ATOM_Na", "ATOM_K")):
+                   atoms=True, o2=True, exclude=FIXED_FAMILIES):
     """Per-family sky-line templates from ONE row's predicted coefficients.
 
     ``model`` is the row's decomposer and ``mats`` its assembled matrices (as
@@ -171,9 +227,14 @@ def sky_line_scaling_correction(
     mask=None,
     highpass_A: float = 25.0,
     prior_sigma: float = 0.1,
+    science_noise: float = 0.1,
+    science_noise_width_A: float = 100.0,
     huber_k: float = 2.0,
+    robust: str = "huber",
+    tukey_c: float = 4.685,
     n_iter: int = 8,
     line_fraction: float = 0.02,
+    guard: bool = False,
     return_info: bool = False,
 ):
     """Correction to ADD to the predicted sky, from rescaling its sky lines.
@@ -195,9 +256,28 @@ def sky_line_scaling_correction(
         science continuum under the lines is gone.
     prior_sigma : 1-sigma prior on each fractional brightness change.  The tilt
         terms use the same width per 1000 cm^-1 of upper-level energy.
+    science_noise : treat this fraction of the local science continuum as
+        extra noise, added in quadrature to ``variance``.  The narrow
+        structure of a science continuum (stellar absorption lines, band heads)
+        survives any high-pass, because it is as narrow as the sky lines; its
+        amplitude scales with the continuum, so a bright star lowers the
+        weight of the data against the prior instead of leaking into the
+        scales.  The continuum is the running median of ``sci_observed -
+        sky_model`` over ``science_noise_width_A``, floored at zero.  It needs
+        an ABSOLUTE ``variance`` and is skipped without one.
     huber_k : Huber threshold, in robust standard deviations.
+    robust : ``'huber'`` (down-weights large residuals) or ``'tukey'`` (biweight
+        with threshold ``tukey_c``: rejects them entirely).
     line_fraction : pixels where the high-passed templates reach this fraction
         of their row's 99th percentile define the robust noise scale.
+    guard : return no correction when it raises the variance-weighted chi2 of
+        ``sci_observed - sky_model`` over the good pixels.  OFF by default
+        because it is NOT safe with science light: that chi2 includes the
+        science continuum, which couples to the broad part of the correction,
+        so a star of 0.3-10x the sky continuum flipped its decision on 40-75%
+        of rows.  Use it only on spectra known to be sky-dominated.  The raw
+        chi2 rises it was added for are broad-offset effects, not line
+        damage (see the module notes).
     return_info : also return ``{name: scale}``, its 1-sigma, and fit stats.
     """
     wave = np.asarray(wave, dtype=np.float64)
@@ -206,7 +286,7 @@ def sky_line_scaling_correction(
     names = [k for k, t in templates.items() if np.any(np.asarray(t) != 0)]
     if not names:
         zero = np.zeros_like(sky)
-        return (zero, dict(scales={}, sigma={}, n_pix=0)) if return_info else zero
+        return (zero, dict(scales={}, sigma={}, n_pix=0, accepted=False)) if return_info else zero
     T = np.vstack([np.asarray(templates[k], dtype=np.float64) for k in names])
     if T.shape[1] != wave.size or y_obs.shape != wave.shape or sky.shape != wave.shape:
         raise ValueError("wave, sci_observed, sky_model and templates must share one grid")
@@ -216,6 +296,12 @@ def sky_line_scaling_correction(
     w0 = np.ones_like(wave)
     if variance is not None:
         var = np.asarray(variance, dtype=np.float64)
+        if science_noise:
+            from scipy.ndimage import median_filter
+            _r = np.where(np.isfinite(y_obs - sky), y_obs - sky, 0.0)
+            _px = max(3, int(round(science_noise_width_A / float(np.median(np.diff(wave))))) | 1)
+            cont_sci = np.clip(median_filter(_r, size=_px, mode="nearest"), 0.0, None)
+            var = var + (float(science_noise) * cont_sci) ** 2
         good &= np.isfinite(var) & (var > 0)
         w0 = np.where(good, 1.0 / np.where(good, var, 1.0), 0.0)
         w0 /= np.median(w0[good]) if good.any() else 1.0
@@ -228,7 +314,7 @@ def sky_line_scaling_correction(
     if n_line < 3 * len(names):
         zero = np.zeros_like(sky)
         return (zero, dict(scales={k: 1.0 for k in names}, sigma={k: np.inf for k in names},
-                           n_pix=n_line)) if return_info else zero
+                           n_pix=n_line, accepted=False)) if return_info else zero
 
     # Prior precision in data units: the residual's robust scale sets the noise
     # unit, so the prior's pull is the same whatever the flux units.
@@ -239,7 +325,10 @@ def sky_line_scaling_correction(
         z = np.sqrt(w0) * e
         s = 1.4826 * np.median(np.abs(z[line_pix])) or 1.0
         u = np.abs(z) / s
-        hub = huber_k / np.maximum(u, huber_k)          # 1 inside the threshold
+        if robust == "tukey":
+            hub = np.where(u < tukey_c, (1.0 - (u / tukey_c) ** 2) ** 2, 0.0)
+        else:
+            hub = huber_k / np.maximum(u, huber_k)      # 1 inside the threshold
         w = np.where(good, w0 * hub, 0.0) / s ** 2
         A = (X * w) @ X.T + np.eye(len(names)) / prior_sigma ** 2
         b = (X * w) @ y
@@ -249,11 +338,20 @@ def sky_line_scaling_correction(
             break
         d = d_new
     corr = d @ T
+    accepted = True
+    if guard:
+        r0 = np.where(good, y_obs - sky, 0.0)
+        c2_before = float(np.sum(w0 * r0 ** 2))
+        c2_after = float(np.sum(w0 * np.where(good, r0 - corr, 0.0) ** 2))
+        accepted = c2_after <= c2_before
+        if not accepted:
+            corr = np.zeros_like(corr)
     if not return_info:
         return corr
     cov = np.linalg.inv(A)
     info = dict(scales={k: 1.0 + float(v) for k, v in zip(names, d)},
                 sigma={k: float(np.sqrt(cov[i, i])) for i, k in enumerate(names)},
                 n_pix=n_line, noise_scale=float(s),
-                downweighted=float(np.mean(hub[line_pix] < 1.0)))
+                downweighted=float(np.mean(hub[line_pix] < 1.0)),
+                accepted=accepted)
     return corr, info

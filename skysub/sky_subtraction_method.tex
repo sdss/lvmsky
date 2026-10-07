@@ -2098,30 +2098,45 @@ running mean over 25\,\AA. The high-pass is linear and is applied
 identically to the data and the templates. The science continuum is broad
 and disappears. What the running mean takes from the lines it takes equally
 from the templates, so Equation~(\ref{eq:linescale}) remains exact. The
-fractional brightness changes $d_b$ are fitted by weighted least squares,
-with the photon variance as weights, the nebular-line windows masked, and a
-Gaussian prior $d_b\sim\mathcal N(0, 0.1^2)$ that keeps a template with
-little signal at the prediction. The fit iterates Huber weights on the
+fractional brightness changes $d_b$ are fitted by weighted least squares
+with three ingredients. The variance is the photon variance plus a science
+term (Section~\ref{sec:sciencesafe}). The nebular-line windows are masked. A
+Gaussian prior $d_b\sim\mathcal N(0, 0.1^2)$ keeps a template with little
+signal at the prediction. The fit iterates Huber weights on the
 standardised residuals (threshold 2), so narrow science features, stellar
 absorption lines and unmasked emission lines are down-weighted instead of
 pulling the scales. The correction is
 $\delta_{\rm line}=\sum_b d_b\,T_b$, with the unfiltered templates.
 
-Na\,\textsc{i}\,D and K\,\textsc{i} keep their predicted brightness. Stars
-have the same lines in absorption at nearly the same wavelengths, so
-starlight under a sky line biases its scale directly. With a solar spectrum
-injected at five times the sky continuum, rescaling Na\,D raised the
-$\chi^2$ in its window from 0.16 to 5.3. Left at the prediction it stays at
-0.26, with or without the injection. The OH bands moved by at most 1.5\%
-under the same injection.
+Four families keep their predicted brightness: Na\,\textsc{i}\,D,
+K\,\textsc{i}, [O\,\textsc{i}]\,6300/6364 and N\,\textsc{i}\,5199. Each
+coincides with a science feature that the fit cannot tell apart from the sky
+line (Section~\ref{sec:sciencesafe}).
 
 In production the fit is made on each fiber, so that it also absorbs
 variations of the sky lines across the IFU and differences in fiber
 throughput. It was evaluated on the median science spectra of 600 held-out
 observations, after a full-band sky-arm correction (Table~\ref{tab:linescale}).
-In the red the median $\chi^2$ falls from 0.46 to 0.28, and on the OH-line
-pixels from 1.19 to 0.20, against 0.61 for the decomposition's own fit. No
-observation is worse by more than 6\%. The fitted scales can be checked
+In the red the median $\chi^2$ falls from 0.46 to 0.30, and on the OH-line
+pixels from 1.19 to 0.20, against 0.61 for the decomposition's own fit.
+The scales are fitted on the high-passed lines, but the correction also
+carries the broad part of the templates, the line wings and blends. That part
+is needed on average: without it the median $\chi^2$ in the red is 0.70.
+On 8\% of the observations the $\chi^2$ in the red nevertheless rises, by at
+most 7.6\%. This is not damage to the lines. These observations carry, before
+the correction, a broad positive offset between the lines of 2.1\% of the sky
+continuum. That is continuum light, mostly in crowded fields. It meets the
+broad part of the correction, which is small and of opposite sign. Once broad
+offsets are removed from the residual by a 100\,\AA{} high-pass, the
+correction improves the same observations, with the median $\chi^2$ falling
+from 0.28 to 0.14. Only 1.5\% of all observations are then worse. Confining
+the correction to the line regions would lower the raw count, but only by
+discarding real line correction: the high-passed $\chi^2$ rises from 0.15 to
+0.20 when the correction is kept only where the lines exceed the continuum.
+Dropping the correction whenever it raises the $\chi^2$ of the spectrum is
+not an option either. That $\chi^2$ includes the science continuum, and a
+star of 0.3--10 times the sky continuum reversed such a decision on 40--75\%
+of the observations. The fitted scales can be checked
 against the decomposition of the same science spectrum, whose band
 brightness relative to the prediction is the true scale. The median error
 of the fit is 0.1--0.6\% per band, where the prediction alone misses by
@@ -2138,14 +2153,86 @@ observations.\label{tab:linescale}}
 \colhead{full}}
 \startdata
 sky-arm correction & 0.46 & 1.19 & 0.36 \\
-\quad + line scaling & 0.28 & 0.20 & 0.26 \\
-\quad + one OH scale & 0.30 & 0.29 & 0.27 \\
+\quad + line scaling & 0.30 & 0.20 & 0.27 \\
+\quad\quad without science protection & 0.28 & 0.20 & 0.26 \\
+\quad\quad with one OH scale & 0.30 & 0.29 & 0.27 \\
 decomposition's own fit & 0.73 & 0.61 & 0.93 \\
 \enddata
 \tablecomments{Red: $\lambda\ge6000$\,\AA. OH lines: pixels where the
 predicted OH emission exceeds three times the median of the rest of the
 predicted sky. The sky-arm
 correction is applied over the full band.}
+\end{deluxetable}
+
+\subsubsection{Protecting the science signal}
+\label{sec:sciencesafe}
+
+The line scaling is fitted on the spectrum it corrects, so any science
+signal that projects onto the sky-line templates leaks into the sky model and
+is subtracted from the science. This was tested by injection into 120
+uncrowded held-out observations. The stars were PHOENIX spectra
+\citep{Husser2013} of a G2 dwarf, K3 dwarf and giant, and M2 dwarf and M3
+giant, at 0.3 to 10 times the sky continuum and radial velocities within
+$\pm150$\,km\,s$^{-1}$. The lines were 15 red nebular lines at 0.5 and 3
+times the sky continuum, with H$\alpha$, [N\,\textsc{ii}] and
+[S\,\textsc{ii}] at a common velocity within $\pm300$\,km\,s$^{-1}$: He\,\textsc{i},
+[O\,\textsc{i}], [Ar\,\textsc{iii}], [O\,\textsc{ii}]\,7320/7330,
+[S\,\textsc{iii}]\,9069/9531 and the Paschen series. The leak is the change
+of the correction caused by the injected signal. Four measures turned out
+to be necessary.
+
+First, families that coincide with a science feature keep their predicted
+brightness. Science [O\,\textsc{i}]\,6300/6364 falls on the sky line; when
+rescaled, it lost up to all of its flux. Na\,\textsc{i}\,D and K\,\textsc{i}
+are strong stellar absorption lines: with a solar spectrum at five times the
+sky continuum, rescaling Na\,D raised the $\chi^2$ in its window from 0.16 to
+5.3. N\,\textsc{i}\,5199, 0.1\% of the line flux, sits on the stellar Mg\,b
+lines, and its scale moved by up to 0.5 under a bright star.
+
+Second, the mask of the decomposition (Section~\ref{sec:noise}) covers only
+the blue lines, H$\alpha$, [N\,\textsc{ii}] and [S\,\textsc{ii}]. For the
+line scaling the red nebular lines are masked as well, slid by the measured
+H$\alpha$ velocity, with the windows widened by $\pm150$\,km\,s$^{-1}$ when
+H$\alpha$ is too faint to give one. Without the extension, faint lines that
+fall on OH lines lost 1--2\% of their flux at the median and up to 8\%.
+
+Third, a star's absorption lines and band heads are as narrow as the sky
+lines, so they survive any high-pass. They are therefore treated as noise:
+10\% of the local science continuum, the running median of the residual
+over 100\,\AA, is added in quadrature to the photon noise. This lowers the
+stellar leak by about 40\% at ten times the sky continuum.
+
+Fourth, no $\chi^2$ guard is applied, for the reason given above.
+
+Table~\ref{tab:sciencesafe} gives the result. A faint nebular line loses at
+most 0.6\% of its flux at the median, and at most 4\% at the 5th percentile.
+Most of that comes from lines whose H$\alpha$ velocity could not be measured
+and which lie beyond the widened windows. A strong line loses at most
+0.2\%. A star alters the correction by 0.14--0.6\% of its own flux in the
+red, and the OH scales by at most 0.03 at the sky continuum level and 0.16
+at ten times it. These protections cost 0.02 in the median $\chi^2$ in the
+red (Table~\ref{tab:linescale}), mostly because the sky
+[O\,\textsc{i}] lines are no longer rescaled.
+
+\begin{deluxetable}{lcc}
+\tablecaption{Leak of injected science signal into the sky-line
+scaling.\label{tab:sciencesafe}}
+\tablehead{\colhead{Injected signal} & \colhead{median} & \colhead{p95}}
+\startdata
+\multicolumn{3}{l}{star at $1\times$ / $10\times$ the sky continuum:} \\
+\quad G2\,V & 0.23 / 0.14 & 0.41 / 0.25 \\
+\quad K3\,V & 0.34 / 0.18 & 0.49 / 0.32 \\
+\quad K3\,III & 0.41 / 0.25 & 0.58 / 0.36 \\
+\quad M2\,V & 0.39 / 0.21 & 0.73 / 0.38 \\
+\quad M3\,III & 0.52 / 0.30 & 0.90 / 0.53 \\
+\multicolumn{3}{l}{nebular lines, worst line:} \\
+\quad peak $0.5\times$ & $-0.6$ & $-4.0$ \\
+\quad peak $3\times$ & $-0.2$ & $-1.4$ \\
+\enddata
+\tablecomments{Stars: RMS change of the correction in the red, in percent of
+the star's flux. Lines: change of the recovered line flux in percent, for the
+line with the largest loss; the second column is then the 5th percentile.
+120 uncrowded held-out observations.}
 \end{deluxetable}
 
 A brightness scale cannot repair a wrong line shape, so the correction

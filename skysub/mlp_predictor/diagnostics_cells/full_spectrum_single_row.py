@@ -367,7 +367,8 @@ if LINE_SCALING:
             science_line_mask_rows as _sci_mask_rows_ls
         from mlp_predictor.sky_arm_correction import arm_photon_variance as _arm_var_ls
         from mlp_predictor.sky_line_scaling import (
-            line_templates as _line_templates, sky_line_scaling_correction as _line_scale)
+            line_templates as _line_templates, sky_line_scaling_correction as _line_scale,
+            NEBULAR_LINES_RED as _NEB_RED, UNMEASURED_VELOCITY_KM_S as _NEB_V)
         _mdl_ls, _mats_ls = _recon_basis(
             wave_row, _lsf_state_sci, n_spline_knots=N_MOON_KNOTS,
             n_zodi_spline_knots=N_ZODI_KNOTS, base_dir=base_dir_guess,
@@ -377,7 +378,8 @@ if LINE_SCALING:
         line_corr_row, _ls_info = _line_scale(
             wave_row, flux_sci_true_row, flux_sci_pred_row + sky_arm_corr_row, _tpl_ls,
             variance=_arm_var_ls(flux_sci_true_row, wave_row, None),
-            mask=_sci_mask_rows_ls(EVERY10_INPUT, wave_row, flux_sci_true_row, flux_near_row),
+            mask=_sci_mask_rows_ls(EVERY10_INPUT, wave_row, flux_sci_true_row, flux_near_row,
+                                   extra_lines=_NEB_RED, widen_if_unmeasured_km_s=_NEB_V),
             highpass_A=LINE_SCALING_HIGHPASS_A, prior_sigma=LINE_SCALING_PRIOR,
             return_info=True)
         line_scales_row = _ls_info["scales"]
@@ -385,7 +387,9 @@ if LINE_SCALING:
               + ", ".join(f"{k} {v:.3f}+-{_ls_info['sigma'][k]:.3f}"
                           for k, v in line_scales_row.items() if not k.endswith("_tilt"))
               + f"; {_ls_info['n_pix']} line pixels, "
-              f"{100 * _ls_info['downweighted']:.0f}% down-weighted")
+              f"{100 * _ls_info['downweighted']:.0f}% down-weighted"
+              + ("" if _ls_info["accepted"] else
+                 "; NOT APPLIED: the guard dropped it because it raised the chi2"))
 obs_minus_pred_uncorr_row = -resid_row
 obs_minus_pred_row = obs_minus_pred_uncorr_row - sky_arm_corr_row - line_corr_row
 
