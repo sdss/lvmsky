@@ -17,11 +17,22 @@ SHOW_MOON_ZODI_MODEL = True
 # Correct panel 4 (observed - predicted) by the sky arms' own decomposition
 # residual (mlp_predictor.sky_arm_correction): near and far, inverse-variance
 # weighted, scaled per pixel by predicted-science-model / arm-model, applied in
-# full up to RESIDUAL_CORRECTION_MAX_A and tapered to zero over the next 100 A.  RESIDUAL_SMOOTHING_A is 'auto' (3-pixel median on
-# faint rows only, the measured optimum), a running-median width in A, or 0.
+# full up to RESIDUAL_CORRECTION_MAX_A and tapered to zero over the next 100 A.
+# RESIDUAL_SMOOTHING_A is 'auto' (3-pixel median on faint rows only, the
+# measured optimum), a running-median width in A, or 0.
 RESIDUAL_CORRECTION = False
 RESIDUAL_CORRECTION_MAX_A = 5000.0
 RESIDUAL_SMOOTHING_A = 'auto'
+# Then rescale the predicted sky lines on this science spectrum
+# (mlp_predictor.sky_line_scaling): one scale per OH vibrational band (+ a
+# rotational-temperature tilt when LINE_SCALING_TILT), atomic line family and
+# O2, fitted on a LINEAR high-pass of width LINE_SCALING_HIGHPASS_A that
+# removes the science continuum, with a LINE_SCALING_PRIOR pull toward 1.
+LINE_SCALING = False
+LINE_SCALING_HIGHPASS_A = 25.0
+LINE_SCALING_PRIOR = 0.1
+LINE_SCALING_TILT = True
+_ANY_CORR = RESIDUAL_CORRECTION or LINE_SCALING
 
 required = [
     "mlp_artifacts",
@@ -342,8 +353,41 @@ if RESIDUAL_CORRECTION:
           f"(blue frac-resid rms {_rc_info['arm_frac_rms'][0]:.3f}/{_rc_info['arm_frac_rms'][1]:.3f}), "
           f"S/N {_rc_info['snr']:.0f}, smoothed={bool(_rc_info['smoothed'])}, "
           f"rms {np.sqrt(np.mean(sky_arm_corr_row[_band_rc] ** 2)) * FACTOR:.4g} (display units)")
+# 5a') Optional rescaling of the predicted sky lines, fitted on THIS science
+#      spectrum after the sky-arm correction above.  Templates come from the
+#      predicted coefficients on the reconstruction's own basis, so they sum to
+#      exactly its line components.
+line_corr_row = np.zeros_like(flux_sci_pred_row)
+line_scales_row = None
+if LINE_SCALING:
+    if _lsf_state_sci is None:
+        print("  line_scaling: skipped (no fitted LSF surface for the sci arm)")
+    else:
+        from mlp_predictor.data import reconstruction_basis as _recon_basis, \
+            science_line_mask_rows as _sci_mask_rows_ls
+        from mlp_predictor.sky_arm_correction import arm_photon_variance as _arm_var_ls
+        from mlp_predictor.sky_line_scaling import (
+            line_templates as _line_templates, sky_line_scaling_correction as _line_scale)
+        _mdl_ls, _mats_ls = _recon_basis(
+            wave_row, _lsf_state_sci, n_spline_knots=N_MOON_KNOTS,
+            n_zodi_spline_knots=N_ZODI_KNOTS, base_dir=base_dir_guess,
+            o2_vector=_o2_vec_sci, telluric=_tel_sci)
+        _tpl_ls = {k: v / FACTOR for k, v in _line_templates(
+            _mdl_ls, _mats_ls, coef_pred_row, tilt=LINE_SCALING_TILT).items()}
+        line_corr_row, _ls_info = _line_scale(
+            wave_row, flux_sci_true_row, flux_sci_pred_row + sky_arm_corr_row, _tpl_ls,
+            variance=_arm_var_ls(flux_sci_true_row, wave_row, None),
+            mask=_sci_mask_rows_ls(EVERY10_INPUT, wave_row, flux_sci_true_row, flux_near_row),
+            highpass_A=LINE_SCALING_HIGHPASS_A, prior_sigma=LINE_SCALING_PRIOR,
+            return_info=True)
+        line_scales_row = _ls_info["scales"]
+        print("  line_scaling: fitted scale per template (+- 1 sigma): "
+              + ", ".join(f"{k} {v:.3f}+-{_ls_info['sigma'][k]:.3f}"
+                          for k, v in line_scales_row.items() if not k.endswith("_tilt"))
+              + f"; {_ls_info['n_pix']} line pixels, "
+              f"{100 * _ls_info['downweighted']:.0f}% down-weighted")
 obs_minus_pred_uncorr_row = -resid_row
-obs_minus_pred_row = obs_minus_pred_uncorr_row - sky_arm_corr_row
+obs_minus_pred_row = obs_minus_pred_uncorr_row - sky_arm_corr_row - line_corr_row
 
 # 5c) Absolute photon chi2 for this row, per pixel.
 #
@@ -427,8 +471,8 @@ else:
     if _blue_c2.any():
         chi2_blue_pred = float(np.nanmean(chi2_pix_pred[_blue_c2]))
         chi2_blue_self = float(np.nanmean(chi2_pix_self[_blue_c2]))
-    if RESIDUAL_CORRECTION:
-        # Same pixels and noise, with the sky-arm correction applied (5a).
+    if _ANY_CORR:
+        # Same pixels and noise, with the correction(s) applied (5a, 5a').
         _chi2_pix_corr = np.where(_good_c2, obs_minus_pred_row ** 2 / _var_c2, np.nan)
         chi2_row_corr = float(np.nanmean(_chi2_pix_corr))
         if _blue_c2.any():
@@ -458,8 +502,11 @@ if chi2_pix_pred is not None:
     _c2_scale = "single fibre" if CHI2_SINGLE_FIBRE else "median stack of this row's fibres"
     print(f"  photon chi2/pix ({_c2_scale})")
     print(f"    recon(pred) full / blue = {chi2_row_pred:.4g} / {chi2_blue_pred:.4g}")
-    if RESIDUAL_CORRECTION:
-        print(f"    recon(pred) + sky-arm correction full / blue = "
+    if _ANY_CORR:
+        print(f"    recon(pred) + " + " + ".join(
+                  n for n, on in (("sky-arm correction", RESIDUAL_CORRECTION),
+                                  ("line scaling", LINE_SCALING)) if on)
+              + " full / blue = "
               f"{chi2_row_corr:.4g} / {chi2_blue_corr:.4g}")
     print(f"    recon(sci)  full / blue = {chi2_row_self:.4g} / {chi2_blue_self:.4g}"
           f"   <- the decomposition's own floor")
@@ -832,7 +879,10 @@ _panel_titles = [
     "Far: observed vs reconstructed from far coefficients",
     "Science: observed / recon(sci coef) / recon(pred)",
     "Science sky-subtracted: observed - pred"
-    + (" - sky-arm residual" if RESIDUAL_CORRECTION else ""),
+    + (" - corrections (" + " + ".join(
+        n for n, on in (("sky-arm residual", RESIDUAL_CORRECTION),
+                        ("line scaling", LINE_SCALING)) if on) + ")"
+       if _ANY_CORR else ""),
 ]
 _panel_heights = [0.22, 0.22, 0.30, 0.13]
 if _SHOW_CHI2_PANEL:
@@ -966,7 +1016,7 @@ fig.add_trace(
     col=1,
 )
 
-if RESIDUAL_CORRECTION:
+if _ANY_CORR:
     fig.add_trace(
         go.Scattergl(
             x=wave_row,
@@ -984,7 +1034,7 @@ fig.add_trace(
         y=obs_minus_pred_row * FACTOR,
         mode="lines",
         name=("science sky-subtracted (obs - pred), corrected"
-              if RESIDUAL_CORRECTION else "science sky-subtracted (obs - pred)"),
+              if _ANY_CORR else "science sky-subtracted (obs - pred)"),
         line=dict(color="#d62728", width=1.0),
     ),
     row=4,
@@ -1024,7 +1074,7 @@ if _SHOW_CHI2_PANEL:
 fig.update_yaxes(type="log", title_text="Near flux", row=1, col=1)
 fig.update_yaxes(type="log", title_text="Far flux", row=2, col=1)
 fig.update_yaxes(type="log", title_text="Science flux", row=3, col=1)
-fig.update_yaxes(type="linear", title_text=("obs - pred (corrected)" if RESIDUAL_CORRECTION else "obs - pred"), row=4, col=1)
+fig.update_yaxes(type="linear", title_text=("obs - pred (corrected)" if _ANY_CORR else "obs - pred"), row=4, col=1)
 if _SHOW_CHI2_PANEL:
     # Linear (2026-09-25): with the science lines masked the per-pixel chi2 no
     # longer spans the several decades that motivated a log axis.
@@ -1049,7 +1099,7 @@ if _SHOW_CHI2_PANEL:
         f"decomposition floor {chi2_row_self:.3g} ({chi2_blue_self:.3g})  ·  "
         f"pred/floor = {_ratio_txt}"
         + (f"  ·  corrected {chi2_row_corr:.3g} ({chi2_blue_corr:.3g})"
-           if RESIDUAL_CORRECTION else "")
+           if _ANY_CORR else "")
         + "<br>")
 else:
     _chi2_subline = ""

@@ -79,14 +79,26 @@ else:
     # Sky-arm residual correction (mlp_predictor.sky_arm_correction): each
     # row's near and far decomposition residual, inverse-variance weighted,
     # scaled per pixel by predicted-science-model / arm-model, applied in full
-    # up to RESIDUAL_CORRECTION_MAX_A and tapered to zero over the next 100 A.  Applied to panel 1 (obs - pred) and scored as
-    # a second chi2 next to the uncorrected one; sci_residuals and every other
+    # up to RESIDUAL_CORRECTION_MAX_A and tapered to zero over the next 100 A.
+    # Applied to panel 1 (obs - pred) and scored as a second chi2 next to the
+    # uncorrected one; sci_residuals and every other
     # statistic stay uncorrected.  RESIDUAL_SMOOTHING_A is 'auto' (3-pixel
     # median on faint rows only, the measured optimum), a running-median
     # width in A, or 0.
     RESIDUAL_CORRECTION = False
     RESIDUAL_CORRECTION_MAX_A = 5000.0
     RESIDUAL_SMOOTHING_A = 'auto'
+    # Sky-line scaling (mlp_predictor.sky_line_scaling): after the correction
+    # above, refit the brightness of the predicted sky lines on the science
+    # spectrum itself -- one scale per OH vibrational band (+ a rotational-
+    # temperature tilt when LINE_SCALING_TILT), and per atomic line family and
+    # O2 -- on a LINEAR high-pass of width LINE_SCALING_HIGHPASS_A that removes
+    # the science continuum; robust (Huber) with a LINE_SCALING_PRIOR (1 sigma,
+    # fractional) pull toward the prediction.  Scored like the correction above.
+    LINE_SCALING = False
+    LINE_SCALING_HIGHPASS_A = 25.0
+    LINE_SCALING_PRIOR = 0.1
+    LINE_SCALING_TILT = True
 
     # Rows whose PER-COMPONENT reconstruction is kept for wavelength_residual_
     # atlas to reuse.  None (the default since 2026-09-29) hands over EVERY row
@@ -324,7 +336,9 @@ else:
     _cerr_sci_sel  = (np.asarray(coef_err_sci_all, dtype=np.float64)[sel_ft]
                       if _pix_sigma_sci_all is None else None)
     sci_resid_rows = []
-    sci_corr_rows = []         # per-row near-continuum correction (or None)
+    sci_corr_rows = []         # per-row sky correction(s) to add to the prediction (or None)
+    sci_line_scale_rows = []   # per-row {template: scale} from LINE_SCALING (or None)
+    sci_corr_arm_rows = []     # per-row sky-arm part of the correction alone (or None)
     sci_wave_rows = []
     sci_obs_rows = []          # observed sci flux, for the photon chi2 below
     # DECOMPOSITION SELF-FIT residual: recon(coef_sci_TRUE) - observed sci.
@@ -513,16 +527,36 @@ else:
             split_zodi=SPLIT_ZODI, n_zodi_spline_knots=N_ZODI_KNOTS,
             coef_err=coef_err, telluric=telluric)
 
+    def _row_line_templates(coef, lsf_state, o2_vec, telluric):
+        """Sky-line templates (physical units) on the row's own basis, or None.
+
+        Same model, LSF state and O2 vector as `_fast_reconstruct`, so the
+        templates sum to exactly the reconstruction's line components.
+        """
+        if not isinstance(lsf_state, LSFSurfaceState):
+            return None
+        _mdl = _model_for(telluric)
+        _mdl._set_lsf_state(lsf_state)
+        _mats = _mdl._assemble_refined_matrices()
+        if o2_vec is not None:
+            _mats["o2"] = np.asarray(o2_vec, float).ravel()[None, :]
+        _t = _line_templates(_mdl, _mats, np.asarray(coef, float).ravel(),
+                             tilt=LINE_SCALING_TILT)
+        return {k: v / FACTOR for k, v in _t.items()}
+
     print(f"  recon setup: {_time.perf_counter() - _t_recon0:.2f} s "
           f"(one-time basis build + FITS precache)")
 
     # Sky-arm residual correction inputs, built once and inherited by the
     # forked workers: the arms' fibre counts (their stack noise) and the
     # absolute sensitivity on the shared grid.
-    if RESIDUAL_CORRECTION:
+    if RESIDUAL_CORRECTION or LINE_SCALING:
         from mlp_predictor.sky_arm_correction import (
             SkyArm as _SkyArm, arm_photon_variance as _arm_var,
             sky_arm_residual_correction as _sky_arm_corr)
+        from mlp_predictor.sky_line_scaling import (
+            line_templates as _line_templates,
+            sky_line_scaling_correction as _line_scale)
         from mlp_predictor.noise import load_absolute_sensitivity as _load_sens_rc
         with fits.open(EVAL_INPUT, memmap=True) as _h_rc:
             _nf_rc = {a: np.asarray(_h_rc["META"].data[f"fibers_sky_{a}_used"],
@@ -609,6 +643,20 @@ else:
                 wave_row, flux_sci_pred, _solar(comps_sci), _arms_rc,
                 max_wavelength=RESIDUAL_CORRECTION_MAX_A,
                 smoothing=RESIDUAL_SMOOTHING_A).astype(np.float32)
+        _o_line_scales = None
+        _o_corr_arm = _o_corr          # sky-arm part only, before any line scaling
+        if LINE_SCALING:
+            _tpl = _row_line_templates(coef_sci_pred[i], _lsf_state_sci, _o2_vec_sci, _tel_sci)
+            if _tpl is not None:
+                _sky_now = flux_sci_pred + (0.0 if _o_corr is None else _o_corr.astype(np.float64))
+                _lc, _li = _line_scale(
+                    wave_row, flux_sci_true, _sky_now, _tpl,
+                    variance=_arm_var(flux_sci_true, wave_row, None, sens=_sens_rc),
+                    mask=(None if sci_line_mask_sel is None else sci_line_mask_sel[i]),
+                    highpass_A=LINE_SCALING_HIGHPASS_A, prior_sigma=LINE_SCALING_PRIOR,
+                    return_info=True)
+                _o_corr = (_lc if _o_corr is None else _o_corr + _lc).astype(np.float32)
+                _o_line_scales = _li["scales"]
         # float32 from here on: at 2900 rows the eight per-row stacks
         # are 2.3 GB in float64 and half that in float32, and they feed
         # medians, percentiles and plots -- 7 significant digits is far
@@ -695,7 +743,7 @@ else:
                 _o_resid, _o_wave, _o_obs, _o_selfres,
                 _dmoon.astype(np.float32), _dzodi.astype(np.float32),
                 _ddiffuse.astype(np.float32), _dlines.astype(np.float32),
-                _o_cdelta, _o_ctrue, _o_corr)
+                _o_cdelta, _o_ctrue, _o_corr, _o_line_scales, _o_corr_arm)
 
     _t_loop0 = _time.perf_counter()
     _atlas_cpred, _atlas_ctrue = [], []
@@ -713,6 +761,8 @@ else:
         sci_diffuse_resid_rows.append(_o[12])
         sci_lines_resid_rows.append(_o[13])
         sci_corr_rows.append(_o[16])
+        sci_line_scale_rows.append(_o[17])
+        sci_corr_arm_rows.append(_o[18])
         if _o[14] is not None:
             _atlas_cpred.append(_o[14])
             _atlas_ctrue.append(_o[15])
@@ -842,7 +892,11 @@ else:
     # what a user of the prediction gets; `sci_resid_arr` itself keeps the
     # pred - observed sign it is stored and returned with.
     sci_skysub_arr = -sci_resid_arr
-    if RESIDUAL_CORRECTION:
+    _ANY_CORR = (RESIDUAL_CORRECTION or LINE_SCALING) and bool(sci_corr_rows) \
+        and all(c is not None for c in sci_corr_rows)
+    _CORR_LABEL = " + ".join(
+        n for n, on in (("sky-arm correction", RESIDUAL_CORRECTION), ("line scaling", LINE_SCALING)) if on)
+    if _ANY_CORR:
         sci_skysub_arr = sci_skysub_arr - np.vstack(sci_corr_rows) * FACTOR
     # Panels 2-5 likewise show decomposition - predicted, the same sense as
     # panel 1. The per-row lists keep pred - recon(true), which is what the
@@ -935,15 +989,22 @@ else:
     # With the sky-arm correction on, panel 1 shows the CORRECTED sky-subtracted
     # spectra and panel 2 the same rows UNCORRECTED, on a shared y-axis, so
     # the two can be compared stroke for stroke.
-    _show_uncorr = bool(RESIDUAL_CORRECTION) and bool(sci_corr_rows) and sci_corr_rows[0] is not None
-    _n_resid_rows = 6 if _show_uncorr else 5
+    _show_uncorr = _ANY_CORR
+    # Panel 3, with both corrections on: the sky-arm correction alone, i.e.
+    # what the line scaling still has to fix.
+    _show_arm_only = (_show_uncorr and RESIDUAL_CORRECTION and LINE_SCALING
+                      and all(c is not None for c in sci_corr_arm_rows))
+    _n_extra = int(_show_uncorr) + int(_show_arm_only)
+    _n_resid_rows = 5 + _n_extra
     _resid_titles = [
-        (f"SCI sky-subtracted, WITH sky-arm correction: observed - pred - corr (n={n_use})"
+        (f"SCI sky-subtracted, WITH {_CORR_LABEL}: observed - pred - corr (n={n_use})"
          if _show_uncorr else f"SCI sky-subtracted: observed - pred (n={n_use})"),
         "median residual / row (±1,2,3σ)",
     ]
     if _show_uncorr:
         _resid_titles += [f"SCI sky-subtracted, NO correction: observed - pred (n={n_use})", ""]
+    if _show_arm_only:
+        _resid_titles += [f"SCI sky-subtracted, sky-arm correction only (NO line scaling) (n={n_use})", ""]
     _resid_titles += [
         "Moon component: recon(sci coef) - pred", "",
         "Zodi component: recon(sci coef) - pred", "",
@@ -965,7 +1026,8 @@ else:
         fig_resid.update_xaxes(matches="x", row=_r, col=1)
     if _show_uncorr:
         # Same y-range for corrected and uncorrected: the comparison is the point.
-        fig_resid.update_yaxes(matches="y", row=2, col=1)
+        for _r in range(2, 2 + _n_extra):
+            fig_resid.update_yaxes(matches="y", row=_r, col=1)
 
     def _expnum_str(i):
         if _expnum_sel is None:
@@ -980,6 +1042,8 @@ else:
     _panels = [("total",   sci_skysub_arr)]
     if _show_uncorr:
         _panels.append(("total_uncorrected", -sci_resid_arr))
+    if _show_arm_only:
+        _panels.append(("total_arm_only", -sci_resid_arr - np.vstack(sci_corr_arm_rows) * FACTOR))
     _panels += [
         ("moon",    sci_moon_arr),
         ("zodi",    sci_zodi_arr),
@@ -1190,13 +1254,15 @@ else:
                     row=_row_i, col=2,
                 )
 
-    _o = 1 if _show_uncorr else 0      # row offset of the component panels
+    _o = _n_extra                      # row offset of the component panels
     fig_resid.update_xaxes(title_text="Wavelength [Å]", row=_n_resid_rows, col=1)
     fig_resid.update_xaxes(title_text="Median residual", row=_n_resid_rows, col=2)
     fig_resid.update_yaxes(title_text=("Obs - pred - corr" if _show_uncorr
                                        else "Observed - Predicted sky"), row=1, col=1)
     if _show_uncorr:
         fig_resid.update_yaxes(title_text="Obs - pred (uncorrected)", row=2, col=1)
+    if _show_arm_only:
+        fig_resid.update_yaxes(title_text="Obs - pred - arm corr", row=3, col=1)
     fig_resid.update_yaxes(title_text="Decomposition - predicted moon",    row=2 + _o, col=1)
     fig_resid.update_yaxes(title_text="Decomposition - predicted zodi",    row=3 + _o, col=1)
     fig_resid.update_yaxes(title_text="Decomposition - predicted diffuse", row=4 + _o, col=1)
@@ -1210,7 +1276,7 @@ else:
                f"right-column histograms show the per-row median residual "
                f"across ALL {n_use} rows, with empirical ±1σ/2σ/3σ "
                f"percentiles."),
-        height=1500 + (300 if _show_uncorr else 0),
+        height=1500 + 300 * _n_extra,
         margin=dict(l=80, r=20, t=110, b=60),
         showlegend=False,
         bargap=0.05,
@@ -1297,6 +1363,9 @@ else:
     _chi2_self_blue = None
     _chi2_corr = None
     _chi2_corr_blue = None
+    _chi2_red = None
+    _chi2_corr_red = None
+    CHI2_RED_MIN_A = 6000.0
     if _chi2_ok and sci_obs_rows:
         _obs_a = np.vstack(sci_obs_rows)
         _res_a = np.vstack(sci_resid_rows)
@@ -1354,14 +1423,18 @@ else:
         _chi2_blue = (np.nanmean(_pull2[:, _blue_m], axis=1) if _n_blue_pix
                       else np.full(_chi2_ph.shape, np.nan))
         _c2b = _chi2_blue[np.isfinite(_chi2_blue)]
+        # Red side, where the OH lines are: what LINE_SCALING acts on.
+        _red_m = np.isfinite(_wr) & (_wr >= CHI2_RED_MIN_A)
+        _chi2_red = np.nanmean(_pull2[:, _red_m], axis=1)
 
         # The same chi2 with the sky-arm residual correction applied: the
         # stored residual is pred - obs, so obs - pred - corr = -(res + corr).
-        if RESIDUAL_CORRECTION and sci_corr_rows and sci_corr_rows[0] is not None:
+        if _ANY_CORR:
             _pull2_c = np.where(_good, (_res_a + np.vstack(sci_corr_rows)) ** 2 / _var_c2, np.nan)
             _chi2_corr = np.nanmean(_pull2_c, axis=1)
             _chi2_corr_blue = (np.nanmean(_pull2_c[:, _blue_m], axis=1) if _n_blue_pix
                                else np.full(_chi2_corr.shape, np.nan))
+            _chi2_corr_red = np.nanmean(_pull2_c[:, _red_m], axis=1)
             del _pull2_c
 
         # DECOMPOSITION SELF-FIT chi2, the reference distribution (2026-09-11).
@@ -1409,7 +1482,7 @@ else:
         _plot_blue = _chi2_corr_blue if _c2_corr_on else _chi2_blue
         _c2f_plot = _plot_ph[np.isfinite(_plot_ph)]
         _c2b_plot = _plot_blue[np.isfinite(_plot_blue)]
-        _pred_label = "Prediction + sky-arm corr." if _c2_corr_on else "Prediction"
+        _pred_label = f"Prediction + {_CORR_LABEL}" if _c2_corr_on else "Prediction"
 
         _figc = _make_subplots_resid(
             rows=2, cols=2, column_widths=[0.5, 0.5], horizontal_spacing=0.10,
@@ -1624,10 +1697,7 @@ else:
                              f"subtracted from.  p10/p50/p90 = "
                              f"{_q[0]:.3g} / {float(np.nanmedian(_plot_ph)):.3g} / "
                              f"{_q[1]:.3g}"
-                             + (f" WITH the sky-arm residual correction ("
-                                + ("full band" if not np.isfinite(RESIDUAL_CORRECTION_MAX_A)
-                                   else f"to {RESIDUAL_CORRECTION_MAX_A:.0f} A")
-                                + "); red outline = "
+                             + (f" WITH {_CORR_LABEL}; red outline = "
                                 f"the same rows uncorrected, median "
                                 f"{float(np.nanmedian(_chi2_ph)):.3g}."
                                 if _c2_corr_on else ".")
@@ -1688,16 +1758,30 @@ else:
             print(f"  [chi2] a ratio near 1 means the ML transfer is no longer "
                   f"the error source on these rows -- the decomposition is.")
         if _chi2_corr is not None:
-            print(f"  [chi2] WITH SKY-ARM RESIDUAL CORRECTION ("
-                  + ("full band" if not np.isfinite(RESIDUAL_CORRECTION_MAX_A)
-                     else f"to {RESIDUAL_CORRECTION_MAX_A:.0f} A + 100 A taper")
-                  + f", smoothing {RESIDUAL_SMOOTHING_A!r}): median "
+            _parts = []
+            if RESIDUAL_CORRECTION:
+                _parts.append("sky-arm correction "
+                              + ("full band" if not np.isfinite(RESIDUAL_CORRECTION_MAX_A)
+                                 else f"to {RESIDUAL_CORRECTION_MAX_A:.0f} A + 100 A taper")
+                              + f", smoothing {RESIDUAL_SMOOTHING_A!r}")
+            if LINE_SCALING:
+                _parts.append(f"line scaling (high-pass {LINE_SCALING_HIGHPASS_A:g} A, "
+                              f"prior {LINE_SCALING_PRIOR:g}, tilt {LINE_SCALING_TILT})")
+            print(f"  [chi2] WITH {' + '.join(_parts).upper()}: median "
                   f"{float(np.nanmedian(_chi2_corr)):.4g} full band, "
-                  f"{float(np.nanmedian(_chi2_corr_blue)):.4g} blue"
+                  f"{float(np.nanmedian(_chi2_corr_blue)):.4g} blue, "
+                  f"{float(np.nanmedian(_chi2_corr_red)):.4g} red >= {CHI2_RED_MIN_A:.0f} A"
                   f"   (uncorrected {float(np.nanmedian(_chi2_ph)):.4g} / "
-                  f"{float(np.nanmedian(_chi2_blue)):.4g}; rows made worse: "
-                  f"{100 * np.nanmean(_chi2_corr > _chi2_ph):.1f}% full, "
-                  f"{100 * np.nanmean(_chi2_corr_blue > _chi2_blue):.1f}% blue)")
+                  f"{float(np.nanmedian(_chi2_blue)):.4g} / {float(np.nanmedian(_chi2_red)):.4g}; "
+                  f"rows made worse: {100 * np.nanmean(_chi2_corr > _chi2_ph):.1f}% full, "
+                  f"{100 * np.nanmean(_chi2_corr_blue > _chi2_blue):.1f}% blue, "
+                  f"{100 * np.nanmean(_chi2_corr_red > _chi2_red):.1f}% red)")
+            if LINE_SCALING and any(d is not None for d in sci_line_scale_rows):
+                _names = sorted({k for d in sci_line_scale_rows if d for k in d})
+                _txt = ", ".join(
+                    f"{k} {np.nanmedian([d.get(k, np.nan) for d in sci_line_scale_rows if d]):.3f}"
+                    for k in _names if not k.endswith("_tilt"))
+                print(f"  [line scaling] median fitted scale per template: {_txt}")
         if CHI2_SINGLE_FIBRE and _nfib is not None:
             _fac = float(np.nanmedian(_nfib)) * (2.0 / np.pi)
             print(f"  [chi2] single-fibre sigma; the rows are stacks of a "
@@ -1739,7 +1823,12 @@ else:
         # this corpus rather than carried over as a hard-coded constant.
         "chi2_self": _chi2_self,
         "chi2_self_blue": _chi2_self_blue,
-        # With the sky-arm residual correction (None unless RESIDUAL_CORRECTION).
+        "chi2_photon_red": _chi2_red,
+        # With the sky-arm correction and/or the line scaling (None unless
+        # RESIDUAL_CORRECTION or LINE_SCALING).
         "chi2_photon_corrected": _chi2_corr,
         "chi2_photon_blue_corrected": _chi2_corr_blue,
+        "chi2_photon_red_corrected": _chi2_corr_red,
+        # Per-row {template: fitted scale} from LINE_SCALING (None per row otherwise).
+        "line_scales": sci_line_scale_rows,
     }

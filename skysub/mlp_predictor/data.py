@@ -2277,38 +2277,46 @@ def science_mask_reference_fwhm(input_fits_path, wave):
     ``*_every10`` stack was never decomposed itself -- its products are
     thinned from the full run -- so its parent stack is used when present.
     Cached per path; the LSF planes are read only inside the line windows.
+    ``input_fits_path`` may also be an in-memory ``fits.HDUList`` (the one-row
+    stack `decompose_parallel.decompose_in_process` takes); that is not cached.
     """
     import re as _re
+    wave = np.asarray(wave, dtype=np.float64)
+    if isinstance(input_fits_path, fits.HDUList):
+        return _science_mask_reference_from_hdul(input_fits_path, wave, "<in-memory stack>")
     path = str(input_fits_path)
     parent = _re.sub(r"_every\d+(\.fits)$", r"\1", path)
     if parent != path and Path(parent).exists():
         path = parent
     if path in _SCIENCE_MASK_REFERENCE_FWHM:
         return _SCIENCE_MASK_REFERENCE_FWHM[path]
-    _dp = _decompose_parallel_module()
-    wave = np.asarray(wave, dtype=np.float64)
     with fits.open(path, memmap=True) as _h:
-        _w = np.asarray(_h["WAVE"].data, dtype=np.float64)
-        _w = _w if _w.ndim == 1 else _w[0]
-        if _w.shape != wave.shape or not np.allclose(_w, wave, rtol=0, atol=1e-6):
-            raise ValueError(f"{path} is on a different wavelength grid")
-        use = np.zeros(wave.size, dtype=bool)
-        for _, lam in _dp.SCIENCE_EMISSION_LINES:
-            use |= np.abs(wave - float(lam)) <= 25.0
-        cols = np.flatnonzero(use)
-        # Contiguous column blocks, so the memmap reads only what it needs.
-        blocks = np.split(cols, np.flatnonzero(np.diff(cols) > 1) + 1)
-        lsf = {}
-        for role, ext in (("sci", "LSF_SCI"), ("sky1", "LSF_SKY_NEAR"),
-                          ("sky2", "LSF_SKY_FAR")):
-            plane = np.full((_h[ext].shape[0], wave.size), np.nan)
-            for b in blocks:
-                plane[:, b[0]:b[-1] + 1] = np.asarray(
-                    _h[ext].data[:, b[0]:b[-1] + 1], dtype=np.float64)
-            lsf[role] = plane
-    ref = _dp._science_mask_lsf_reference(wave, lsf)
+        ref = _science_mask_reference_from_hdul(_h, wave, path)
     _SCIENCE_MASK_REFERENCE_FWHM[path] = ref
     return ref
+
+
+def _science_mask_reference_from_hdul(_h, wave, label):
+    _dp = _decompose_parallel_module()
+    _w = np.asarray(_h["WAVE"].data, dtype=np.float64)
+    _w = _w if _w.ndim == 1 else _w[0]
+    if _w.shape != wave.shape or not np.allclose(_w, wave, rtol=0, atol=1e-6):
+        raise ValueError(f"{label} is on a different wavelength grid")
+    use = np.zeros(wave.size, dtype=bool)
+    for _, lam in _dp.SCIENCE_EMISSION_LINES:
+        use |= np.abs(wave - float(lam)) <= 25.0
+    cols = np.flatnonzero(use)
+    # Contiguous column blocks, so the memmap reads only what it needs.
+    blocks = np.split(cols, np.flatnonzero(np.diff(cols) > 1) + 1)
+    lsf = {}
+    for role, ext in (("sci", "LSF_SCI"), ("sky1", "LSF_SKY_NEAR"),
+                      ("sky2", "LSF_SKY_FAR")):
+        plane = np.full((_h[ext].shape[0], wave.size), np.nan)
+        for b in blocks:
+            plane[:, b[0]:b[-1] + 1] = np.asarray(
+                _h[ext].data[:, b[0]:b[-1] + 1], dtype=np.float64)
+        lsf[role] = plane
+    return _dp._science_mask_lsf_reference(wave, lsf)
 
 
 def science_line_mask_rows(input_fits_path, wave, flux_sci, flux_sky):
@@ -2544,6 +2552,43 @@ def make_corpus_basis_decomposer(wave_ref, *, input_fits_for_basis, decomp_suffi
     return _dec, _note
 
 
+def reconstruction_basis(wave, lsf_state, *, n_spline_knots=25, base_dir=None,
+                         o2_vector=None, split_zodi=True, n_zodi_spline_knots=3,
+                         palace_oh_suffix=None, palace_diffuse_suffix=None,
+                         telluric=None):
+    """``(model, mats)`` that `reconstruct_with_lsf` reconstructs a row with.
+
+    For an ``LSFSurfaceState`` only.  Exposed so that a consumer that needs the
+    basis itself -- e.g. the per-band sky-line templates of
+    `mlp_predictor.sky_line_scaling` -- uses exactly the reconstruction's.
+    """
+    # `telluric` (from `telluric_row_kwargs`) selects the spline2d + telluric
+    # class.  It is REQUIRED for a telluric corpus, and not optional in the
+    # usual sense: the iterative class cannot even read that corpus's LSF
+    # state, so omitting it raises rather than quietly reconstructing
+    # something else.
+    model = make_reconstruction_decomposer(
+        wave, n_spline_knots=n_spline_knots, base_dir=base_dir,
+        split_zodi=split_zodi, n_zodi_spline_knots=n_zodi_spline_knots,
+        palace_oh_suffix=palace_oh_suffix,
+        palace_diffuse_suffix=palace_diffuse_suffix,
+        telluric=telluric)
+    model._set_lsf_state(lsf_state)
+    mats = model._assemble_refined_matrices()
+    # VECTOR_O2 on disk is already convolved by the fitted LSF surface at fit
+    # time; injecting it into matrix_o2_stick and letting _assemble_refined_matrices
+    # re-convolve would double-broaden the O2 shape. Override the assembled O2
+    # block verbatim instead.
+    if o2_vector is not None:
+        o2_vec = np.asarray(o2_vector, float).ravel()
+        if o2_vec.shape != model.wave.shape:
+            raise ValueError(
+                f'o2_vector shape mismatch: expected {model.wave.shape}, got {o2_vec.shape}'
+            )
+        mats['o2'] = o2_vec[None, :]
+    return model, mats
+
+
 def reconstruct_with_lsf(wave, coef, lsf, *, n_spline_knots=25, base_dir=None,
                          o2_vector=None, coef_err=None,
                          split_zodi=True, n_zodi_spline_knots=3,
@@ -2567,31 +2612,13 @@ def reconstruct_with_lsf(wave, coef, lsf, *, n_spline_knots=25, base_dir=None,
     and switches to the telluric spline2d basis; see `DECOMP_VARIANTS`.
     """
     if isinstance(lsf, LSFSurfaceState):
-        # `telluric` (from `telluric_row_kwargs`) selects the spline2d +
-        # telluric class.  It is REQUIRED for a telluric corpus, and not
-        # optional in the usual sense: the iterative class cannot even read
-        # that corpus's LSF state, so omitting it raises rather than quietly
-        # reconstructing something else.
-        model = make_reconstruction_decomposer(
-            wave, n_spline_knots=n_spline_knots, base_dir=base_dir,
-            split_zodi=split_zodi, n_zodi_spline_knots=n_zodi_spline_knots,
+        model, mats = reconstruction_basis(
+            wave, lsf, n_spline_knots=n_spline_knots, base_dir=base_dir,
+            o2_vector=o2_vector, split_zodi=split_zodi,
+            n_zodi_spline_knots=n_zodi_spline_knots,
             palace_oh_suffix=palace_oh_suffix,
-            palace_diffuse_suffix=palace_diffuse_suffix,
-            telluric=telluric)
+            palace_diffuse_suffix=palace_diffuse_suffix, telluric=telluric)
         coef_arr = np.asarray(coef, float).ravel()
-        model._set_lsf_state(lsf)
-        mats = model._assemble_refined_matrices()
-        # VECTOR_O2 on disk is already convolved by the fitted LSF surface at fit
-        # time; injecting it into matrix_o2_stick and letting _assemble_refined_matrices
-        # re-convolve would double-broaden the O2 shape. Override the assembled O2
-        # block verbatim instead.
-        if o2_vector is not None:
-            o2_vec = np.asarray(o2_vector, float).ravel()
-            if o2_vec.shape != model.wave.shape:
-                raise ValueError(
-                    f'o2_vector shape mismatch: expected {model.wave.shape}, got {o2_vec.shape}'
-                )
-            mats['o2'] = o2_vec[None, :]
         n_expected = sum(m.shape[0] for m in mats.values())
         if coef_arr.size != n_expected:
             raise ValueError(
