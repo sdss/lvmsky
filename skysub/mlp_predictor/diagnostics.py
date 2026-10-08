@@ -566,7 +566,11 @@ class Diagnostics:
                                  show_moon_zodi_model: bool = True,
                                  residual_correction: bool = False,
                                  residual_smoothing_A: float | str | None = "auto",
-                                 residual_max_A: float = 5000.0) -> dict:
+                                 residual_max_A: float = 5000.0,
+                                 line_scaling: bool = False,
+                                 line_highpass_A: float = 25.0,
+                                 line_prior_sigma: float = 0.1,
+                                 line_tilt: bool = True) -> dict:
         """Reconstruct a single every10 row.  Pass ``row`` (every10 index)
         or ``expnum`` (looked up via the every10 META FITS).
 
@@ -583,6 +587,9 @@ class Diagnostics:
         ``residual_max_A`` the correction is applied in full up to this and
         tapered to zero over the next 100 A (default 5000 A); pass
         ``float('inf')`` for the full band.
+        ``line_scaling``, ``line_highpass_A``, ``line_prior_sigma``,
+        ``line_tilt``: rescale the predicted sky lines on this science spectrum
+        after the correction above, exactly as in `full_spectrum_batch_rmse`.
         """
         if expnum is not None and row is not None:
             raise TypeError("pass row OR expnum, not both")
@@ -602,6 +609,14 @@ class Diagnostics:
                  f"RESIDUAL_SMOOTHING_A = {_smoothing_literal(residual_smoothing_A)}"),
                 (r"^RESIDUAL_CORRECTION_MAX_A\s*=\s*.*$",
                  f"RESIDUAL_CORRECTION_MAX_A = {_float_literal(residual_max_A)}"),
+                (r"^LINE_SCALING\s*=\s*(?:True|False)",
+                 f"LINE_SCALING = {bool(line_scaling)}"),
+                (r"^LINE_SCALING_HIGHPASS_A\s*=\s*.*$",
+                 f"LINE_SCALING_HIGHPASS_A = {float(line_highpass_A)!r}"),
+                (r"^LINE_SCALING_PRIOR\s*=\s*.*$",
+                 f"LINE_SCALING_PRIOR = {float(line_prior_sigma)!r}"),
+                (r"^LINE_SCALING_TILT\s*=\s*(?:True|False)",
+                 f"LINE_SCALING_TILT = {bool(line_tilt)}"),
             ],
         )
 
@@ -610,7 +625,11 @@ class Diagnostics:
                                  split: str = "heldout",
                                  residual_correction: bool = False,
                                  residual_smoothing_A: float | str | None = "auto",
-                                 residual_max_A: float = 5000.0) -> dict:
+                                 residual_max_A: float = 5000.0,
+                                 line_scaling: bool = False,
+                                 line_highpass_A: float = 25.0,
+                                 line_prior_sigma: float = 0.1,
+                                 line_tilt: bool = True) -> dict:
         """Full-spectrum RMSE over the held-out rows.
 
         ``size``    rows evaluated.  ``None`` (default) takes EVERY gated row
@@ -645,6 +664,15 @@ class Diagnostics:
         ``residual_max_A`` the correction is applied in full up to this and
                     tapered to zero over the next 100 A (default 5000 A);
                     ``float('inf')`` for the full band.
+        ``line_scaling`` after that correction, refit the brightness of the
+                    predicted sky lines on each science spectrum
+                    (``mlp_predictor.sky_line_scaling``): one scale per OH
+                    vibrational band, per atomic line family and for O2,
+                    on a high-pass that removes the science continuum.
+                    Scored and plotted together with the correction above.
+        ``line_highpass_A`` width of that high-pass (default 25 A).
+        ``line_prior_sigma`` 1-sigma prior pulling each scale toward 1.
+        ``line_tilt`` also fit a rotational-temperature tilt per OH band.
         """
         if split not in ("heldout", "test", "val", "all"):
             raise ValueError(
@@ -666,6 +694,14 @@ class Diagnostics:
                  f"    RESIDUAL_SMOOTHING_A = {_smoothing_literal(residual_smoothing_A)}"),
                 (r"^\s*RESIDUAL_CORRECTION_MAX_A\s*=\s*.*$",
                  f"    RESIDUAL_CORRECTION_MAX_A = {_float_literal(residual_max_A)}"),
+                (r"^\s*LINE_SCALING\s*=\s*(?:True|False)",
+                 f"    LINE_SCALING = {bool(line_scaling)}"),
+                (r"^\s*LINE_SCALING_HIGHPASS_A\s*=\s*.*$",
+                 f"    LINE_SCALING_HIGHPASS_A = {float(line_highpass_A)!r}"),
+                (r"^\s*LINE_SCALING_PRIOR\s*=\s*.*$",
+                 f"    LINE_SCALING_PRIOR = {float(line_prior_sigma)!r}"),
+                (r"^\s*LINE_SCALING_TILT\s*=\s*(?:True|False)",
+                 f"    LINE_SCALING_TILT = {bool(line_tilt)}"),
             ],
         )
 
