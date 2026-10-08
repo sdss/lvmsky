@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 from hashlib import sha256
 import json
+import os
 from pathlib import Path
 import time
 from typing import Literal
@@ -56,7 +57,19 @@ LCO = EarthLocation.from_geodetic(
     height=2281.0 * u.m,
 )
 
-DEFAULT_DATA_ROOT = Path(__file__).resolve().parent / "data"
+# 2026-10-08: the environment variable LVMSKY_DATA_ROOT, when set, replaces the
+# bundled data root next to this file.  This lets a copy of the code without
+# its data/ directory (e.g. the copy vendored into lvmdrp, whose data sit in
+# the calibration directory) find the bundle.  It is read once, at import, so
+# it must be set before sky_decomp is imported: DEFAULT_DATA_ROOT and
+# DEFAULT_DATA_DIR are also the default arguments of several functions.
+# Unset, the behaviour is unchanged.
+LVMSKY_DATA_ROOT_ENV = "LVMSKY_DATA_ROOT"
+DEFAULT_DATA_ROOT = (
+    Path(os.environ[LVMSKY_DATA_ROOT_ENV]).expanduser().resolve()
+    if os.environ.get(LVMSKY_DATA_ROOT_ENV)
+    else Path(__file__).resolve().parent / "data"
+)
 DEFAULT_DATA_DIR = DEFAULT_DATA_ROOT / "moon_zodi"
 MODEL_PARAMETER_NAMES = (
     "moon_rayleigh_intercept",

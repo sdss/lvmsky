@@ -50,6 +50,7 @@ comparable across the change even though its definition is unchanged.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import numpy as np
@@ -70,9 +71,19 @@ _CACHE: dict[tuple, np.ndarray] = {}
 
 
 def sensitivity_dir(data_dir=None) -> Path:
-    """Directory holding the vendored absolute-sensitivity CSVs."""
+    """Directory holding the vendored absolute-sensitivity CSVs.
+
+    Order: ``data_dir`` if given, else ``$LVMSKY_DATA_ROOT/sensitivity`` if that
+    variable is set, else ``data/sensitivity`` next to this file.
+    """
     if data_dir is not None:
         return Path(data_dir).expanduser()
+    # 2026-10-08: LVMSKY_DATA_ROOT, when set, replaces the bundled data root, the
+    # same variable as moon_zodi_model.DEFAULT_DATA_ROOT (read here directly to
+    # keep this module numpy-only).  Unset, the behaviour is unchanged.
+    root = os.environ.get("LVMSKY_DATA_ROOT")
+    if root:
+        return Path(root).expanduser().resolve() / "sensitivity"
     return Path(__file__).resolve().parent / "data" / "sensitivity"
 
 

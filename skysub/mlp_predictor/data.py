@@ -1968,7 +1968,12 @@ def build_triplet_coef_dataset(
 
 def _infer_base_dir_for_reconstruction():
     _cwd = Path.cwd().resolve()
-    candidates = [Path(__file__).resolve().parents[1] / 'sky_decomp' / 'data',
+    # 2026-10-08: LVMSKY_DATA_ROOT, when set, is tried first -- the same variable
+    # as sky_decomp.moon_zodi_model.DEFAULT_DATA_ROOT, for a copy of the code
+    # without its data/ directory.  Unset, the search is unchanged.
+    _env_root = os.environ.get('LVMSKY_DATA_ROOT')
+    candidates = ([Path(_env_root).expanduser().resolve()] if _env_root else []) + [
+                  Path(__file__).resolve().parents[1] / 'sky_decomp' / 'data',
                   _cwd / 'skysub' / 'sky_decomp' / 'data',
                   _cwd / 'sky_decomp' / 'data',
                   _cwd.parent / 'skysub' / 'sky_decomp' / 'data',
