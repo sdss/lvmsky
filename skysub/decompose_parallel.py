@@ -208,6 +208,9 @@ FIT_MODEL_SUFFIXES = {
     "palacecorr-aijc-vnf-split-zodi-lsf-spline2d": (
         "_palacecorr_aijc_vnf_split_zodi_lsf_spline2d"
     ),
+    "palacecorr-aijc-vnf-split-zodi-lsf-spline2d-solarblue": (
+        "_palacecorr_aijc_vnf_split_zodi_lsf_spline2d_solarblue"
+    ),
     "palace-aijc-vnf-pca30-split-zodi-lsf-spline2d": (
         "_palace_aijc_vnf_pca30_split_zodi_lsf_spline2d"
     ),
@@ -225,6 +228,13 @@ ADAM25K_SPLIT_ZODI_FIT_MODEL = "adam25k-telluric-split-zodi-lsf-spline2d"
 PALACE_VNF_SPLIT_ZODI_FIT_MODEL = "palace-aijc-vnf-split-zodi-lsf-spline2d"
 PALACECORR_VNF_SPLIT_ZODI_FIT_MODEL = (
     "palacecorr-aijc-vnf-split-zodi-lsf-spline2d"
+)
+PALACECORR_SOLARBLUE_FIT_MODEL = (
+    "palacecorr-aijc-vnf-split-zodi-lsf-spline2d-solarblue"
+)
+PALACECORR_FIT_MODELS = (
+    PALACECORR_VNF_SPLIT_ZODI_FIT_MODEL,
+    PALACECORR_SOLARBLUE_FIT_MODEL,
 )
 PALACE_VNF_PCA30_SPLIT_ZODI_FIT_MODEL = (
     "palace-aijc-vnf-pca30-split-zodi-lsf-spline2d"
@@ -249,7 +259,7 @@ PALACE_VNF_PCA30_SPLIT_ZODI_FIT_MODELS = (
 SPLIT_ZODI_TELLURIC_FIT_MODELS = (
     *ADAM25K_SPLIT_ZODI_FIT_MODELS,
     PALACE_VNF_SPLIT_ZODI_FIT_MODEL,
-    PALACECORR_VNF_SPLIT_ZODI_FIT_MODEL,
+    *PALACECORR_FIT_MODELS,
     *PALACE_VNF_PCA30_SPLIT_ZODI_FIT_MODELS,
 )
 TELLURIC_FIT_MODELS = (
@@ -260,7 +270,7 @@ TELLURIC_FIT_MODELS = (
 
 
 def _resolved_palace_oh_suffix(fit_model, palace_oh_suffix):
-    if fit_model != PALACECORR_VNF_SPLIT_ZODI_FIT_MODEL:
+    if fit_model not in PALACECORR_FIT_MODELS:
         return palace_oh_suffix
     if palace_oh_suffix not in (None, SKYFAR_LINEAR_RIDGE_PALACE_OH_SUFFIX):
         raise ValueError(
@@ -277,8 +287,10 @@ def _fit_model_primary_meta(fit_model, palace_oh_suffix):
     }
     if palace_oh_suffix is not None:
         metadata["OHFILE"] = f"pmd_popmodel_OH{palace_oh_suffix}.dat"
-    if fit_model == PALACECORR_VNF_SPLIT_ZODI_FIT_MODEL:
+    if fit_model in PALACECORR_FIT_MODELS:
         metadata["OHRIDGE"] = SKYFAR_LINEAR_RIDGE_LAMBDA
+    if fit_model == PALACECORR_SOLARBLUE_FIT_MODEL:
+        metadata["BLUELSF"] = "solar_continuum_joint"
     return metadata
 
 
@@ -1104,6 +1116,10 @@ def init_worker(
             )
 
             _WORKER_DECOMPOSER = SkyDecompPalaceCorrAijcVNFSplitZodiLSFSpline2D
+        elif fit_model == PALACECORR_SOLARBLUE_FIT_MODEL:
+            from skysub.sky_decomp.solar_lsf import SkyDecompPalaceCorrSolarBlueLSF
+
+            _WORKER_DECOMPOSER = SkyDecompPalaceCorrSolarBlueLSF
         else:
             from skysub.sky_decomp.residual_pca import (
                 SkyDecompPalaceAijcVNFSplitZodiLineAmplitudePCA30,
@@ -1121,8 +1137,11 @@ def init_worker(
             "moon_interline_boost": 0.0,
             "n_spline_knots": int(n_spline_knots),
             "config": LSFSurfaceIterativeConfig(
-                n_refinement_cycles=n_refinement_cycles,
-                roughness_fraction=1.0e-4,
+                n_refinement_cycles=(30 if fit_model == PALACECORR_SOLARBLUE_FIT_MODEL
+                    and n_refinement_cycles == 5 else n_refinement_cycles),
+                n_basis=(4 if fit_model == PALACECORR_SOLARBLUE_FIT_MODEL else 6),
+                roughness_fraction=(0.0 if fit_model == PALACECORR_SOLARBLUE_FIT_MODEL else 1.0e-4),
+                fallback_prior_fraction=(0.0 if fit_model == PALACECORR_SOLARBLUE_FIT_MODEL else 1.0e-4),
             ),
         }
         if fit_model in SPLIT_ZODI_TELLURIC_FIT_MODELS:
@@ -2303,7 +2322,7 @@ def _compact_run_provenance(data_file, wave, fit_model, base_dir, parameters):
                 "lsf_surface_iterative.py",
                 "residual_pca.py",
                 "telluric_corrected_lines.py",
-            )
+            ) + (("solar_lsf.py",) if fit_model == PALACECORR_SOLARBLUE_FIT_MODEL else ())
         },
     }
     fingerprint = hashlib.sha256(
@@ -2852,7 +2871,7 @@ def build_arg_parser():
         "--n-refinement-cycles",
         type=int,
         default=5,
-        help="Continuum/LSF/line cycles for iterative LSF methods (default: 5)",
+        help="Refinement cycle limit (default: 5; solarblue maps 5 to a 30-cycle convergence limit)",
     )
     parser.add_argument(
         "--palace-suffix",

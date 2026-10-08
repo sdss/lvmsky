@@ -732,12 +732,19 @@ def _fit_bspline_channel(
     knot_vector: np.ndarray | None = None,
     kernel_design: np.ndarray | None = None,
     offset_roughness_fraction: float = 0.0,
+    center_offsets: bool = False,
+    numerical_ridge: float = 1.0e-10,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict[str, float | str]]:
     """Fit one normalized, central-peak B-spline kernel surface.
 
     The fitted kernel is nonnegative and unimodal at every wavelength. A
     normalized projected ``fallback_kernel`` is returned when the channel has
     insufficient information or the constrained solve fails.
+
+    ``center_offsets`` (with ``kernel_design`` and ``free_amplitude=False``)
+    subtracts the offset-mean design from the design and its sum from the
+    target.  This is exact under the unit-sum equality constraints and removes
+    the large common term of a bright continuum from the conditioning.
 
     Returns
     -------
@@ -750,6 +757,10 @@ def _fit_bspline_channel(
     target = np.asarray(target, dtype=float)
     ivar = np.asarray(ivar, dtype=float)
     fallback = _project_unimodal(fallback_kernel)
+    if not np.isfinite(numerical_ridge) or numerical_ridge < 0:
+        raise ValueError("numerical_ridge must be finite and non-negative")
+    if center_offsets and (kernel_design is None or free_amplitude):
+        raise ValueError("center_offsets requires kernel_design and fixed amplitude")
 
     shifted = _shifted_source(source, fallback.size)
     information = np.clip(np.nan_to_num(ivar), 0.0, np.inf) * np.sum(
@@ -773,6 +784,15 @@ def _fit_bspline_channel(
         kernel_design = np.asarray(kernel_design, dtype=float)
         if kernel_design.shape != (wave.size, fallback.size * n_basis):
             raise ValueError("kernel_design has an incompatible shape")
+    if center_offsets:
+        shaped = kernel_design.reshape(wave.size, fallback.size, n_basis)
+        common = shaped.mean(axis=1)
+        kernel_design = (shaped - common[:, None, :]).reshape(kernel_design.shape)
+        target = target - common.sum(axis=1)
+        information = np.clip(np.nan_to_num(ivar), 0.0, np.inf) * np.sum(
+            kernel_design**2,
+            axis=1,
+        )
 
     midpoint = 0.5 * (wave[0] + wave[-1])
     half_width = max(0.5 * (wave[-1] - wave[0]), 1.0)
@@ -836,7 +856,7 @@ def _fit_bspline_channel(
     prior_weight = np.tile(prior_boost, fallback.size)
     prior_scale = fallback_prior_fraction * hessian_scale
     hessian[:n_kernel, :n_kernel] += prior_scale * np.diag(prior_weight)
-    hessian += 1.0e-10 * np.eye(n_parameter)
+    hessian += numerical_ridge * np.eye(n_parameter)
 
     fallback_vector = np.repeat(fallback[:, None], n_basis, axis=1).reshape(-1)
     linear = -(weighted_design.T @ weighted_target)
@@ -1687,6 +1707,9 @@ class SkyDecompLSFSurfaceIterative(SkyDecomp):
         continuum = design.T @ coefficient
         return fit, coefficient, coef_err, continuum, weights, channel_noise
 
+    def _refinement_converged(self, run, flux, ivar, previous_surface) -> bool:
+        return False
+
     def _run_iterations(
         self,
         flux: np.ndarray,
@@ -1882,9 +1905,11 @@ class SkyDecompLSFSurfaceIterative(SkyDecomp):
             run.continuum = candidate_continuum
             run.line_model = candidate_line_model
             run.solver_status = line_status
+            if self._refinement_converged(run, flux, ivar, previous_surface):
+                break
 
         # Closure uses the last fully committed model, even after a failed cycle.
-        if seed_solved:
+        if seed_solved and not getattr(self, "_close_each_refinement", False):
             continuum_fit, candidate_coefficient, candidate_coef_err, candidate_continuum, weights, noise = (
                 self._fit_continuum_stage(run, flux, ivar, skyline_mask)
             )

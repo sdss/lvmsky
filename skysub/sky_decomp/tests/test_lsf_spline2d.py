@@ -21,24 +21,32 @@ from skysub.sky_decomp.lsf_surface_iterative import (
 from skysub.sky_decomp.result_io import load_lsf_surface_state, results_to_fits
 
 
-def test_mspline_contract_and_exact_native_bins():
-    endpoints = np.array([-3.0, 3.0])
-    assert np.array_equal(mspline_basis(endpoints), np.zeros((2, 11)))
-    assert np.array_equal(mspline_basis(endpoints, derivative=1), np.zeros((2, 11)))
-    for index in range(11):
+@pytest.mark.parametrize("strength", [-0.001, np.nan, np.inf])
+def test_invalid_offset_regularization_is_rejected(strength):
+    with pytest.raises(ValueError, match="offset_roughness_fraction"):
+        SkyDecompLSFSpline2D(np.array([4000., 4001.]), offset_roughness_fraction=strength)
+
+
+@pytest.mark.parametrize("count, half_width", [(11, 3.0), (15, 2.5)])
+def test_mspline_contract_and_exact_native_bins(count, half_width):
+    endpoints = np.array([-half_width, half_width])
+    options = dict(n_basis=count, half_width=half_width)
+    assert np.array_equal(mspline_basis(endpoints, **options), np.zeros((2, count)))
+    assert np.array_equal(mspline_basis(endpoints, derivative=1, **options), np.zeros((2, count)))
+    for index in range(count):
         integral = quad(
-            lambda value: mspline_basis(np.array([value]))[0, index],
-            -3.0,
-            3.0,
-            points=np.linspace(-3.0, 3.0, 15),
+            lambda value: mspline_basis(np.array([value]), **options)[0, index],
+            -half_width,
+            half_width,
+            points=np.linspace(-half_width, half_width, count+4),
         )[0]
         assert integral == pytest.approx(1.0, abs=2.0e-12)
 
     wave = np.array([4996.0, 4996.8, 4997.7, 4998.5, 4999.4, 5000.2, 5001.1, 5002.0, 5003.0, 5004.1])
-    design = _integrated_components(wave, np.array([5000.0]), np.ones(wave.size, bool))
+    design = _integrated_components(wave, np.array([5000.0]), np.ones(wave.size, bool), count, half_width)
     widths = np.diff(native_pixel_edges(wave))
     masses = widths @ design.toarray()
-    np.testing.assert_allclose(masses, np.ones(11), rtol=0.0, atol=3.0e-14)
+    np.testing.assert_allclose(masses, np.ones(count), rtol=0.0, atol=3.0e-14)
 
 
 @pytest.fixture(scope="module")
@@ -195,3 +203,38 @@ def test_vnf_line_adjoint_pca_fits_header_keeps_compact_lsf(real_result, tmp_pat
         assert hdul[0].header["LADPCAK"] == 1
         assert hdul[0].header["OHGROUP"] == "v_upper,N_upper,F_upper"
         assert all(name in hdul for name in ("LSF_COEF", "LSF_KNOTS", "LSF_META"))
+
+
+def test_flexible_offset_support_roundtrip(real_result, tmp_path):
+    from skysub.sky_decomp.result_io import build_lsf_hdus
+    from skysub.sky_decomp.lsf_surface_iterative import LSFChannelSplineConfig, _configured_knot_vector
+    wave, _, result = real_result
+    state = copy.deepcopy(result.lsf_state)
+    state.tap_offsets = np.arange(-7, 8)
+    state.config["offset_half_width_angstrom"] = 2.5
+    state.config["offset_roughness_fraction"] = 0.01
+    for channel, lo, hi in (("B", 3600, 5787), ("R", 5787, 7454), ("Z", 7454, 9801)):
+        state.coefficients[channel] = np.zeros((15, 8))
+        state.coefficients[channel][7] = 1.0
+        state.knot_vectors[channel] = _configured_knot_vector(wave[(wave>=lo)&(wave<hi)],
+            LSFChannelSplineConfig(n_basis=8, degree=3, knot_strategy="uniform"))
+        state.degrees[channel] = 3
+    path = tmp_path / "flexible.fits"
+    fits.HDUList([fits.PrimaryHDU(), *build_lsf_hdus([state])]).writeto(path)
+    restored = load_lsf_surface_state(path)
+    assert restored.config["offset_half_width_angstrom"] == 2.5
+    assert restored.config["offset_roughness_fraction"] == 0.01
+    assert restored.coefficients["B"].shape == (15, 8)
+    probes = np.array([4000., 6500., 8500.])
+    delta = np.linspace(-3., 3., 601)
+    before = evaluate_lsf_density(state, probes, delta)
+    np.testing.assert_array_equal(evaluate_lsf_density(restored, probes, delta), before)
+    assert np.all(before[:, np.abs(delta)>=2.5] == 0)
+    incompatible = copy.deepcopy(state)
+    incompatible.config["offset_half_width_angstrom"] = 3.0
+    with pytest.raises(ValueError, match="same offset support"):
+        build_lsf_hdus([state, incompatible])
+    incompatible.config["offset_half_width_angstrom"] = 2.5
+    incompatible.config["offset_roughness_fraction"] = 0.1
+    with pytest.raises(ValueError, match="same offset regularization"):
+        build_lsf_hdus([state, incompatible])

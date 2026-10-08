@@ -462,6 +462,9 @@ def test_batch_role_coordinate_and_lsf_contract(monkeypatch):
         "palacecorr-aijc-vnf-split-zodi-lsf-spline2d": (
             "_palacecorr_aijc_vnf_split_zodi_lsf_spline2d"
         ),
+        "palacecorr-aijc-vnf-split-zodi-lsf-spline2d-solarblue": (
+            "_palacecorr_aijc_vnf_split_zodi_lsf_spline2d_solarblue"
+        ),
         "palace-aijc-vnf-pca30-split-zodi-lsf-spline2d": (
             "_palace_aijc_vnf_pca30_split_zodi_lsf_spline2d"
         ),

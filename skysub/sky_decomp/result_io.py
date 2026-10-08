@@ -56,6 +56,15 @@ METRIC_COLUMNS = (
 )
 
 
+CONVERGENCE_METRIC_COLUMNS = (
+    ("converged", bool),
+    ("convergence_lsf_rtol", float),
+    ("convergence_chi2_rtol", float),
+    ("convergence_centroid_atol_angstrom", float),
+    ("convergence_lsf_metric", str),
+)
+
+
 def _text_value(value: object) -> str:
     return value.decode().strip() if isinstance(value, bytes) else str(value).strip()
 
@@ -91,12 +100,20 @@ def _lsf_meta_row(spectrum_index, state, channel, *, available=True, reason=None
         "wave_max": state.wave_max,
         "wave_sha256": state.wave_sha256,
     }
+    for name in ("offset_half_width_angstrom", "offset_roughness_fraction"):
+        if name in state.config:
+            row[name] = float(state.config[name])
     for name, column, converter in STATE_CONFIG_COLUMNS:
         if name != "n_refinement_cycles":
             row[column] = converter(state.config[name])
+    for name, converter in CONVERGENCE_METRIC_COLUMNS:
+        if name in metric:
+            row[name] = converter(metric[name])
     for name, default, converter in METRIC_COLUMNS[2:]:
         row[name] = converter(metric.get(name, default))
     if not available:
+        if "converged" in row:
+            row["converged"] = False
         row["status"] = "unavailable"
         row["reason"] = str(reason or "fit unavailable")
         row["completed_cycles"] = 0
@@ -118,6 +135,10 @@ def build_lsf_hdus(states):
             raise ValueError("All LSF states must use the same schema version")
         if not np.array_equal(state.tap_offsets, reference.tap_offsets):
             raise ValueError("All LSF states must use the same tap offsets")
+        if state.config.get("offset_half_width_angstrom", 3.0) != reference.config.get("offset_half_width_angstrom", 3.0):
+            raise ValueError("All LSF states must use the same offset support")
+        if state.config.get("offset_roughness_fraction") != reference.config.get("offset_roughness_fraction"):
+            raise ValueError("All LSF states must use the same offset regularization")
         if (
             state.wave_n != reference.wave_n
             or state.wave_min != reference.wave_min
@@ -230,6 +251,9 @@ def lsf_surface_state_from_cubes(cubes, spectrum_index: int = 0):
         name: converter(first_row[column])
         for name, column, converter in STATE_CONFIG_COLUMNS
     }
+    for name in ("offset_half_width_angstrom", "offset_roughness_fraction"):
+        if name in meta.dtype.names:
+            config[name] = float(first_row[name])
     tap_offsets = np.asarray(first_row["tap_offsets"], dtype=int)
     if tap_offsets.ndim != 1 or tap_offsets.size != coefficient_cube.shape[2]:
         raise ValueError("Stored tap offsets do not match LSF_COEF")
@@ -263,6 +287,9 @@ def lsf_surface_state_from_cubes(cubes, spectrum_index: int = 0):
             name: _text_value(row[name]) if converter is str else converter(row[name])
             for name, _, converter in METRIC_COLUMNS
         }
+        for name, converter in CONVERGENCE_METRIC_COLUMNS:
+            if name in meta.dtype.names:
+                metrics[channel][name] = _text_value(row[name]) if converter is str else converter(row[name])
     return LSFSurfaceState(
         coefficients=coefficients,
         knot_vectors=knots,

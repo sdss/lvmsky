@@ -51,3 +51,28 @@ def test_an_in_memory_stack_is_passed_through_unchanged():
     assert by_name["data_file"] is hdul          # not stringified into a path
     by_name, _ = _initargs_by_name(data_file="stack.fits")
     assert by_name["data_file"] == "stack.fits"
+
+
+def test_solarblue_cli_routing_and_provenance():
+    args = dp.build_arg_parser().parse_args(["stack.fits", "--fit-model", dp.PALACECORR_SOLARBLUE_FIT_MODEL])
+    kw = dp._run_kwargs_from_args(args)
+    assert kw["fit_model"] == dp.PALACECORR_SOLARBLUE_FIT_MODEL
+    suffix = dp._resolved_palace_oh_suffix(kw["fit_model"], kw["palace_oh_suffix"])
+    assert suffix == dp.SKYFAR_LINEAR_RIDGE_PALACE_OH_SUFFIX
+    assert kw["mask_science_lines"] and kw["fit_pixel_weights"]
+    assert dp.FIT_MODEL_SUFFIXES[kw["fit_model"]].endswith("_solarblue")
+    meta = dp._fit_model_primary_meta(kw["fit_model"], suffix)
+    assert meta["BLUELSF"] == "solar_continuum_joint"
+    assert meta["OHRIDGE"] == dp.SKYFAR_LINEAR_RIDGE_LAMBDA
+
+
+def test_solarblue_cache_fingerprint_tracks_implementation(tmp_path, monkeypatch):
+    import numpy as np
+    monkeypatch.setattr(dp, "file_sha256", lambda p: str(p))
+    before = dp._compact_run_provenance(tmp_path / "stack.fits", np.arange(10.),
+        dp.PALACECORR_SOLARBLUE_FIT_MODEL, tmp_path, {})
+    assert "solar_lsf.py" in before["source_sha256"]
+    monkeypatch.setattr(dp, "file_sha256", lambda p: "changed" if str(p).endswith("solar_lsf.py") else str(p))
+    after = dp._compact_run_provenance(tmp_path / "stack.fits", np.arange(10.),
+        dp.PALACECORR_SOLARBLUE_FIT_MODEL, tmp_path, {})
+    assert before["run_fingerprint"] != after["run_fingerprint"]
