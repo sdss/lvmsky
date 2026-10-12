@@ -9,6 +9,7 @@ normalized, and single-peaked at the central tap.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from copy import deepcopy
 import hashlib
 import time
 import tracemalloc
@@ -1727,6 +1728,8 @@ class SkyDecompLSFSurfaceIterative(SkyDecomp):
             self.matrix_o2,
             matrix_zodi=self.matrix_zodi if split_zodi else None,
         )
+        if getattr(self, '_fixed_lsf_state', None) is not None:
+            matrices = self._assemble_refined_matrices()
         full_keys = (("oh", "moon", "zodi", "diffuse", "atom", "orc", "o2")
                      if split_zodi else ("oh", "moon", "diffuse", "atom", "orc", "o2"))
         full_design = self._stack_matrices(matrices, full_keys)
@@ -1781,7 +1784,7 @@ class SkyDecompLSFSurfaceIterative(SkyDecomp):
             channel_noise={channel: np.nan for channel, _, _ in LSF_CHANNELS},
             metrics=[
                 self._metric(
-                    "00_nominal_joint_seed",
+                    "00_fixed_lsf_joint_seed" if getattr(self, '_fixed_lsf_state', None) is not None else "00_nominal_joint_seed",
                     seed_status,
                     flux,
                     continuum + line_model,
@@ -1835,12 +1838,15 @@ class SkyDecompLSFSurfaceIterative(SkyDecomp):
                     ),
                 )
             )
-            state = self._fit_lsf_channels(
-                flux,
-                ivar,
-                self._line_source(run.line_coefficient),
-                candidate_continuum,
-            )
+            if getattr(self, '_fixed_lsf_state', None) is not None:
+                state = self.lsf_surface_state
+            else:
+                state = self._fit_lsf_channels(
+                    flux,
+                    ivar,
+                    self._line_source(run.line_coefficient),
+                    candidate_continuum,
+                )
             matrices = self._assemble_refined_matrices()
             line_design = self._stack_matrices(matrices, self._LINE_KEYS)
             line_fit = self._fit_design(
@@ -1878,7 +1884,7 @@ class SkyDecompLSFSurfaceIterative(SkyDecomp):
             )
             run.metrics.append(
                 self._metric(
-                    f"{cycle:02d}_lsf_lines",
+                        f"{cycle:02d}_{'fixed_lsf' if getattr(self, '_fixed_lsf_state', None) is not None else 'lsf'}_lines",
                     line_status,
                     flux,
                     candidate_continuum + candidate_line_model,
@@ -2066,7 +2072,9 @@ class SkyDecompLSFSurfaceIterative(SkyDecomp):
             else np.nan
         )
         elapsed = time.perf_counter() - started
-        peak_memory_mb = tracemalloc.get_traced_memory()[1] / 1024**2
+        peak_memory_mb = (
+            tracemalloc.get_traced_memory()[1] / 1024**2
+            if getattr(self, "_measure_peak_memory", True) else np.nan)
         if trace_started:
             tracemalloc.stop()
 
@@ -2237,24 +2245,36 @@ class SkyDecompLSFSurfaceIterative(SkyDecomp):
         ivar: np.ndarray,
         *,
         verbose: bool = False,
+        fixed_lsf_state: LSFSurfaceState | None = None,
     ) -> LSFSurfaceIterativeResult:
-        """Run the approved continuum -> LSF -> lines refinement sequence."""
+        """Refine all spectral components; optionally keep a supplied LSF fixed."""
         flux = np.asarray(flux, dtype=float)
         ivar = np.asarray(ivar, dtype=float)
         if flux.shape != self.wave.shape or ivar.shape != self.wave.shape:
             raise ValueError("flux and ivar must match wave")
+        if fixed_lsf_state is not None:
+            fingerprint = _wave_fingerprint(self.wave)
+            if fingerprint != (fixed_lsf_state.wave_n, fixed_lsf_state.wave_min,
+                               fixed_lsf_state.wave_max, fixed_lsf_state.wave_sha256):
+                raise ValueError('Fixed LSF wavelength grid differs from target grid')
+            if getattr(self, 'offset_half_width_angstrom', None) != fixed_lsf_state.config.get('offset_half_width_angstrom', 3.0):
+                raise ValueError('Fixed LSF offset support differs from the decomposer')
+        self._fixed_lsf_state = deepcopy(fixed_lsf_state)
 
         trace_started = False
-        if not tracemalloc.is_tracing():
+        if getattr(self, "_measure_peak_memory", True) and not tracemalloc.is_tracing():
             tracemalloc.start()
             trace_started = True
-        tracemalloc.reset_peak()
+        if getattr(self, "_measure_peak_memory", True):
+            tracemalloc.reset_peak()
         started = time.perf_counter()
         self._set_lsf_state(None)
         self._prefit_o2(flux, ivar)
+        if self._fixed_lsf_state is not None:
+            self._set_lsf_state(self._fixed_lsf_state)
         seed, skyline_mask, run = self._run_iterations(flux, ivar)
 
-        return self._finalize_result(
+        result = self._finalize_result(
             run,
             seed,
             flux,
@@ -2264,6 +2284,10 @@ class SkyDecompLSFSurfaceIterative(SkyDecomp):
             trace_started,
             verbose,
         )
+        if self._fixed_lsf_state is not None:
+            result.fit_summary += ' | lsf_mode=fixed_source; lsf_optimization_steps=0'
+            self.fit_summary = result.fit_summary
+        return result
 
 
 __all__ = [

@@ -262,6 +262,8 @@ def evaluate_lsf_density(
 def evaluate_lsf_diagnostics(
     state: LSFSurfaceState,
     wavelength: np.ndarray,
+    *,
+    convergence_only: bool = False,
 ) -> dict[str, np.ndarray]:
     """Return profile moments, peak, literal FWHM and equal-tail light widths.
 
@@ -281,13 +283,19 @@ def evaluate_lsf_diagnostics(
         if np.any(mask):
             masses[mask] = _component_masses(state, channel, wavelength[mask])
     centroid = masses @ centers
-    sigma = np.sqrt(np.maximum(masses @ (centers**2 + variance) - centroid**2, 0.0))
     delta = np.linspace(-half_width, half_width, 1201)
-    density = masses @ mspline_basis(delta, n_basis=count, half_width=half_width).T
     cdf = masses @ mspline_bin_integrals(np.full(delta.shape, -half_width), delta, n_basis=count, half_width=half_width).T
     quantiles = np.array([np.interp([0.05, 0.25, 0.5, 0.75, 0.95], row, delta) for row in cdf])
     w50 = quantiles[:, 3] - quantiles[:, 1]
     w90 = quantiles[:, 4] - quantiles[:, 0]
+    if convergence_only:
+        return {
+            "centroid_angstrom": centroid,
+            "w50_angstrom": w50,
+            "w90_angstrom": w90,
+        }
+    sigma = np.sqrt(np.maximum(masses @ (centers**2 + variance) - centroid**2, 0.0))
+    density = masses @ mspline_basis(delta, n_basis=count, half_width=half_width).T
     fwhm = np.full(wavelength.size, np.nan)
     for index, profile in enumerate(density):
         peak = int(np.argmax(profile))

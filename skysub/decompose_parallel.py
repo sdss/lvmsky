@@ -90,6 +90,8 @@ _WORKER_DECOMPOSER = None
 _WORKER_FACTOR = 1.0
 _WORKER_HDU = None
 _WORKER_FLUX = {}
+_WORKER_INPUT_IVAR = {}
+_WORKER_INPUT_MASK = {}
 _WORKER_LSF = {}
 _WORKER_META = None
 _WORKER_PROGRESS_QUEUE = None
@@ -895,6 +897,7 @@ def init_worker(
     diffuse_oh_bound_dex=SPLIT_ZODI_DIFFUSE_OH_BOUND_DEX,
     compact_cache_dir=None,
     run_fingerprint=None,
+    kinds=("sci", "sky1", "sky2"),
 ):
     """Initialise one SkyDecomp instance per worker process."""
     global \
@@ -902,6 +905,8 @@ def init_worker(
         _WORKER_FACTOR, \
         _WORKER_HDU, \
         _WORKER_FLUX, \
+        _WORKER_INPUT_IVAR, \
+        _WORKER_INPUT_MASK, \
         _WORKER_LSF, \
         _WORKER_META, \
         _WORKER_PROGRESS_QUEUE, \
@@ -956,10 +961,18 @@ def init_worker(
     _WORKER_HDU = (data_file if isinstance(data_file, fits.HDUList)
                    else fits.open(data_file, memmap=True))
     _WORKER_PROGRESS_QUEUE = progress_queue
+    extension = {"sci": "SCI", "sky1": "SKY_NEAR", "sky2": "SKY_FAR"}
     _WORKER_FLUX = {
-        "sci": np.asarray(_WORKER_HDU["FLUX_SCI"].data),
-        "sky1": np.asarray(_WORKER_HDU["FLUX_SKY_NEAR"].data),
-        "sky2": np.asarray(_WORKER_HDU["FLUX_SKY_FAR"].data),
+        kind: np.asarray(_WORKER_HDU[f"FLUX_{extension[kind]}"].data)
+        for kind in kinds
+    }
+    _WORKER_INPUT_IVAR = {
+        kind: np.asarray(_WORKER_HDU[f"IVAR_{extension[kind]}"].data)
+        for kind in kinds if f"IVAR_{extension[kind]}" in _WORKER_HDU
+    }
+    _WORKER_INPUT_MASK = {
+        kind: np.asarray(_WORKER_HDU[f"MASK_{extension[kind]}"].data)
+        for kind in kinds if f"MASK_{extension[kind]}" in _WORKER_HDU
     }
     # split-zodi needs the same LSF + META as the model-based mode: its
     # amplitude priors are geometry predictions, one per spectrum.
@@ -969,9 +982,8 @@ def init_worker(
         *TELLURIC_FIT_MODELS,
     ):
         _WORKER_LSF = {
-            "sci": np.asarray(_WORKER_HDU["LSF_SCI"].data),
-            "sky1": np.asarray(_WORKER_HDU["LSF_SKY_NEAR"].data),
-            "sky2": np.asarray(_WORKER_HDU["LSF_SKY_FAR"].data),
+            kind: np.asarray(_WORKER_HDU[f"LSF_{extension[kind]}"].data)
+            for kind in kinds
         }
         _WORKER_META = _WORKER_HDU["META"].data
     else:
@@ -1177,7 +1189,10 @@ def init_worker(
         None if fit_pixel_weight_clip is None else float(fit_pixel_weight_clip)
     )
     _WORKER_SENS_ABS = None
-    if _WORKER_FIT_PIXEL_WEIGHTS:
+    if _WORKER_INPUT_IVAR and all(kind in _WORKER_INPUT_IVAR for kind in kinds):
+        if worker_rank == 0:
+            print('[fit weights] using input IVAR and MASK', flush=True)
+    elif _WORKER_FIT_PIXEL_WEIGHTS:
         from skysub.sky_decomp.pixel_weights import absolute_sensitivity
         try:
             _WORKER_SENS_ABS = absolute_sensitivity(
@@ -1268,15 +1283,31 @@ def _text_value(value):
     return value.decode().strip() if isinstance(value, bytes) else str(value).strip()
 
 
+def _row_role(kind, row_index):
+    """Return the physical pointing represented by one input spectrum."""
+    if kind != "sci":
+        return {
+            "sky1": ("sky_near", "sky_near_ra", "sky_near_dec", "sky_near"),
+            "sky2": ("sky_far", "sky_far_ra", "sky_far_dec", "sky_far"),
+        }[kind]
+    row = _WORKER_META[row_index]
+    names = set(_WORKER_META.dtype.names or ())
+    telescope = _text_value(row["telescope"]) if "telescope" in names else "Sci"
+    if telescope == "Sci":
+        return "sci", "sci_ra", "sci_dec", "sci"
+    if telescope not in ("SkyE", "SkyW"):
+        raise ValueError(f"Unsupported fiber telescope: {telescope!r}")
+    label = telescope.lower()
+    near = _text_value(row["sky_near_label"]).lower()
+    role = "sky_near" if label == near else "sky_far"
+    prefix = "skye" if telescope == "SkyE" else "skyw"
+    return role, f"{prefix}_ra", f"{prefix}_dec", prefix
+
+
 def _moon_zodi_observation(kind, row_index):
     from skysub.sky_decomp.moon_zodi_model import MoonZodiObservation
 
-    role_contract = {
-        "sci": ("sci", "sci_ra", "sci_dec"),
-        "sky1": ("sky_near", "sky_near_ra", "sky_near_dec"),
-        "sky2": ("sky_far", "sky_far_ra", "sky_far_dec"),
-    }
-    role, ra_column, dec_column = role_contract[kind]
+    role, ra_column, dec_column, _ = _row_role(kind, row_index)
     row = _WORKER_META[row_index]
     names = set(_WORKER_META.dtype.names or ())
     exposure = None
@@ -1333,15 +1364,8 @@ def _telluric_decomposer(kind, row_index, *, schema_only=False):
             )
             _PWV_FALLBACK_REPORTED = True
     sci_airmass = float(row["sci_airmass"])
-    if kind == "sci":
-        source_airmass = sci_airmass
-    else:
-        label_column = "sky_near_label" if kind == "sky1" else "sky_far_label"
-        label = _text_value(row[label_column]).lower()
-        airmass_column = {"skye": "skye_airmass", "skyw": "skyw_airmass"}.get(label)
-        if airmass_column is None:
-            raise ValueError(f"Unknown {label_column} value: {label!r}")
-        source_airmass = float(row[airmass_column])
+    _, _, _, pointing = _row_role(kind, row_index)
+    source_airmass = float(row[f"{pointing}_airmass"])
     invalid_airmass = not all(
         np.isfinite(value) and value > 0.0
         for value in (sci_airmass, source_airmass)
@@ -1875,6 +1899,9 @@ def _science_line_mask_for_row(row_index):
     """
     if _WORKER_SCIENCE_LINE_MASK is None:
         return None
+    names = set(_WORKER_META.dtype.names or ())
+    if "telescope" in names and _text_value(_WORKER_META[row_index]["telescope"]) != "Sci":
+        return np.zeros_like(_WORKER_SCIENCE_LINE_MASK, dtype=bool)
     if not _WORKER_SCIENCE_LINE_CENTRE:
         return _WORKER_SCIENCE_LINE_MASK
     sci = _WORKER_FLUX.get("sci")
@@ -1904,6 +1931,13 @@ def _fit_ivar_row(kind, idx, flux_row):
     The all-ones fallback reproduces the historical behaviour exactly, so the
     flag is the only thing that changes a fit.
     """
+    if kind in _WORKER_INPUT_IVAR:
+        ivar = np.asarray(_WORKER_INPUT_IVAR[kind][idx], dtype=np.float64)
+        ivar = ivar / _WORKER_FACTOR**2
+        good = np.isfinite(flux_row) & np.isfinite(ivar) & (ivar > 0.0)
+        if kind in _WORKER_INPUT_MASK:
+            good &= np.asarray(_WORKER_INPUT_MASK[kind][idx]) == 0
+        return np.where(good, ivar, 0.0)
     if not _WORKER_FIT_PIXEL_WEIGHTS or _WORKER_SENS_ABS is None:
         return np.ones_like(flux_row)
     from skysub.sky_decomp.pixel_weights import pixel_ivar
@@ -2090,7 +2124,7 @@ def _reliability_flags(result, retried=False, retry_bound=float("nan"),
     }
 
 
-def _fit_split_zodi_with_reversal_retry(decomposer, flux_row, ivar_row):
+def _fit_split_zodi_with_reversal_retry(decomposer, flux_row, ivar_row, fixed_lsf_state=None):
     """Fit; if the moon/zodi roles came out swapped, refit once tighter.
 
     Returns ``(result, retried, retry_bound, was_reversed)``.  The bounds are
@@ -2101,7 +2135,8 @@ def _fit_split_zodi_with_reversal_retry(decomposer, flux_row, ivar_row):
     """
     from skysub.sky_decomp import reliability as rel
 
-    result = decomposer.fit(flux_row, ivar_row, verbose=False)
+    fit_options = {} if fixed_lsf_state is None else {'fixed_lsf_state': fixed_lsf_state}
+    result = decomposer.fit(flux_row, ivar_row, verbose=False, **fit_options)
     if _WORKER_REVERSAL_RETRY_BOUND is None:
         return result, False, float("nan"), False
     if str(getattr(result, "fit_status", "")) != "Solved":
@@ -2118,7 +2153,7 @@ def _fit_split_zodi_with_reversal_retry(decomposer, flux_row, ivar_row):
     try:
         decomposer.moon_ratio_bound = bound
         decomposer.zodi_ratio_bound = bound
-        retry = decomposer.fit(flux_row, ivar_row, verbose=False)
+        retry = decomposer.fit(flux_row, ivar_row, verbose=False, **fit_options)
     finally:
         if saved[0] is not None:
             decomposer.moon_ratio_bound = saved[0]
@@ -2131,7 +2166,7 @@ def _fit_split_zodi_with_reversal_retry(decomposer, flux_row, ivar_row):
     return retry, True, bound, True
 
 
-def _fit_worker_row(kind, idx, flux_row, ivar_row):
+def _fit_worker_row(kind, idx, flux_row, ivar_row, fixed_lsf_state=None):
     """Fit one row.  Returns ``(result, reliability_columns)``."""
     if _WORKER_SCIENCE_LINE_MASK is not None:
         ivar_row[_science_line_mask_for_row(idx)] = 0.0
@@ -2181,11 +2216,12 @@ def _fit_worker_row(kind, idx, flux_row, ivar_row):
             schema = _telluric_decomposer(kind, idx, schema_only=True)
             result = schema.failed_input_result(str(error))
             return result, _reliability_flags(result, row_index=idx)
+        decomposer._measure_peak_memory = _WORKER_COMPACT_CACHE_DIR is None
         if _WORKER_FIT_MODEL in SPLIT_ZODI_TELLURIC_FIT_MODELS:
             _install_split_zodi_amplitude_prior(decomposer, kind, idx)
             result, retried, bound, was_reversed = (
                 _fit_split_zodi_with_reversal_retry(
-                    decomposer, flux_row, ivar_row))
+                    decomposer, flux_row, ivar_row, fixed_lsf_state=fixed_lsf_state))
             return result, _reliability_flags(
                 result, retried, bound, was_reversed,
                 decomposer=decomposer, ivar=ivar_row, row_index=idx)
@@ -2293,8 +2329,8 @@ def resolve_runtime_data_roots(
     return resolve_base_dir(palace_dir), None
 
 
-def _iter_chunk_tasks(n_rows, chunk_size):
-    for kind in ("sci", "sky1", "sky2"):
+def _iter_chunk_tasks(n_rows, chunk_size, kinds=("sci", "sky1", "sky2")):
+    for kind in kinds:
         for i0 in range(0, n_rows, chunk_size):
             i1 = min(i0 + chunk_size, n_rows)
             # Sending only index ranges keeps per-task IPC tiny.
@@ -2339,7 +2375,7 @@ def _worker_initargs(
     moon_smooth_lambda, mask_science_lines, centre_on_halpha, fit_pixel_weights,
     fit_pixel_weight_clip, reversal_retry_bound, diffuse_ratio_bound_dex,
     diffuse_ratio_nominal, diffuse_oh_centre_log10, diffuse_oh_bound_dex,
-    compact_cache_root, run_fingerprint,
+    compact_cache_root, run_fingerprint, kinds=("sci", "sky1", "sky2"),
 ):
     """The positional `init_worker` arguments of a run -- one definition.
 
@@ -2379,6 +2415,7 @@ def _worker_initargs(
         float(diffuse_oh_bound_dex),
         None if compact_cache_root is None else str(compact_cache_root),
         run_fingerprint,
+        tuple(kinds),
     )
 
 
@@ -2417,7 +2454,12 @@ def run(
         SPLIT_ZODI_REVERSAL_RETRY_BOUND if SPLIT_ZODI_REVERSAL_RETRY else None
     ),
     compact_only=False,
+    kinds=("sci", "sky1", "sky2"),
+    start_method="spawn",
 ):
+    kinds = tuple(kinds)
+    if not kinds or not set(kinds) <= {"sci", "sky1", "sky2"}:
+        raise ValueError(f"Unsupported decomposition kinds: {kinds}")
     palace_oh_suffix = _resolved_palace_oh_suffix(fit_model, palace_oh_suffix)
     base_dir, resolved_moon_zodi_data_root = resolve_runtime_data_roots(
         fit_model,
@@ -2455,6 +2497,7 @@ def run(
             "palace_suffix": palace_suffix,
             "palace_oh_suffix": palace_oh_suffix,
             "palace_diffuse_suffix": palace_diffuse_suffix,
+            "kinds": kinds,
             # A resumed run must not mix rows anchored to different zodi models.
             "zodi_correction": SPLIT_ZODI_ZODI_CORRECTION,
         }
@@ -2477,6 +2520,7 @@ def run(
         print(f"  {n_rows} spectra, {len(wave)} wavelength pixels")
     print(f"  n_workers={n_workers}, lsf_sigma={lsf_sigma}, factor={factor}")
     print(f"  chunk_size={chunk_size}, max_in_flight={max_in_flight}")
+    print(f"  start_method={start_method}")
     print(f"  fit_model={fit_model}, n_refinement_cycles={n_refinement_cycles}")
     print(f"  palace_suffix={palace_suffix!r}")
     print(f"  palace_oh_suffix={palace_oh_suffix!r}")
@@ -2500,16 +2544,41 @@ def run(
     print(f"  pin_workers={pin_workers}, diagnose_threads={diagnose_threads}")
     print(f"  base_dir={base_dir}")
 
+    if start_method == "fork" and fit_model == PALACECORR_SOLARBLUE_FIT_MODEL:
+        from skysub.sky_decomp.fit import LSF_CHANNELS
+        from skysub.sky_decomp.lsf_surface_iterative import (
+            LSFChannelSplineConfig,
+            _channel_mask,
+            _configured_knot_vector,
+        )
+        from skysub.sky_decomp.solar_lsf import solar_lsf_tensor
+
+        blue = _channel_mask(wave, *LSF_CHANNELS[0][1:])
+        spline = LSFChannelSplineConfig(
+            n_basis=4, degree=3, knot_strategy="uniform")
+        knots = _configured_knot_vector(np.asarray(wave)[blue], spline)
+        started = time.perf_counter()
+        solar_lsf_tensor(
+            wave,
+            knots,
+            spline.degree,
+            Path(base_dir) / "Spectre_HR_LATMOS_Meftah_V1_350_1000nm.txt",
+            offset_basis_count=11,
+            offset_half_width_angstrom=2.5,
+        )
+        print(f"  prewarmed shared SolarBlue tensor in {time.perf_counter() - started:.1f}s")
+
     primary_meta = _fit_model_primary_meta(fit_model, palace_oh_suffix)
-    n_tasks = int(np.ceil(n_rows / chunk_size)) * 3
-    results = {kind: [None] * n_rows for kind in ("sci", "sky1", "sky2")}
-    reliability = {kind: [None] * n_rows for kind in ("sci", "sky1", "sky2")}
+    n_tasks = int(np.ceil(n_rows / chunk_size)) * len(kinds)
+    results = {kind: [None] * n_rows for kind in kinds}
+    reliability = {kind: [None] * n_rows for kind in kinds}
     completed = 0
 
     t0 = time.perf_counter()
 
-    # spawn everywhere: `fork` inherits parent BLAS pools and undermines thread limits.
-    mp_context = mp.get_context("spawn")
+    # The parent is single-threaded here; workers immediately re-apply native
+    # thread limits in init_worker. Fork avoids re-importing the heavy stack.
+    mp_context = mp.get_context(start_method)
     progress_queue = mp_context.Queue()
     worker_counter = mp_context.Value("i", 0)
 
@@ -2552,10 +2621,11 @@ def run(
             diffuse_oh_bound_dex=diffuse_oh_bound_dex,
             compact_cache_root=compact_cache_root,
             run_fingerprint=run_fingerprint,
+            kinds=kinds,
         ),
     ) as executor:
         pbar = tqdm(
-            total=3 * n_rows,
+            total=len(kinds) * n_rows,
             desc="decomp",
             unit=" decomp",
             mininterval=0.2,
@@ -2565,7 +2635,7 @@ def run(
         pbar.set_postfix(chunks=f"0/{n_tasks}")
         pbar.refresh()
 
-        task_iter = iter(_iter_chunk_tasks(n_rows, chunk_size))
+        task_iter = iter(_iter_chunk_tasks(n_rows, chunk_size, kinds))
         pending = set()
 
         def _submit_until_full():
@@ -2600,7 +2670,7 @@ def run(
 
     stem = Path(data_file).stem
     suffix = FIT_MODEL_SUFFIXES[fit_model]
-    for kind in ("sci", "sky1", "sky2"):
+    for kind in kinds:
         if compact_only:
             _write_compact_fits(
                 compact_cache_root,
@@ -3134,6 +3204,19 @@ def build_arg_parser():
             "NaN coefficients and an explicit error status."
         ),
     )
+    parser.add_argument(
+        "--kinds",
+        nargs="+",
+        choices=("sci", "sky1", "sky2"),
+        default=("sci", "sky1", "sky2"),
+        help="Spectrum roles to fit (default: all three; individual-fiber corpora use sci).",
+    )
+    parser.add_argument(
+        "--start-method",
+        choices=("fork", "forkserver", "spawn"),
+        default="spawn",
+        help="Worker start method (default: spawn).",
+    )
     return parser
 
 
@@ -3177,11 +3260,13 @@ def _run_kwargs_from_args(args):
             None if args.no_reversal_retry else args.reversal_retry_bound
         ),
         compact_only=args.compact_only,
+        kinds=tuple(args.kinds),
+        start_method=args.start_method,
     )
 
 
 def decompose_in_process(data_file, rows=(0,), kinds=("sci", "sky1", "sky2"),
-                         argv=()):
+                         argv=(), fixed_lsf_state=None):
     """Decompose rows of a stack in THIS process, exactly as a CLI run would.
 
     ``argv`` are extra command-line options; with none, every setting is the
@@ -3206,6 +3291,8 @@ def decompose_in_process(data_file, rows=(0,), kinds=("sci", "sky1", "sky2"),
         ["<in-memory stack>" if in_memory else str(data_file), *map(str, argv)])
     kw = _run_kwargs_from_args(args)
     fit_model = kw["fit_model"]
+    if fixed_lsf_state is not None and fit_model != PALACECORR_SOLARBLUE_FIT_MODEL:
+        raise ValueError('Fixed-source LSF currently requires the SolarBlue fit model')
     palace_oh_suffix = _resolved_palace_oh_suffix(fit_model, kw["palace_oh_suffix"])
     base_dir, moon_zodi_root = resolve_runtime_data_roots(
         fit_model, palace_dir=kw["palace_dir"],
@@ -3234,14 +3321,15 @@ def decompose_in_process(data_file, rows=(0,), kinds=("sci", "sky1", "sky2"),
         diffuse_ratio_nominal=kw["diffuse_ratio_nominal"],
         diffuse_oh_centre_log10=kw["diffuse_oh_centre_log10"],
         diffuse_oh_bound_dex=kw["diffuse_oh_bound_dex"],
-        compact_cache_root=None, run_fingerprint=None))
+        compact_cache_root=None, run_fingerprint=None, kinds=kinds))
     # init_worker clamps native threads for pool workers; that is harmless here.
     out = {}
     for kind in kinds:
         for idx in rows:
             flux_row = np.asarray(_WORKER_FLUX[kind][int(idx)], dtype=np.float64) * _WORKER_FACTOR
             out[(kind, int(idx))] = _fit_worker_row(
-                kind, int(idx), flux_row, _fit_ivar_row(kind, int(idx), flux_row))
+                kind, int(idx), flux_row, _fit_ivar_row(kind, int(idx), flux_row),
+                fixed_lsf_state=fixed_lsf_state)
     return out
 
 
@@ -3261,6 +3349,8 @@ def main():
         raise ValueError("--limit must be >= 1")
     if args.only_thin and args.compact_only:
         raise ValueError("--only-thin and --compact-only are mutually exclusive")
+    if tuple(args.kinds) != ("sci", "sky1", "sky2") and not args.compact_only:
+        raise ValueError("--kinds requires --compact-only")
     if args.compact_only and args.fit_model not in TELLURIC_FIT_MODELS:
         raise ValueError("--compact-only currently requires a telluric fit model")
     if not np.isfinite(args.exposure_seconds) or args.exposure_seconds <= 0.0:

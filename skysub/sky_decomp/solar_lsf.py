@@ -192,7 +192,8 @@ class SkyDecompPalaceCorrSolarBlueLSF(SkyDecompPalaceCorrAijcVNFSplitZodiLSFSpli
         run.weights, run.channel_noise, run.solver_status = weights, noise, run.line_status
         valid = np.isfinite(flux) & np.isfinite(ivar) & (ivar > 0)
         chi2 = float(np.sum((flux[valid] - continuum[valid] - run.line_model[valid]) ** 2 * ivar[valid]))
-        current = evaluate_lsf_diagnostics(self.lsf_surface_state, self.wave)
+        current = evaluate_lsf_diagnostics(
+            self.lsf_surface_state, self.wave, convergence_only=True)
         previous = self._previous_lsf_diagnostics
         changes, centroid_changes = {}, {}
         for channel, lower, upper in LSF_CHANNELS:

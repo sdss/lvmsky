@@ -93,6 +93,21 @@ def test_profile_light_widths_and_asymmetry():
     np.testing.assert_allclose(metric["w90_angstrom"], q[3]-q[0], atol=5e-5)
 
 
+def test_convergence_diagnostics_match_full_diagnostics():
+    wave = np.array([4000., 4200.])
+    knots = _uniform_knots(wave)
+    coefficient = np.zeros((11, 4))
+    coefficient[5] = 1.0
+    state = SimpleNamespace(
+        coefficients={"B": coefficient}, knot_vectors={"B": knots},
+        degrees={"B": 3})
+    full = evaluate_lsf_diagnostics(state, wave)
+    convergence = evaluate_lsf_diagnostics(state, wave, convergence_only=True)
+    assert set(convergence) == {"centroid_angstrom", "w50_angstrom", "w90_angstrom"}
+    for name, values in convergence.items():
+        np.testing.assert_array_equal(values, full[name])
+
+
 def test_offset_only_penalty_reduces_coefficient_curvature():
     rng = np.random.default_rng(27)
     wave = np.linspace(4000., 4100., 500)
@@ -312,6 +327,18 @@ def test_integration_smoke_fits_one_spectrum(tmp_path, monkeypatch):
     assert "convergence=converged" in result.fit_summary
     np.testing.assert_allclose(sum(result.components[k] for k in
         ("moon", "zodi", "diffuse", "oh", "atom", "orc", "o2")), result.bestfit_lsf, atol=1e-12)
+    source_coefficients={k:v.copy() for k,v in state.coefficients.items()}
+    def forbidden_lsf_fit(*args,**kwargs):
+        raise AssertionError('Fixed-LSF decomposition must never optimize LSF')
+    monkeypatch.setattr(model,'_fit_lsf_channels',forbidden_lsf_fit)
+    transferred=model.fit(np.asarray(data['flux'])*1.07,np.asarray(data['ivar']),fixed_lsf_state=state)
+    assert transferred.fit_status in model._SOLVED
+    assert 'lsf_optimization_steps=0' in transferred.fit_summary
+    assert all('lsf_status' not in m or 'fixed_lsf_lines' in m['stage'] for m in model.stage_metrics)
+    for channel in ('B','R','Z'):
+        np.testing.assert_array_equal(transferred.lsf_state.coefficients[channel],source_coefficients[channel])
+        np.testing.assert_array_equal(state.coefficients[channel],source_coefficients[channel])
+    assert not np.array_equal(transferred.coef,result.coef)
 
 
 @pytest.mark.parametrize("value", [0.0, -0.01, np.nan])

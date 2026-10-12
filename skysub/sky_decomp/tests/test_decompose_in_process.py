@@ -44,6 +44,34 @@ def test_parser_defaults_are_the_deployed_configuration():
     assert kw["diffuse_ratio_nominal"] == tuple(float(v) for v in dp.SPLIT_ZODI_DIFFUSE_RATIO_NOMINAL)
 
 
+def test_individual_fiber_cli_and_input_pixel_weights(monkeypatch):
+    import numpy as np
+
+    args = dp.build_arg_parser().parse_args(
+        ["stack.fits", "--compact-only", "--kinds", "sci"])
+    assert dp._run_kwargs_from_args(args)["kinds"] == ("sci",)
+    monkeypatch.setattr(dp, "_WORKER_INPUT_IVAR", {"sci": np.array([[4.0, 9.0, np.nan]])})
+    monkeypatch.setattr(dp, "_WORKER_INPUT_MASK", {"sci": np.array([[0, 1, 0]])})
+    monkeypatch.setattr(dp, "_WORKER_FACTOR", 2.0)
+    got = dp._fit_ivar_row("sci", 0, np.array([1.0, 1.0, 1.0]))
+    assert np.array_equal(got, [1.0, 0.0, 0.0])
+
+
+def test_mixed_individual_fibers_use_their_physical_pointings(monkeypatch):
+    import numpy as np
+
+    dtype = [(name, "U16") for name in
+             ("telescope", "sky_near_label")]
+    meta = np.array([("Sci", "SkyE"), ("SkyE", "SkyE"),
+                     ("SkyW", "SkyE")], dtype=dtype)
+    monkeypatch.setattr(dp, "_WORKER_META", meta)
+    assert dp._row_role("sci", 0) == ("sci", "sci_ra", "sci_dec", "sci")
+    assert dp._row_role("sci", 1) == ("sky_near", "skye_ra", "skye_dec", "skye")
+    assert dp._row_role("sci", 2) == ("sky_far", "skyw_ra", "skyw_dec", "skyw")
+    monkeypatch.setattr(dp, "_WORKER_SCIENCE_LINE_MASK", np.array([True, False]))
+    assert not dp._science_line_mask_for_row(1).any()
+
+
 def test_an_in_memory_stack_is_passed_through_unchanged():
     from astropy.io import fits
     hdul = fits.HDUList([fits.PrimaryHDU()])
