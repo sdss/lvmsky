@@ -1728,7 +1728,8 @@ class SkyDecompLSFSurfaceIterative(SkyDecomp):
             self.matrix_o2,
             matrix_zodi=self.matrix_zodi if split_zodi else None,
         )
-        if getattr(self, '_fixed_lsf_state', None) is not None:
+        if self.lsf_surface_state is not None:
+            # A fixed or initial LSF state renders the seed solve as well.
             matrices = self._assemble_refined_matrices()
         full_keys = (("oh", "moon", "zodi", "diffuse", "atom", "orc", "o2")
                      if split_zodi else ("oh", "moon", "diffuse", "atom", "orc", "o2"))
@@ -1784,7 +1785,9 @@ class SkyDecompLSFSurfaceIterative(SkyDecomp):
             channel_noise={channel: np.nan for channel, _, _ in LSF_CHANNELS},
             metrics=[
                 self._metric(
-                    "00_fixed_lsf_joint_seed" if getattr(self, '_fixed_lsf_state', None) is not None else "00_nominal_joint_seed",
+                    "00_fixed_lsf_joint_seed" if getattr(self, '_fixed_lsf_state', None) is not None
+                    else "00_initial_lsf_joint_seed" if self.lsf_surface_state is not None
+                    else "00_nominal_joint_seed",
                     seed_status,
                     flux,
                     continuum + line_model,
@@ -2239,6 +2242,14 @@ class SkyDecompLSFSurfaceIterative(SkyDecomp):
         self.fit_summary = result.fit_summary
         return result
 
+    def _initial_lsf_state(self) -> LSFSurfaceState | None:
+        """LSF the seed solve and the first refinement start from.
+
+        None (the default) starts from the nominal DRP LSF.  Unlike a fixed
+        state, an initial state is refined like any other.
+        """
+        return None
+
     def fit(
         self,
         flux: np.ndarray,
@@ -2272,6 +2283,10 @@ class SkyDecompLSFSurfaceIterative(SkyDecomp):
         self._prefit_o2(flux, ivar)
         if self._fixed_lsf_state is not None:
             self._set_lsf_state(self._fixed_lsf_state)
+        else:
+            initial = self._initial_lsf_state()
+            if initial is not None:
+                self._set_lsf_state(initial)
         seed, skyline_mask, run = self._run_iterations(flux, ivar)
 
         result = self._finalize_result(

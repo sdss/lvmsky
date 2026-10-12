@@ -543,6 +543,12 @@ class SkyDecompLSFSpline2D(SkyDecompLSFSurfaceIterative):
         """Optional extra (design, restored target) on fit pixels; none by default."""
         return None
 
+    def _held_lsf_channel(
+        self, channel: str
+    ) -> tuple[np.ndarray, np.ndarray, int, dict[str, object]] | None:
+        """Optional (coefficient, knots, degree, metric) that replaces a channel's fit."""
+        return None
+
     def _fit_lsf_channels(
         self,
         flux: np.ndarray,
@@ -562,6 +568,10 @@ class SkyDecompLSFSpline2D(SkyDecompLSFSurfaceIterative):
         coefficients, knots, degrees, metrics = {}, {}, {}, {}
 
         for channel, lower, upper in LSF_CHANNELS:
+            held = self._held_lsf_channel(channel)
+            if held is not None:
+                coefficients[channel], knots[channel], degrees[channel], metrics[channel] = held
+                continue
             channel_mask = _channel_mask(self.wave, lower, upper)
             fit_mask = channel_mask & (
                 (self.wave >= self.config.blue_fit_lower) if channel == "B" else True

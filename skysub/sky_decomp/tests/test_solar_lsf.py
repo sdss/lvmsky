@@ -339,9 +339,90 @@ def test_integration_smoke_fits_one_spectrum(tmp_path, monkeypatch):
         np.testing.assert_array_equal(transferred.lsf_state.coefficients[channel],source_coefficients[channel])
         np.testing.assert_array_equal(state.coefficients[channel],source_coefficients[channel])
     assert not np.array_equal(transferred.coef,result.coef)
+    # --blue-lsf reference: B held at a (different, still convex) reference, r and z refitted.
+    del model._fit_lsf_channels
+    reference = load_lsf_surface_state(output, 0)
+    central = np.zeros_like(reference.coefficients["B"])
+    central[central.shape[0] // 2] = 1.0
+    reference.coefficients["B"] = 0.5 * (reference.coefficients["B"] + central)
+    held_b = reference.coefficients["B"].copy()
+    solar_extra = model._extra_kernel_design
+    def no_solar_blue_fit(channel, *args):
+        assert channel != "B", "a held blue LSF must not be fitted from the solar lines"
+        return solar_extra(channel, *args)
+    monkeypatch.setattr(model, "_extra_kernel_design", no_solar_blue_fit)
+    model.blue_reference_lsf = reference
+    held = model.fit(np.asarray(data["flux"], dtype=float), np.asarray(data["ivar"], dtype=float))
+    model.blue_reference_lsf = None
+    assert held.fit_status in model._SOLVED
+    assert "blue_lsf=fixed_reference" in held.fit_summary
+    assert "rz_lsf_start=reference" in held.fit_summary
+    # The seed solve is rendered with the reference; r and z start from its knots.
+    assert model.stage_metrics[0]["stage"] == "00_initial_lsf_joint_seed"
+    for channel in ("R", "Z"):
+        np.testing.assert_array_equal(held.lsf_state.knot_vectors[channel], reference.knot_vectors[channel])
+        assert held.lsf_state.metrics[channel]["knots_fixed"]
+    np.testing.assert_array_equal(held.lsf_state.coefficients["B"], held_b)
+    assert held.lsf_state.metrics["B"]["model"] == solar_lsf.REFERENCE_BLUE_MODEL
+    for channel in ("R", "Z"):
+        assert held.lsf_state.metrics[channel]["model"] == "tensor_bspline_mspline"
+        assert not np.array_equal(held.lsf_state.coefficients[channel], reference.coefficients[channel])
+    assert not np.array_equal(held.coef, result.coef)
 
 
 @pytest.mark.parametrize("value", [0.0, -0.01, np.nan])
 def test_invalid_convergence_tolerance_is_rejected(value):
     with pytest.raises(ValueError, match="convergence tolerances"):
         solar_lsf.SkyDecompPalaceCorrSolarBlueLSF(np.linspace(3600, 9800, 20), lsf_convergence_rtol=value)
+
+
+def test_telescope_mean_reference_is_the_fiber_mean():
+    from astropy.io import fits
+    from skysub.decompose_parallel import DEFAULT_LSF_CALIBRATION_DIR, SURVEY_LSF_REFERENCE
+    from skysub.sky_decomp.lsf_reference import telescope_mean_reference_lsf, validate_coefficients
+
+    path = DEFAULT_LSF_CALIBRATION_DIR / SURVEY_LSF_REFERENCE
+    if not path.is_file():
+        pytest.skip("lsf_calibration survey reference not available")
+    with fits.open(path) as hdus:
+        table = hdus["REFERENCES"].data
+        telescope = np.char.strip(np.asarray(table["telescope"]).astype(str))
+        channel = np.char.strip(np.asarray(table["channel"]).astype(str))
+        pick = (telescope == "SkyE") & (channel == "B")
+        expected = np.asarray(hdus["LSF_COEF"].data[pick], dtype=float).mean(axis=0)
+        knots = np.asarray(hdus["LSF_KNOTS"].data[pick][0], dtype=float)
+    state = telescope_mean_reference_lsf(path, "SkyE", allow_epoch_pooling=True)
+    np.testing.assert_allclose(state.coefficients["B"], expected, rtol=0, atol=1e-15)
+    np.testing.assert_array_equal(state.knot_vectors["B"], knots)
+    assert state.metrics["B"]["n_fibers"] == int(pick.sum())
+    assert state.config["offset_half_width_angstrom"] == 2.5
+    for coefficient in state.coefficients.values():
+        validate_coefficients(coefficient)
+    with pytest.raises(ValueError):
+        telescope_mean_reference_lsf(path, "SkyE")   # survey pooling needs the explicit opt-in
+
+
+def test_fiber_set_mean_uses_only_referenced_fibers():
+    from astropy.io import fits
+    from skysub.decompose_parallel import DEFAULT_LSF_CALIBRATION_DIR, SURVEY_LSF_REFERENCE
+    from skysub.sky_decomp.lsf_reference import SurveyReferenceSet, validate_coefficients
+
+    path = DEFAULT_LSF_CALIBRATION_DIR / SURVEY_LSF_REFERENCE
+    if not path.is_file():
+        pytest.skip("lsf_calibration survey reference not available")
+    references = SurveyReferenceSet(path, allow_epoch_pooling=True)
+    chosen = references.fiberids[[0, 5, 17]]
+    missing = np.setdiff1d(np.arange(1, 1945), references.fiberids)[:2]
+    state = references.mean(np.r_[chosen, missing], label="test")
+    with fits.open(path) as hdus:
+        table = hdus["REFERENCES"].data
+        channel = np.char.strip(np.asarray(table["channel"]).astype(str))
+        rows = [np.flatnonzero((table["fiberid"] == f) & (channel == "R"))[0] for f in chosen]
+        expected = np.asarray(hdus["LSF_COEF"].data[rows], dtype=float).mean(axis=0)
+    np.testing.assert_allclose(state.coefficients["R"], expected, rtol=0, atol=1e-15)
+    assert state.metrics["R"]["n_fibers"] == 3
+    assert state.metrics["R"]["n_fibers_requested"] == 3 + missing.size
+    for coefficient in state.coefficients.values():
+        validate_coefficients(coefficient)
+    with pytest.raises(ValueError):
+        references.mean(missing)

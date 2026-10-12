@@ -33,6 +33,10 @@ OUTPUT_ARRAYS = (
     "LSF_SKY_NEAR",
     "LSF_SKY_FAR",
 )
+# FIBER_ROLE: per output row, which physical fibers entered each median.
+# Column j is fiberid j + 1, independent of the SLITMAP row order.
+N_FIBERS = 1944
+FIBER_ROLE_CODES = {"unused": 0, "sci": 1, "sky_near": 2, "sky_far": 3}
 FLUX_UNIT = u.erg / (u.Angstrom * u.s * u.cm**2)
 GAIA_VALID_FRACTION_MIN = 0.95
 REFERENCE_WAVE: np.ndarray | None = None
@@ -251,6 +255,21 @@ def _lsf(data: np.ndarray, indices: np.ndarray) -> np.ndarray:
         )
 
 
+def fiber_roles(
+    fiberid: np.ndarray, selected: dict[str, np.ndarray], near: str, far: str
+) -> np.ndarray:
+    """Role code of every physical fiber (`FIBER_ROLE_CODES`), indexed by fiberid - 1."""
+    fiberid = np.asarray(fiberid, dtype=np.int64)
+    if fiberid.size and (fiberid.min() < 1 or fiberid.max() > N_FIBERS):
+        raise ValueError(f"fiberid outside 1..{N_FIBERS}")
+    if len(np.unique(fiberid)) != len(fiberid):
+        raise ValueError("duplicate fiberid in SLITMAP")
+    roles = np.zeros(N_FIBERS, dtype=np.uint8)
+    for role, telescope in (("sci", "Sci"), ("sky_near", near), ("sky_far", far)):
+        roles[fiberid[selected[telescope]] - 1] = FIBER_ROLE_CODES[role]
+    return roles
+
+
 def _coords(header: fits.Header, prefix: str) -> tuple[float, float]:
     choices = {
         "Sci": (("SCIRA", "SCIDEC"), ("POSCIRA", "POSCIDE")),
@@ -365,6 +384,10 @@ def _median_worker(
                 "LSF_SKY_NEAR": _lsf(lsf, selected[near]),
                 "LSF_SKY_FAR": _lsf(lsf, selected[far]),
             }
+            roles = fiber_roles(slitmap["fiberid"], selected, near, far)
+            for role, telescope in (("sci", "Sci"), ("sky_near", near), ("sky_far", far)):
+                if int(np.sum(roles == FIBER_ROLE_CODES[role])) != counts[f"{telescope}_used"]:
+                    raise ValueError(f"FIBER_ROLE {role} count differs from the fibers used")
             meta = median_meta(
                 header=header,
                 path=path,
@@ -380,7 +403,14 @@ def _median_worker(
                 gaia_sigma=gaia_sigma,
                 gaia_ratio_threshold=gaia_ratio_threshold,
             )
-            return {"slot": slot, "status": "OK", "arrays": arrays, "meta": meta, "expnum": expnum}
+            return {
+                "slot": slot,
+                "status": "OK",
+                "arrays": arrays,
+                "fiber_role": roles,
+                "meta": meta,
+                "expnum": expnum,
+            }
     except Exception as exc:  # noqa: BLE001 - record one bad exposure, keep the run alive
         return {
             "slot": slot,
@@ -602,6 +632,8 @@ def build_stack(
     rows_per_input = 1 if mode == "median" else 3 * fibers_per_telescope
     array_count = len(OUTPUT_ARRAYS) if mode == "median" else 2
     bytes_per_copy = len(indexed) * rows_per_input * len(wave) * array_count * 4
+    if mode == "median":
+        bytes_per_copy += len(indexed) * N_FIBERS
     if base == output.parent.resolve():
         _check_space(base, bytes_per_copy * 2)
     else:
@@ -614,6 +646,10 @@ def build_stack(
     try:
         if mode == "median":
             arrays = _memmaps(temporary, OUTPUT_ARRAYS, (len(indexed), len(wave)))
+            roles = np.lib.format.open_memmap(
+                temporary / "fiber_role.npy", mode="w+", dtype=np.uint8,
+                shape=(len(indexed), N_FIBERS),
+            )
             tasks = [
                 (
                     slot,
@@ -659,6 +695,7 @@ def build_stack(
                 if mode == "median":
                     for name in OUTPUT_ARRAYS:
                         arrays[name][slot] = result["arrays"][name]
+                    roles[slot] = result["fiber_role"]
                 else:
                     start = slot * rows_per_input
                     stop = start + rows_per_input
@@ -702,13 +739,20 @@ def build_stack(
                 hdus[0].header["FAINTSKY"] = sky_percentile
             for destination, source in enumerate(good_slots):
                 if destination != source:
-                    for array in arrays.values():
+                    for array in (*arrays.values(), roles):
                         array[destination] = array[source]
             for name in OUTPUT_ARRAYS:
                 hdu = fits.ImageHDU(data=arrays[name][: len(good_slots)], name=name)
                 if name.startswith("FLUX"):
                     hdu.header["BUNIT"] = FLUX_UNIT.to_string()
                 hdus.append(hdu)
+            roles.flush()
+            role_hdu = fits.ImageHDU(data=roles[: len(good_slots)], name="FIBER_ROLE")
+            role_hdu.header["NFIBERS"] = (N_FIBERS, "columns: fiberid 1..NFIBERS")
+            role_hdu.header["FIBAXIS"] = ("fiberid - 1", "column index")
+            for role, code in FIBER_ROLE_CODES.items():
+                role_hdu.header[f"ROLE{code}"] = (role, f"value {code}")
+            hdus.append(role_hdu)
             meta = Table(rows=[meta_chunks[i] for i in good_slots])
         else:
             hdus[0].header["NFIBTEL"] = fibers_per_telescope

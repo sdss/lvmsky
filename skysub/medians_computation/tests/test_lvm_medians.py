@@ -11,6 +11,8 @@ from typer.main import get_command
 from lvm_medians.cli import app
 from lvm_medians.gaia import cache_status, derive_fiber_table, fetch_gaia
 from lvm_medians.stack import (
+    FIBER_ROLE_CODES,
+    N_FIBERS,
     build_stack,
     gaia_clean_mask,
     gaia_ratio_clean_mask,
@@ -120,6 +122,24 @@ def test_build_modes_and_combined_ivar(tmp_path: Path) -> None:
         } <= set(hdul["META"].columns.names)
         assert hdul["INPUT_STATUS"].data[0]["status"] == "OK"
         assert all(hdu.verify_checksum() == 1 for hdu in hdul if "CHECKSUM" in hdu.header)
+        roles = hdul["FIBER_ROLE"].data
+        assert roles.shape == (1, N_FIBERS) and roles.dtype == np.uint8
+        assert hdul["FIBER_ROLE"].header["NFIBERS"] == N_FIBERS
+        # No pointing headers: SkyE is the near arm.  Column j is fiberid j + 1.
+        assert roles[0, :6].tolist() == [1, 1, 2, 2, 3, 3]
+        assert not roles[0, 6:].any()
+        meta = hdul["META"].data[0]
+        for role, column in (("sci", "fibers_sci_used"), ("sky_near", "fibers_sky_near_used"),
+                             ("sky_far", "fibers_sky_far_used")):
+            assert int(np.sum(roles[0] == FIBER_ROLE_CODES[role])) == meta[column]
+
+    faintest = tmp_path / "faintest.fits"
+    result = build_stack(manifest, faintest, workers=1, sci_percentile=50, sky_percentile=50)
+    assert result["complete"]
+    with fits.open(faintest) as hdul:
+        # One fiber per telescope: the faintest, fiberids 1, 3 and 5.
+        assert np.flatnonzero(hdul["FIBER_ROLE"].data[0]).tolist() == [0, 2, 4]
+        assert hdul["FIBER_ROLE"].data[0, [0, 2, 4]].tolist() == [1, 2, 3]
 
     gaia_dir = tmp_path / "gaia"
     gaia_dir.mkdir()
@@ -146,6 +166,7 @@ def test_build_modes_and_combined_ivar(tmp_path: Path) -> None:
     with fits.open(ratio_output) as hdul:
         assert hdul[0].header["GAIATHR"] == 0.1
         assert hdul["META"].data["gaia_ratio_threshold"][0] == 0.1
+        assert hdul["FIBER_ROLE"].data[0, :6].tolist() == [1, 1, 2, 2, 3, 3]
 
     faint = tmp_path / "faint.fits"
     result = build_stack(manifest, faint, mode="faint-fibers", workers=1, fibers_per_telescope=1)

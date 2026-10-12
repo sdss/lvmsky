@@ -110,6 +110,12 @@ _WORKER_FIT_PIXEL_WEIGHT_CLIP = None  # overwritten by init_worker
 _WORKER_SENS_ABS = None  # absolute sensitivity on _WORKER_WAVE, when weighting
 _WORKER_COMPACT_CACHE_DIR = None
 _WORKER_RUN_FINGERPRINT = None
+_WORKER_BLUE_REFERENCE_FILE = None
+_WORKER_BLUE_REFERENCE = {}
+_WORKER_BLUE_REFERENCE_SET = None
+_WORKER_FIBER_ROLE = None
+# FIBER_ROLE values (lvm_medians.stack.FIBER_ROLE_CODES) of each stacked kind.
+FIBER_ROLE_OF_KIND = {"sci": 1, "sky1": 2, "sky2": 3}
 _PWV_FALLBACK_REPORTED = False
 
 # Match lvmdrp.functions.fluxCalMethod.DEFAULT_PWV for invalid or missing PWV_MED.
@@ -238,6 +244,14 @@ PALACECORR_FIT_MODELS = (
     PALACECORR_VNF_SPLIT_ZODI_FIT_MODEL,
     PALACECORR_SOLARBLUE_FIT_MODEL,
 )
+# SolarBlue blue-channel LSF: "solar" fits it from the solar lines in the
+# Moon/Zodi continuum; "reference" holds it at the empirical survey-wide
+# reference of lsf_calibration/ (per fiber for individual-fiber rows, the
+# mean over the telescope's fibers for fiber-stacked rows).  r and z are
+# fitted in situ either way.
+BLUE_LSF_CHOICES = ("solar", "reference")
+DEFAULT_LSF_CALIBRATION_DIR = Path(__file__).resolve().parent / "lsf_calibration"
+SURVEY_LSF_REFERENCE = Path("survey") / "lsf_survey.fits"
 PALACE_VNF_PCA30_SPLIT_ZODI_FIT_MODEL = (
     "palace-aijc-vnf-pca30-split-zodi-lsf-spline2d"
 )
@@ -282,7 +296,8 @@ def _resolved_palace_oh_suffix(fit_model, palace_oh_suffix):
     return SKYFAR_LINEAR_RIDGE_PALACE_OH_SUFFIX
 
 
-def _fit_model_primary_meta(fit_model, palace_oh_suffix):
+def _fit_model_primary_meta(fit_model, palace_oh_suffix, blue_lsf="solar",
+                            lsf_reference_file=None):
     metadata = {
         "DECOMPM": fit_model,
         "ZODICORR": (SPLIT_ZODI_ZODI_CORRECTION, "Leinert zodi correction used by the anchor"),
@@ -291,9 +306,28 @@ def _fit_model_primary_meta(fit_model, palace_oh_suffix):
         metadata["OHFILE"] = f"pmd_popmodel_OH{palace_oh_suffix}.dat"
     if fit_model in PALACECORR_FIT_MODELS:
         metadata["OHRIDGE"] = SKYFAR_LINEAR_RIDGE_LAMBDA
-    if fit_model == PALACECORR_SOLARBLUE_FIT_MODEL:
+    if fit_model == PALACECORR_SOLARBLUE_FIT_MODEL and blue_lsf == "reference":
+        metadata["BLUELSF"] = "survey_reference"
+        metadata["LSFREF"] = (str(lsf_reference_file), "blue LSF reference file")
+        metadata["LSFREFSH"] = (file_sha256(lsf_reference_file), "sha256 of LSFREF")
+    elif fit_model == PALACECORR_SOLARBLUE_FIT_MODEL:
         metadata["BLUELSF"] = "solar_continuum_joint"
     return metadata
+
+
+def _survey_lsf_reference_file(fit_model, blue_lsf, lsf_calibration):
+    """The survey reference file a `--blue-lsf reference` run uses, else None."""
+    if blue_lsf not in BLUE_LSF_CHOICES:
+        raise ValueError(f"blue_lsf must be one of {BLUE_LSF_CHOICES}, got {blue_lsf!r}")
+    if blue_lsf == "solar":
+        return None
+    if fit_model != PALACECORR_SOLARBLUE_FIT_MODEL:
+        raise ValueError(f"--blue-lsf reference requires --fit-model {PALACECORR_SOLARBLUE_FIT_MODEL}")
+    path = Path(DEFAULT_LSF_CALIBRATION_DIR if lsf_calibration is None else lsf_calibration)
+    path = path.expanduser().resolve() / SURVEY_LSF_REFERENCE
+    if not path.is_file():
+        raise FileNotFoundError(f"Survey LSF reference not found: {path}")
+    return path
 
 
 # Defaults for the SkyDecompLSFSurfaceIterative(split_zodi=True) knobs; match the
@@ -898,6 +932,7 @@ def init_worker(
     compact_cache_dir=None,
     run_fingerprint=None,
     kinds=("sci", "sky1", "sky2"),
+    lsf_reference_file=None,
 ):
     """Initialise one SkyDecomp instance per worker process."""
     global \
@@ -925,6 +960,10 @@ def init_worker(
         _WORKER_SENS_ABS, \
         _WORKER_COMPACT_CACHE_DIR, \
         _WORKER_RUN_FINGERPRINT, \
+        _WORKER_BLUE_REFERENCE_FILE, \
+        _WORKER_BLUE_REFERENCE, \
+        _WORKER_BLUE_REFERENCE_SET, \
+        _WORKER_FIBER_ROLE, \
         _PWV_FALLBACK_REPORTED
 
     _clamp_native_threads(1)
@@ -954,12 +993,34 @@ def init_worker(
     _WORKER_DECOMPOSER_KWARGS = {}
     _WORKER_COMPACT_CACHE_DIR = compact_cache_dir
     _WORKER_RUN_FINGERPRINT = run_fingerprint
+    _WORKER_BLUE_REFERENCE_FILE = lsf_reference_file
+    _WORKER_BLUE_REFERENCE = {}
+    _WORKER_BLUE_REFERENCE_SET = None
+    _WORKER_FIBER_ROLE = None
+    if lsf_reference_file is not None:
+        from skysub.sky_decomp.lsf_reference import SurveyReferenceSet
+
+        _WORKER_BLUE_REFERENCE_SET = SurveyReferenceSet(
+            lsf_reference_file, allow_epoch_pooling=True)
+        # Fiber-stacked rows: the mean over the fibers FIBER_ROLE says entered
+        # each median, else over the telescope's fibers; per-fiber on demand.
+        _WORKER_BLUE_REFERENCE = {
+            telescope: _WORKER_BLUE_REFERENCE_SET.telescope_mean(telescope)
+            for telescope in ("Sci", "SkyE", "SkyW")
+        }
     _PWV_FALLBACK_REPORTED = False
     # Keep worker-local memmapped access to flux tables to avoid large IPC payloads.
     # An already-open HDUList (an in-memory stack, see `decompose_in_process`)
     # is used as is.
     _WORKER_HDU = (data_file if isinstance(data_file, fits.HDUList)
                    else fits.open(data_file, memmap=True))
+    if _WORKER_BLUE_REFERENCE_SET is not None:
+        if "FIBER_ROLE" in _WORKER_HDU:
+            _WORKER_FIBER_ROLE = np.asarray(_WORKER_HDU["FIBER_ROLE"].data)
+        if worker_rank == 0:
+            print("[blue lsf] survey reference, "
+                  + ("per-row mean over the FIBER_ROLE fibers" if _WORKER_FIBER_ROLE is not None
+                     else "telescope means (no FIBER_ROLE in the input)"), flush=True)
     _WORKER_PROGRESS_QUEUE = progress_queue
     extension = {"sci": "SCI", "sky1": "SKY_NEAR", "sky2": "SKY_FAR"}
     _WORKER_FLUX = {
@@ -1285,13 +1346,19 @@ def _text_value(value):
 
 def _row_role(kind, row_index):
     """Return the physical pointing represented by one input spectrum."""
-    if kind != "sci":
-        return {
-            "sky1": ("sky_near", "sky_near_ra", "sky_near_dec", "sky_near"),
-            "sky2": ("sky_far", "sky_far_ra", "sky_far_dec", "sky_far"),
-        }[kind]
     row = _WORKER_META[row_index]
     names = set(_WORKER_META.dtype.names or ())
+    if kind != "sci":
+        role = {"sky1": "sky_near", "sky2": "sky_far"}[kind]
+        # The pointing prefix names the telescope (skye/skyw) the arm was
+        # stacked from: META carries skye_airmass/skyw_airmass, not per-arm
+        # ones.  Only the telluric fit needs it (and requires the label column).
+        if f"{role}_label" not in names:
+            return role, f"{role}_ra", f"{role}_dec", None
+        label = _text_value(row[f"{role}_label"]).lower()
+        if label not in ("skye", "skyw"):
+            raise ValueError(f"Unknown {role}_label value: {label!r}")
+        return role, f"{role}_ra", f"{role}_dec", label
     telescope = _text_value(row["telescope"]) if "telescope" in names else "Sci"
     if telescope == "Sci":
         return "sci", "sci_ra", "sci_dec", "sci"
@@ -2166,6 +2233,41 @@ def _fit_split_zodi_with_reversal_retry(decomposer, flux_row, ivar_row, fixed_ls
     return retry, True, bound, True
 
 
+def _blue_reference_lsf(kind, row_index):
+    """The survey reference whose B channel a `--blue-lsf reference` fit holds.
+
+    An individual-fiber row (META has `fiberid` and `telescope`) uses its own
+    fiber's reference.  A fiber-stacked row uses the mean over the fibers that
+    entered its median when the stack has a FIBER_ROLE extension (fibers
+    without a reference are left out), else -- or when none of them has a
+    reference -- the mean over the fibers of the telescope it was stacked from.
+    """
+    row = _WORKER_META[row_index]
+    names = set(_WORKER_META.dtype.names or ())
+    if {"fiberid", "telescope"} <= names:
+        fiberid = int(row["fiberid"])
+        if fiberid not in _WORKER_BLUE_REFERENCE:
+            from skysub.sky_decomp.lsf_reference import load_reference_lsf
+
+            _WORKER_BLUE_REFERENCE[fiberid] = load_reference_lsf(
+                _WORKER_BLUE_REFERENCE_FILE, fiberid, allow_epoch_pooling=True)
+        return _WORKER_BLUE_REFERENCE[fiberid]
+    if _WORKER_FIBER_ROLE is not None:
+        fiberids = np.flatnonzero(_WORKER_FIBER_ROLE[row_index] == FIBER_ROLE_OF_KIND[kind]) + 1
+        if np.isin(fiberids, _WORKER_BLUE_REFERENCE_SET.fiberids).any():
+            return _WORKER_BLUE_REFERENCE_SET.mean(fiberids, label=f"{kind} row {row_index}")
+        warnings.warn(f"row {row_index} {kind}: none of its {fiberids.size} FIBER_ROLE fibers has "
+                      "a survey LSF reference; using the telescope mean", RuntimeWarning,
+                      stacklevel=2)
+    if kind == "sci":
+        return _WORKER_BLUE_REFERENCE["Sci"]
+    label = _text_value(row["sky_near_label" if kind == "sky1" else "sky_far_label"])
+    telescope = {"skye": "SkyE", "skyw": "SkyW"}.get(label.lower())
+    if telescope is None:
+        raise ValueError(f"Unknown sky telescope label at row {row_index}: {label!r}")
+    return _WORKER_BLUE_REFERENCE[telescope]
+
+
 def _fit_worker_row(kind, idx, flux_row, ivar_row, fixed_lsf_state=None):
     """Fit one row.  Returns ``(result, reliability_columns)``."""
     if _WORKER_SCIENCE_LINE_MASK is not None:
@@ -2217,6 +2319,8 @@ def _fit_worker_row(kind, idx, flux_row, ivar_row, fixed_lsf_state=None):
             result = schema.failed_input_result(str(error))
             return result, _reliability_flags(result, row_index=idx)
         decomposer._measure_peak_memory = _WORKER_COMPACT_CACHE_DIR is None
+        if _WORKER_BLUE_REFERENCE_FILE is not None:
+            decomposer.blue_reference_lsf = _blue_reference_lsf(kind, idx)
         if _WORKER_FIT_MODEL in SPLIT_ZODI_TELLURIC_FIT_MODELS:
             _install_split_zodi_amplitude_prior(decomposer, kind, idx)
             result, retried, bound, was_reversed = (
@@ -2358,7 +2462,8 @@ def _compact_run_provenance(data_file, wave, fit_model, base_dir, parameters):
                 "lsf_surface_iterative.py",
                 "residual_pca.py",
                 "telluric_corrected_lines.py",
-            ) + (("solar_lsf.py",) if fit_model == PALACECORR_SOLARBLUE_FIT_MODEL else ())
+            ) + (("solar_lsf.py", "lsf_reference.py")
+                 if fit_model == PALACECORR_SOLARBLUE_FIT_MODEL else ())
         },
     }
     fingerprint = hashlib.sha256(
@@ -2376,6 +2481,7 @@ def _worker_initargs(
     fit_pixel_weight_clip, reversal_retry_bound, diffuse_ratio_bound_dex,
     diffuse_ratio_nominal, diffuse_oh_centre_log10, diffuse_oh_bound_dex,
     compact_cache_root, run_fingerprint, kinds=("sci", "sky1", "sky2"),
+    lsf_reference_file=None,
 ):
     """The positional `init_worker` arguments of a run -- one definition.
 
@@ -2416,6 +2522,7 @@ def _worker_initargs(
         None if compact_cache_root is None else str(compact_cache_root),
         run_fingerprint,
         tuple(kinds),
+        None if lsf_reference_file is None else str(lsf_reference_file),
     )
 
 
@@ -2456,8 +2563,11 @@ def run(
     compact_only=False,
     kinds=("sci", "sky1", "sky2"),
     start_method="spawn",
+    blue_lsf="solar",
+    lsf_calibration=None,
 ):
     kinds = tuple(kinds)
+    lsf_reference_file = _survey_lsf_reference_file(fit_model, blue_lsf, lsf_calibration)
     if not kinds or not set(kinds) <= {"sci", "sky1", "sky2"}:
         raise ValueError(f"Unsupported decomposition kinds: {kinds}")
     palace_oh_suffix = _resolved_palace_oh_suffix(fit_model, palace_oh_suffix)
@@ -2473,6 +2583,7 @@ def run(
     wave = fits.getdata(data_file, "WAVE").astype(np.float64)
     with fits.open(data_file, memmap=True) as hdul:
         n_rows_total = int(hdul["FLUX_SCI"].data.shape[0])
+        fiber_role = "FIBER_ROLE" in hdul
 
     n_rows = n_rows_total if limit is None else min(n_rows_total, int(limit))
 
@@ -2498,6 +2609,10 @@ def run(
             "palace_oh_suffix": palace_oh_suffix,
             "palace_diffuse_suffix": palace_diffuse_suffix,
             "kinds": kinds,
+            "blue_lsf": blue_lsf,
+            "blue_lsf_reference_sha256": (
+                None if lsf_reference_file is None else file_sha256(lsf_reference_file)),
+            "blue_lsf_fiber_role": bool(lsf_reference_file is not None and fiber_role),
             # A resumed run must not mix rows anchored to different zodi models.
             "zodi_correction": SPLIT_ZODI_ZODI_CORRECTION,
         }
@@ -2522,6 +2637,10 @@ def run(
     print(f"  chunk_size={chunk_size}, max_in_flight={max_in_flight}")
     print(f"  start_method={start_method}")
     print(f"  fit_model={fit_model}, n_refinement_cycles={n_refinement_cycles}")
+    if fit_model == PALACECORR_SOLARBLUE_FIT_MODEL:
+        print(f"  blue_lsf={blue_lsf}"
+              + ("" if lsf_reference_file is None else
+                 f" ({lsf_reference_file}; {'FIBER_ROLE' if fiber_role else 'telescope'} means)"))
     print(f"  palace_suffix={palace_suffix!r}")
     print(f"  palace_oh_suffix={palace_oh_suffix!r}")
     print(f"  palace_diffuse_suffix={palace_diffuse_suffix!r}")
@@ -2568,7 +2687,10 @@ def run(
         )
         print(f"  prewarmed shared SolarBlue tensor in {time.perf_counter() - started:.1f}s")
 
-    primary_meta = _fit_model_primary_meta(fit_model, palace_oh_suffix)
+    primary_meta = _fit_model_primary_meta(
+        fit_model, palace_oh_suffix, blue_lsf, lsf_reference_file)
+    if lsf_reference_file is not None:
+        primary_meta["LSFROLE"] = (fiber_role, "blue reference averaged over FIBER_ROLE fibers")
     n_tasks = int(np.ceil(n_rows / chunk_size)) * len(kinds)
     results = {kind: [None] * n_rows for kind in kinds}
     reliability = {kind: [None] * n_rows for kind in kinds}
@@ -2622,6 +2744,7 @@ def run(
             compact_cache_root=compact_cache_root,
             run_fingerprint=run_fingerprint,
             kinds=kinds,
+            lsf_reference_file=lsf_reference_file,
         ),
     ) as executor:
         pbar = tqdm(
@@ -2936,6 +3059,28 @@ def build_arg_parser():
         # the _palacecorr_ suffix.
         default=PALACECORR_VNF_SPLIT_ZODI_FIT_MODEL,
         help="Fit implementation (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--blue-lsf",
+        choices=BLUE_LSF_CHOICES,
+        default="solar",
+        help=(
+            "SolarBlue blue-channel LSF: 'solar' fits it from the solar lines in "
+            "the Moon/Zodi continuum; 'reference' holds it at the survey-wide "
+            "empirical reference (per fiber for individual-fiber rows, the mean "
+            "over the telescope's fibers for fiber-stacked rows).  r and z are "
+            "fitted in situ either way.  Requires the solarblue fit model "
+            "(default: %(default)s)"
+        ),
+    )
+    parser.add_argument(
+        "--lsf-calibration",
+        type=Path,
+        default=DEFAULT_LSF_CALIBRATION_DIR,
+        help=(
+            "lsf_calibration directory holding survey/lsf_survey.fits, used by "
+            "--blue-lsf reference (default: %(default)s)"
+        ),
     )
     parser.add_argument(
         "--n-refinement-cycles",
@@ -3262,6 +3407,8 @@ def _run_kwargs_from_args(args):
         compact_only=args.compact_only,
         kinds=tuple(args.kinds),
         start_method=args.start_method,
+        blue_lsf=args.blue_lsf,
+        lsf_calibration=args.lsf_calibration,
     )
 
 
@@ -3293,6 +3440,8 @@ def decompose_in_process(data_file, rows=(0,), kinds=("sci", "sky1", "sky2"),
     fit_model = kw["fit_model"]
     if fixed_lsf_state is not None and fit_model != PALACECORR_SOLARBLUE_FIT_MODEL:
         raise ValueError('Fixed-source LSF currently requires the SolarBlue fit model')
+    lsf_reference_file = _survey_lsf_reference_file(
+        fit_model, kw["blue_lsf"], kw["lsf_calibration"])
     palace_oh_suffix = _resolved_palace_oh_suffix(fit_model, kw["palace_oh_suffix"])
     base_dir, moon_zodi_root = resolve_runtime_data_roots(
         fit_model, palace_dir=kw["palace_dir"],
@@ -3321,7 +3470,8 @@ def decompose_in_process(data_file, rows=(0,), kinds=("sci", "sky1", "sky2"),
         diffuse_ratio_nominal=kw["diffuse_ratio_nominal"],
         diffuse_oh_centre_log10=kw["diffuse_oh_centre_log10"],
         diffuse_oh_bound_dex=kw["diffuse_oh_bound_dex"],
-        compact_cache_root=None, run_fingerprint=None, kinds=kinds))
+        compact_cache_root=None, run_fingerprint=None, kinds=kinds,
+        lsf_reference_file=lsf_reference_file))
     # init_worker clamps native threads for pool workers; that is harmless here.
     out = {}
     for kind in kinds:

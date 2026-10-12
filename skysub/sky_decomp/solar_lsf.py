@@ -15,6 +15,7 @@ are the smooth solar-free envelopes of the Moon and Zodi templates.
 
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import replace
 from functools import lru_cache
 from pathlib import Path
@@ -36,11 +37,13 @@ from .lsf_surface_iterative import (
     _channel_mask,
     _configured_knot_vector,
     _resolved_spline_config,
+    _wave_fingerprint,
     evaluate_bspline_basis,
 )
 from .residual_pca import SkyDecompPalaceCorrAijcVNFSplitZodiLSFSpline2D
 
 SOLAR_BLUE_MODEL = "solar_continuum_joint_mspline"
+REFERENCE_BLUE_MODEL = "fixed_empirical_reference"
 _BLUE = LSF_CHANNELS[0]
 
 
@@ -131,6 +134,13 @@ class SkyDecompPalaceCorrSolarBlueLSF(SkyDecompPalaceCorrAijcVNFSplitZodiLSFSpli
     +/-2.5 Angstrom, and a 0.01 second-difference penalty along offset only.
     Stop when W50/W90 and data chi2 change by <1%, and the barycenter by
     <0.015 Angstrom at every wavelength; at most 30 refinement cycles.
+
+    With ``blue_reference_lsf`` (an `LSFSurfaceState`, e.g. from
+    `sky_decomp.lsf_reference`) the blue LSF is held at that reference's B
+    channel instead of being fitted; r and z are still fitted in situ, starting
+    from the reference's r and z (the seed solve is rendered with the whole
+    reference), and the blue Moon and Zodi are still rendered through the
+    exact solar operator.
     """
 
     _close_each_refinement = True
@@ -157,6 +167,7 @@ class SkyDecompPalaceCorrSolarBlueLSF(SkyDecompPalaceCorrAijcVNFSplitZodiLSFSpli
             _resolved_spline_config(config, kwargs.get("spline_config")), b=blue
         )
         self._solar_blue_stash: tuple[np.ndarray, np.ndarray] | None = None
+        self.blue_reference_lsf = None
         self._solar_pair: tuple[np.ndarray, np.ndarray] | None = None
         # The nominal seed solve keeps the DRP-Gaussian Moon/Zodi templates.
         super().__init__(wave, *args, **kwargs)
@@ -252,6 +263,41 @@ class SkyDecompPalaceCorrSolarBlueLSF(SkyDecompPalaceCorrAijcVNFSplitZodiLSFSpli
             self._solar_blue_stash = (np.asarray(coefficient, dtype=float).copy(), restored)
         return result
 
+    def _checked_blue_reference(self):
+        reference = self.blue_reference_lsf
+        if reference is None:
+            return None
+        if _wave_fingerprint(self.wave) != (reference.wave_n, reference.wave_min,
+                                            reference.wave_max, reference.wave_sha256):
+            raise ValueError("Blue reference LSF wavelength grid differs from the target grid")
+        if float(reference.config.get("offset_half_width_angstrom", 3.0)) != self.offset_half_width_angstrom:
+            raise ValueError("Blue reference LSF offset support differs from the decomposer")
+        coefficient = np.array(reference.coefficients["B"], dtype=float)
+        if coefficient.shape[0] != self.offset_basis_count:
+            raise ValueError("Blue reference LSF has a different number of offset components")
+        return reference
+
+    def _initial_lsf_state(self):
+        reference = self._checked_blue_reference()
+        # A copy: the worker shares one reference across rows.
+        return None if reference is None else deepcopy(reference)
+
+    def _held_lsf_channel(self, channel):
+        reference = self._checked_blue_reference() if channel == "B" else None
+        if reference is None:
+            return None
+        coefficient = np.array(reference.coefficients["B"], dtype=float)
+        metric = {**reference.metrics["B"], "status": "Solved", "reason": "fixed_reference",
+                  "model": REFERENCE_BLUE_MODEL, "knots_fixed": True,
+                  "n_pixels": int(self._blue.sum()), "runtime_sec": 0.0}
+        return (coefficient, np.array(reference.knot_vectors["B"], dtype=float),
+                int(reference.degrees["B"]), metric)
+
+    def _blue_lsf_label(self) -> str:
+        if self.blue_reference_lsf is not None:
+            return "fixed_reference"
+        return f"solar_continuum_joint_n{self.spline_config.b.n_basis}"
+
     def _extra_kernel_design(self, channel, fit_mask, knot_vector, degree):
         if channel != "B" or self._solar_blue_stash is None:
             return None
@@ -286,7 +332,9 @@ class SkyDecompPalaceCorrSolarBlueLSF(SkyDecompPalaceCorrAijcVNFSplitZodiLSFSpli
 
     def _finalize_result(self, *args: Any, **kwargs: Any):
         result = super()._finalize_result(*args, **kwargs)
-        result.fit_summary += f" | blue_lsf=solar_continuum_joint_n{self.spline_config.b.n_basis}"
+        result.fit_summary += f" | blue_lsf={self._blue_lsf_label()}"
+        if self.blue_reference_lsf is not None:
+            result.fit_summary += " | rz_lsf_start=reference"
         result.fit_summary += f" | convergence={'converged' if self.converged else 'not_converged'}"
         for channel in result.lsf_state.metrics:
             result.lsf_state.metrics[channel].update(converged=self.converged,
@@ -297,4 +345,4 @@ class SkyDecompPalaceCorrSolarBlueLSF(SkyDecompPalaceCorrAijcVNFSplitZodiLSFSpli
         return result
 
 
-__all__ = ["SOLAR_BLUE_MODEL", "SkyDecompPalaceCorrSolarBlueLSF", "solar_lsf_tensor"]
+__all__ = ["REFERENCE_BLUE_MODEL", "SOLAR_BLUE_MODEL", "SkyDecompPalaceCorrSolarBlueLSF", "solar_lsf_tensor"]

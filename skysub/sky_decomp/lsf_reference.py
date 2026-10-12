@@ -3,6 +3,7 @@
 from pathlib import Path
 from collections.abc import Mapping
 from contextlib import ExitStack
+from copy import deepcopy
 import re
 
 from astropy.time import Time
@@ -105,6 +106,78 @@ def load_reference_lsf(path: str | Path | Mapping, fiberid: int, *, allow_epoch_
                                wave_n=fingerprint[0], wave_min=fingerprint[1], wave_max=fingerprint[2],
                                wave_sha256=fingerprint[3], fit_status="empirical_reference",
                                knot_strategy="inherited_fixed_basis", legacy_kernel_representation=LSF_SPLINE2D_REPRESENTATION)
+
+
+class SurveyReferenceSet:
+    """Every per-fiber reference of one file, for means over any set of fibers.
+
+    For spectra stacked over many fibers (the ML corpus rows).  All fibers of a
+    channel share one knot vector, and a mean of convex LSF coefficients is
+    itself convex, so every mean is a valid B/R/Z state.  Only fibers with B,
+    R and Z references enter a mean.
+    """
+
+    def __init__(self, path: str | Path, *, allow_epoch_pooling=False):
+        self.path = Path(path)
+        with fits.open(self.path, memmap=False) as hdus:
+            table = hdus["REFERENCES"].data
+            telescopes = np.char.strip(np.asarray(table["telescope"]).astype(str))
+            channels = np.char.strip(np.asarray(table["channel"]).astype(str))
+            fiberids = np.asarray(table["fiberid"], dtype=np.int64)
+            n_exposures = np.asarray(table["n_exposures"], dtype=np.int64)
+            coefficients = np.asarray(hdus["LSF_COEF"].data, dtype=float)
+            knots = np.asarray(hdus["LSF_KNOTS"].data, dtype=float)
+        self._channel = {}
+        complete = None
+        for channel in ("B", "R", "Z"):
+            rows = np.flatnonzero(channels == channel)
+            if rows.size == 0:
+                raise ValueError(f"No {channel} references in {path}")
+            rows = rows[np.argsort(fiberids[rows], kind="stable")]
+            if np.any(np.diff(fiberids[rows]) == 0):
+                raise ValueError(f"Duplicate {channel} fiber references in {path}")
+            if not np.all(knots[rows] == knots[rows[0]]):
+                raise ValueError(f"{channel} references use different knot vectors")
+            self._channel[channel] = (fiberids[rows], coefficients[rows], n_exposures[rows])
+            complete = set(fiberids[rows]) if complete is None else complete & set(fiberids[rows])
+        self.fiberids = np.array(sorted(complete), dtype=np.int64)
+        if self.fiberids.size == 0:
+            raise ValueError(f"No fiber has B, R and Z references in {path}")
+        by_fiber = dict(zip(fiberids, telescopes))
+        self.telescope = np.array([by_fiber[f] for f in self.fiberids])
+        # One member supplies (and validates) knots, configuration and grid.
+        self._template = load_reference_lsf(self.path, int(self.fiberids[0]),
+                                            allow_epoch_pooling=allow_epoch_pooling)
+
+    def mean(self, fiberids, *, model="fiber_mean_reference", label=""):
+        """Equal-weight mean over those of ``fiberids`` that have references."""
+        requested = np.unique(np.asarray(fiberids, dtype=np.int64))
+        used = np.intersect1d(requested, self.fiberids)
+        if used.size == 0:
+            raise ValueError(f"None of the {requested.size} fibers has a reference in {self.path}")
+        state = deepcopy(self._template)
+        for channel, (ids, coefficients, n_exposures) in self._channel.items():
+            rows = np.searchsorted(ids, used)
+            mean = coefficients[rows].mean(axis=0)
+            validate_coefficients(mean)
+            state.coefficients[channel] = mean
+            metric = state.metrics[channel]
+            metric.pop("n_nights", None)   # the template fiber's, not the mean's
+            metric.update(model=model, label=label, n_fibers=int(used.size),
+                          n_fibers_requested=int(requested.size),
+                          n_exposures=int(n_exposures[rows].sum()), reference_id=-1)
+        state.fit_status = f"empirical_reference_{model}"
+        return state
+
+    def telescope_mean(self, telescope):
+        """Mean over every referenced fiber of one telescope (Sci, SkyE or SkyW)."""
+        return self.mean(self.fiberids[self.telescope == telescope],
+                         model="telescope_mean", label=telescope)
+
+
+def telescope_mean_reference_lsf(path: str | Path, telescope: str, *, allow_epoch_pooling=False):
+    """Equal-weight mean over every fiber reference of one telescope in one file."""
+    return SurveyReferenceSet(path, allow_epoch_pooling=allow_epoch_pooling).telescope_mean(telescope)
 
 
 def select_reference_lsf(directory, fiberid, camera_epochs, observation_mjd):
