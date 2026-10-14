@@ -34,6 +34,16 @@ In the blue the model ratio and the moon+zodi ratio are equivalent (0.148 both).
 Angstrom. The arms are then combined with inverse-variance weights, using each
 arm's photon-noise variance times ``k_a**2``.
 
+A narrow feature in ONE sky field (nebular emission, a star, a cosmic) is not
+part of the shared pattern, but the weighted mean would carry about half of it
+to the science.  Where the two arms' scaled residuals disagree by more than
+``consistency_clip`` (5) sigma, the arm with the smaller residual is used
+instead.  Measured on 2000 rows (solarblue corpus, a FWHM 2.5 A line injected
+into the near arm at 0.3/1/3x the continuum): the transferred fraction falls
+from 48% to 7/1.4/0.3%, for blue chi2 0.129 -> 0.138 (1.8% of pixels clipped).
+Smoothing does much worse for the same purpose: an 8 A running median still
+transfers 15-25% and raises the chi2 to 0.26.
+
 When ``max_wavelength`` cuts the band short, the correction is applied in full
 up to it and then tapered to zero with a cosine over the next ``taper_width``
 Angstrom, so that no step is left in the corrected spectrum. The ramp sits
@@ -148,6 +158,7 @@ def sky_arm_residual_correction(
     auto_width: float = 1.5,
     gate: float = 0.25,
     gate_max_wavelength: float = 5000.0,
+    consistency_clip: Optional[float] = 5.0,
     ratio_smoothing: float = 100.0,
     return_info: bool = False,
 ):
@@ -176,6 +187,13 @@ def sky_arm_residual_correction(
         Unused when ``max_wavelength`` covers the grid.
     smoothing : ``'auto'`` (3-pixel median below ``auto_snr``), a width in
         Angstrom (running median on every row), or 0 / None (unsmoothed).
+    consistency_clip : where both arms are used and their scaled residuals
+        differ by more than this many sigma (their combined photon noise),
+        take the arm whose residual is SMALLER instead of the weighted mean.
+        The solar-line pattern is common to both arms; a narrow feature in
+        one sky field (emission, a star, a cosmic) is not, and would otherwise
+        be transferred to the science with that arm's weight (~half).  None
+        disables it.
     gate : drop an arm whose blue fractional residual RMS,
         ``|obs - model| / solar`` below ``gate_max_wavelength``, exceeds this.
     return_info : also return a dict with per-arm usage, row S/N, smoothed rows.
@@ -199,6 +217,7 @@ def sky_arm_residual_correction(
     num = np.zeros((n_rows, n_wave))
     den = np.zeros((n_rows, n_wave))
     used, frac_rms = [], []
+    per_arm = []                                  # (estimate, variance) per arm, NaN where unusable
     for arm in arms:
         obs, mod, sol, var = (np.broadcast_to(np.atleast_2d(np.asarray(x, dtype=np.float64)),
                                               (n_rows, n_wave))
@@ -220,10 +239,17 @@ def sky_arm_residual_correction(
             w = np.where(ok, 1.0 / np.where(ok, var * k ** 2, 1.0), 0.0)
         num += w * np.where(ok, resid * k, 0.0)
         den += w
+        per_arm.append((np.where(ok, resid * k, np.nan), np.where(ok, var * k ** 2, np.nan)))
         used.append(ok_row)
         frac_rms.append(fr)
 
     corr = np.where(den > 0, num / np.where(den > 0, den, 1.0), 0.0)
+    clipped = np.zeros((n_rows, n_wave), dtype=bool)
+    if consistency_clip is not None and len(per_arm) == 2:
+        (e1, v1), (e2, v2) = per_arm
+        with np.errstate(invalid="ignore"):
+            clipped = np.abs(e1 - e2) > float(consistency_clip) * np.sqrt(v1 + v2)
+        corr = np.where(clipped, np.where(np.abs(e1) < np.abs(e2), e1, e2), corr)
     with np.errstate(invalid="ignore"):
         snr = np.nanmedian(np.where(gate_band, s_sci * np.sqrt(den), np.nan), axis=1)
     smoothed = np.zeros(n_rows, dtype=bool)
@@ -242,7 +268,7 @@ def sky_arm_residual_correction(
     if not return_info:
         return out
     info = dict(arm_used=np.stack(used, axis=0), arm_frac_rms=np.stack(frac_rms, axis=0),
-                snr=snr, smoothed=smoothed)
+                snr=snr, smoothed=smoothed, clipped_fraction=clipped.mean(axis=1))
     if one_row:
         info = {k: (v[:, 0] if v.ndim == 2 else v[0]) for k, v in info.items()}
     return out, info

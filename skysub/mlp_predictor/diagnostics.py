@@ -42,8 +42,7 @@ from astropy.io import fits
 from astropy.table import Table
 from plotly.subplots import make_subplots
 
-from sky_decomp.fit import reconstruct_component_spectra
-from sky_decomp.lsf_surface_iterative import LSFSurfaceState, SkyDecompLSFSurfaceIterative
+from sky_decomp.lsf_surface_iterative import LSFSurfaceState
 from sky_decomp.result_io import load_lsf_surface_state
 
 from .compressor import (
@@ -77,6 +76,7 @@ from .data import (
     _augment_triplet_with_moon_model,
     _build_group_indices,
     _decode_cyclic_context,
+    DECOMP_SUFFIX,
     _infer_base_dir_for_reconstruction,
     _sun_ecliptic_longitude_deg,
 )
@@ -128,11 +128,10 @@ def _base_globals() -> dict:
         "make_subplots": make_subplots,
         "fits": fits,
         "Table": Table,
-        "reconstruct_component_spectra": reconstruct_component_spectra,
-        "SkyDecompLSFSurfaceIterative": SkyDecompLSFSurfaceIterative,
         "LSFSurfaceState": LSFSurfaceState,
         "load_lsf_surface_state": load_lsf_surface_state,
         "reconstruct_with_lsf": reconstruct_with_lsf,
+        "DECOMP_SUFFIX": DECOMP_SUFFIX,
         "load_lsf_state_if_available": load_lsf_state_if_available,
         "load_o2_vector_if_available": load_o2_vector_if_available,
         "build_triplet_coef_dataset": build_triplet_coef_dataset,

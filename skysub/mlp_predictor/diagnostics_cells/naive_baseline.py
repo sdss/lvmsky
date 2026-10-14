@@ -113,9 +113,9 @@ _group_names = list(_group_indices_compress.keys())
 # row, which is what makes it comparable across groups.
 # Same prerequisites as the mesospheric companion below, named here because
 # this block runs FIRST and that one's tuple is defined further down.
-_FLUX_BASIS_KEYS = ('SkyDecompLSFSurfaceIterative',
+_FLUX_BASIS_KEYS = ('TELLURIC_BASIS_KW',
                     '_infer_base_dir_for_reconstruction',
-                    'N_MOON_KNOTS', 'SPLIT_ZODI', 'N_ZODI_KNOTS',
+                    'N_MOON_KNOTS', 'N_ZODI_KNOTS',
                     'DECOMP_DATA_ROOT', 'DECOMP_STEM')
 _amp_v = None
 _amp_note = ''
@@ -131,8 +131,7 @@ if all(k in globals() for k in _FLUX_BASIS_KEYS):
         _m_amp = _mk_decomp_amp(
             _wamp, n_spline_knots=N_MOON_KNOTS,
             base_dir=_infer_base_dir_for_reconstruction(),
-            split_zodi=SPLIT_ZODI, n_zodi_spline_knots=N_ZODI_KNOTS,
-            telluric=globals().get('TELLURIC_BASIS_KW'))
+            n_zodi_spline_knots=N_ZODI_KNOTS, telluric=TELLURIC_BASIS_KW)
         # `_assemble_refined_matrices()` needs a FITTED LSF state, which a
         # freshly built decomposer has not got ('NoneType' has no attribute
         # 'knot_vectors').  `_convolve_matrix_channelwise` falls back to the
@@ -277,8 +276,8 @@ for regime, mask in _masks.items():
 # NOTE the basis: OH coefficients live on the CONVOLVED STICK matrix, not on
 # `matrix_oh` (whose row integrals are 5.01x larger).  Getting that wrong
 # silently rescales the residual.
-_MES_FLUX_KEYS = ('SkyDecompLSFSurfaceIterative', '_infer_base_dir_for_reconstruction',
-                  'N_MOON_KNOTS', 'SPLIT_ZODI', 'N_ZODI_KNOTS',
+_MES_FLUX_KEYS = ('TELLURIC_BASIS_KW', '_infer_base_dir_for_reconstruction',
+                  'N_MOON_KNOTS', 'N_ZODI_KNOTS',
                   'DECOMP_DATA_ROOT', 'DECOMP_STEM')
 naive_baseline_mesospheric_flux = None
 if all(k in globals() for k in _MES_FLUX_KEYS):
@@ -294,16 +293,13 @@ if all(k in globals() for k in _MES_FLUX_KEYS):
             with _fits_bl.open(f'{DECOMP_DATA_ROOT}/{DECOMP_STEM}_every10.fits') as _hbl:
                 _wbl = np.asarray(_hbl['WAVE'].data, dtype=np.float64)
                 _wbl = _wbl if _wbl.ndim == 1 else _wbl[0]
-            # Must be THIS corpus's basis: the telluric variant groups OH
-            # differently, so projecting its coefficient errors through the
-            # split-zodi stick matrix would measure the wrong thing.
+            # Must be THIS corpus's basis (per-row telluric OH grouping).
             from mlp_predictor.data import (
                 make_reconstruction_decomposer as _mk_decomp_bl)
             _mbl = _mk_decomp_bl(
                 _wbl, n_spline_knots=N_MOON_KNOTS,
                 base_dir=_infer_base_dir_for_reconstruction(),
-                split_zodi=SPLIT_ZODI, n_zodi_spline_knots=N_ZODI_KNOTS,
-                telluric=globals().get('TELLURIC_BASIS_KW'))
+                n_zodi_spline_knots=N_ZODI_KNOTS, telluric=TELLURIC_BASIS_KW)
             _Mbl = np.asarray(_mbl._convolve_matrix_channelwise(_mbl.matrix_oh_stick),
                               dtype=np.float64)
             if _Mbl.shape[0] != _oh_bl.size:

@@ -60,7 +60,9 @@ measured flux plus sky. The median is a robust estimate of the
 sky-dominated spectrum, with the variance of a mean over
 $N_{\rm eff} = (2/\pi)\,n_{\rm fib}$ fibers, where $n_{\rm fib}$ is the
 number of fibers combined. Each spectrum carries the per-pixel line-spread
-function (LSF) width of its fiber bundle.
+function (LSF) width of its fiber bundle and a record of which physical fibers
+entered its median, from which its reference LSF is formed
+(Section~\ref{sec:lsf}).
 
 \paragraph{Metadata.} Each exposure provides the pointing coordinates and
 airmass of all three telescopes, the exposure mid-time and duration, the
@@ -95,7 +97,7 @@ templates:
   \label{eq:model}
 \end{equation}
 where each template $T_k$ is a physical spectrum convolved with the LSF
-fitted to the same spectrum (Section~\ref{sec:lsf}), attenuated by the
+of the same spectrum (Section~\ref{sec:lsf}), attenuated by the
 atmosphere as appropriate for its emitting layer
 (Section~\ref{sec:telluric}), and divided by the transmission the DRP
 removed. Stacking the templates gives the design matrix
@@ -152,29 +154,88 @@ Total & 388 & \\
 \subsection{Line-spread function}
 \label{sec:lsf}
 
-Every narrow template depends on the LSF, which varies with wavelength and
-between spectrograph channels. We represent the LSF kernel at wavelength
-$\lambda$ as a continuous probability density in the offset
+Every narrow template depends on the LSF, which varies with wavelength,
+between spectrograph channels and from fiber to fiber. We represent the LSF
+of channel $c\in\{b,r,z\}$ as a continuous probability density in the offset
 $\delta = \lambda' - \lambda$:
 \begin{equation}
-  K(\delta;\lambda) = \sum_{j=1}^{11} a_j(\lambda)\,M_j(\delta),
-  \qquad \sum_j a_j(\lambda) = 1 .
+\begin{split}
+  K_c(\delta;\lambda) &= \sum_{j=1}^{11}\sum_{m=1}^{4}
+  \theta_{c,jm}\,M_j(\delta)\,B_m(\lambda),\\
+  \theta_{c,jm}&\ge0,\qquad \sum_j \theta_{c,jm} = 1 .
+\end{split}
   \label{eq:lsf}
 \end{equation}
 Here the $M_j$ are cubic M-splines on equally spaced knots over
-$|\delta|\le3$\,\AA, each normalised
-to unit integral, so $K$ integrates to one. The fit constrains the kernel to
-be non-negative and unimodal, with a single central peak, at every
-wavelength. The weights vary smoothly with wavelength within each channel: they are constant
-in the $b$ channel and a six-function cubic B-spline in $\lambda$ in the $r$
-and $z$ channels. A line template is rendered by integrating
-$K(\,\cdot\,;\lambda_\ell)$ analytically over each pixel for every line
-$\ell$ of the family. The LSF parameters are fitted to the sky lines of the
-spectrum itself (Section~\ref{sec:estimation}), with a roughness penalty on the
-weights and a low-order polynomial nuisance background in each channel. A
-Gaussian of the DRP-reported width seeds the fit, and it is retained for any
-channel that carries too little line information to constrain the kernel. The same fitted LSF
-convolves the continuum templates, where it has little effect.
+$|\delta|\le2.5$\,\AA, each normalised to unit integral, and the $B_m$ are
+four cubic B-splines in wavelength on uniform knots across the channel. The
+$B_m$ are non-negative and sum to one at every wavelength, so $K_c$ is
+non-negative and integrates to one everywhere. In addition, every column
+$\theta_{c,\cdot m}$ increases up to the central component $j=6$ and
+decreases after it, which makes the kernel unimodal. A line template is
+rendered by integrating $K_c(\,\cdot\,;\lambda_\ell)$ analytically over each
+pixel for every line $\ell$ of the family.
+
+\paragraph{Blue channel: empirical reference.} The $b$ channel has few sky
+emission lines, and on dark nights almost no continuum signal to constrain
+its LSF, so it is not fitted to the spectrum being decomposed. It is held at
+an empirical reference built separately for every physical fiber. The
+reference is measured on 558 bright-Moon exposures (Moon elevation above
+$60^\circ$, illuminated fraction above 0.95, Sun below $-18^\circ$), where
+the scattered moonlight carries the solar Fraunhofer spectrum at high signal
+to noise. Each fiber of each exposure is decomposed individually, and its
+$b$-channel LSF is fitted jointly to the sky emission lines and to the solar
+absorption lines in the moonlight and zodiacal continuum, rendered as
+described below. Only fibers whose Gaia-predicted stellar $G$-band flux is
+below 10\% of their measured flux plus sky enter, and only converged fits.
+For each fiber and channel the reference is a weighted mean of the
+coefficient matrices of its accepted exposures, with equal weight per
+observing night and a robust down-weighting of discrepant surfaces. Over the
+1871 physical fibers this pools $2.6\times10^6$ accepted channel fits. We
+use the survey-wide reference, pooled over all calibration epochs of the
+sample.
+
+A spectrum that is the median over many fibers
+(Section~\ref{sec:inputs}) takes the equal-weight mean of the references of
+exactly the fibers that entered its median. Every constraint on $\theta$ in
+Equation~(\ref{eq:lsf}) is linear, so the admissible coefficients form a
+convex set, and any weighted mean of valid references is itself a valid
+LSF. The representation is linear in $\theta$, so the mean of the
+coefficients is also exactly the mean of the kernels at every wavelength.
+An element-wise median of the coefficients would not keep the normalisation:
+on the reference set its column sums depart from one by up to 0.7\%. The
+effective LSF of a median of spectra equals the mean LSF only to first order
+in the fiber-to-fiber differences, an approximation the stack also makes
+for the DRP LSF width it carries.
+
+\paragraph{Red and near-infrared channels: fitted.} In the $r$ and $z$
+channels the airglow lines constrain the kernel well, and its parameters are
+fitted to the spectrum itself (Section~\ref{sec:estimation}), starting from
+the reference of the same fibers. The fit carries a second-difference
+penalty along the offset direction, scaled to $10^{-2}$ of the mean diagonal
+of the data Hessian, and a low-order polynomial nuisance background in each
+channel.
+
+\paragraph{Solar continuum in the blue.} The moonlight and zodiacal-light
+templates (Sections~\ref{sec:moonfam} and~\ref{sec:zodifam}) carry the full
+solar absorption spectrum, which the LSF shapes. In the $b$ channel they are
+therefore rendered exactly rather than by convolving a tabulated template.
+Each family is the product of a smooth, absorption-free envelope $E(\lambda)$,
+equal to the template divided by the solar spectrum, and the solar spectrum
+seen through the LSF,
+\begin{equation}
+\begin{split}
+  T(\lambda_i) &= E(\lambda_i)\sum_{j,m} G_{i,jm}\,\theta_{b,jm},\\
+  G_{i,jm} &= \frac{1}{\Delta_i}\int_{\Delta_i}\!d\lambda
+  \int\! I_\odot(\lambda')\,B_m(\lambda')\,M_j(\lambda-\lambda')\,d\lambda' ,
+\end{split}
+  \label{eq:solar}
+\end{equation}
+where $\Delta_i$ is pixel $i$ and the integral runs over every sample of the
+high-resolution solar spectrum \citep{Meftah2018}, without regridding or
+smoothing. The tensor $\mathbf{G}$ does not depend on the spectrum being
+fitted and is computed once. The $r$- and $z$-channel continuum templates are
+convolved with the fitted LSF, where it has little effect.
 
 \subsection{Atmospheric transmission}
 \label{sec:telluric}
@@ -524,15 +585,21 @@ unchanged by the rescaling; those with one are rescaled with the data.
 The LSF, the continuum and the line amplitudes constrain one another, and the
 problem is not jointly convex in all three, so they are refined alternately.
 The fit starts with a pre-fit of the O$_2$ $b$-band shape and a joint solve
-of Equation~(\ref{eq:qp}) with all families at the nominal LSF. Five
-refinement cycles follow. Each cycle first refits the continuum block with
-the line model held fixed, imposing all continuum constraints of
-Section~\ref{sec:constraints}; pixels within $\pm2$\,\AA{} of the lines that
-carry 99\% of the line flux are down-weighted by $5\times10^{-4}$, and
-residual outliers by a Huber weight beyond $3\sigma$. It then refits the LSF
-of Equation~(\ref{eq:lsf}) in each channel to the data minus continuum, and
-finally re-renders the line templates with the new LSF and refits the line
-block. A cycle is kept only if all three stages succeed; otherwise the fit
+of Equation~(\ref{eq:qp}) with all families rendered with the reference LSF
+of Section~\ref{sec:lsf}. Refinement cycles follow. Each cycle first refits
+the continuum block with the line model held fixed, imposing all continuum
+constraints of Section~\ref{sec:constraints}; pixels within $\pm2$\,\AA{} of
+the lines that carry 99\% of the line flux are down-weighted by
+$5\times10^{-4}$, and residual outliers by a Huber weight beyond $3\sigma$.
+It then refits the LSF of Equation~(\ref{eq:lsf}) in the $r$ and $z$
+channels to the data minus continuum, keeping the $b$ channel at its
+reference, and re-renders the line templates and the blue continuum
+templates with the new LSF. Finally it refits the continuum and the line
+block on that LSF, so that the fit statistics of the cycle refer to it. The
+cycles stop when, at every wavelength, the widths containing 50\% and 90\% of
+the kernel change by less than 1\% and its centroid by less than
+0.015\,\AA, and the $\chi^2$ changes by less than 1\%; at most 30 cycles are
+run. A cycle is kept only if all its stages succeed; otherwise the fit
 returns the last kept state, to which the final coefficients, uncertainties
 and component spectra refer.
 
@@ -1685,7 +1752,8 @@ Figure~\ref{fig:training-loss} shows the training and validation loss of
 each member. The training loss falls by more than an order of magnitude and
 is still falling slowly at 400 epochs. The validation loss flattens after
 about 100 epochs at roughly twenty times the training loss, and its minimum
-is reached anywhere between about 90 and 400 epochs depending on the member;
+is reached anywhere between about 50 and 370 epochs depending on the member,
+with five of the ten members stopped early;
 the brief spikes shared by both curves are single unstable epochs, from
 which training recovers.
 
@@ -1712,29 +1780,34 @@ $y_{\rm sci}$, which is the floor: the transfer predicts the coefficients of
 that fit, so it cannot describe the spectrum better. The second is the
 photon noise of a single fiber (Section~\ref{sec:noise}), the level below
 which a sky error no longer matters. The third is the sky itself. All
-numbers below are for the 2888 held-out observations.
+numbers below are for the 2852 held-out observations.
 
 Figure~\ref{fig:chi2-heldout} compares the prediction with the first two
-references. Over the full band the median $\chi^2$ of the prediction is
-1.27 against the single-fiber noise, and that of the decomposition's own fit
-is 0.92, a ratio of 1.38. In the blue the medians are 0.87 and 0.68, a ratio
-of 1.28. The typical residual of the predicted sky is therefore 1.13 times
-the single-fiber noise per pixel over the full band and 0.93 times it in the
-blue, where the decomposition alone reaches 0.96 and 0.82. If the transfer
+references, before the corrections of Section~\ref{sec:postcorr}. Over the
+full band the median $\chi^2$ of the prediction is 1.12 against the
+single-fiber noise, and that of the decomposition's own fit is 0.77, a ratio
+of 1.46. In the blue the medians are 0.54 and 0.40, a ratio of 1.34. The
+typical residual of the predicted sky is therefore 1.06 times the
+single-fiber noise per pixel over the full band and 0.73 times it in the
+blue, where the decomposition alone reaches 0.88 and 0.64. If the transfer
 error adds in quadrature to the decomposition residual, it amounts to about
-0.6 of the single-fiber noise over the full band and 0.44 in the blue, or
-about 5\% and 4\% of the sky per pixel. About a third of the observations
-have a prediction $\chi^2$ below 1 over the full band, and half in the blue.
+0.59 of the single-fiber noise over the full band and 0.37 in the blue, or
+about 5\% and 3.5\% of the sky per pixel. 42\% of the observations have a
+prediction $\chi^2$ below 1 over the full band, and 78\% in the blue.
 
 The upper panels of Figure~\ref{fig:chi2-heldout} show that both
 distributions peak below $\chi^2=1$, and that the prediction's is shifted
 to higher values with a longer tail. The lower panels pair the two numbers
 observation by observation. Most observations lie just above the diagonal,
-at a median ratio of 1.23 over the full band and 1.10 in the blue: the
+at a median ratio of 1.28 over the full band and 1.21 in the blue: the
 prediction stays close to the floor whatever the absolute $\chi^2$. The
 observations well above the diagonal are transfer failures, the only kind
-the transfer can reduce; 13\% of observations exceed twice their
-decomposition $\chi^2$ over the full band, and 9\% in the blue. The
+the transfer can reduce; 18\% of observations exceed twice their
+decomposition $\chi^2$ over the full band, and 16\% in the blue, against
+13\% and 9\% on the previous decomposition. Its floor is lower now (the
+decomposition with the reference blue LSF fits the blue about 40\% better),
+and a ratio to the floor grows when the floor falls, so these fractions are
+not comparable across decompositions. The
 observations far to the right are those the decomposition itself fits
 poorly, so their truth is not reliable either.
 
@@ -1745,30 +1818,30 @@ spectrum. Its large spikes, at H$\alpha$, H$\beta$, [O\,\textsc{iii}] and
 subtraction exists to reveal, not sky residual. Away from them, the
 residual scatters around zero with the largest excursions at the brightest
 OH lines and in the far blue, and the median residual of an observation is
-typically 1.8\% of its sky level (5.5\% at the 84th percentile). Integrated
+typically 2.0\% of its sky level (5.8\% at the 84th percentile). Integrated
 over the band, the predicted sky matches the observed flux to 1.5\% at the
-median, 3.7\% at the 84th percentile. The three lower panels isolate the
+median, 3.9\% at the 84th percentile. The three lower panels isolate the
 transfer by comparing the predicted continuum components with the
 decomposition of the science spectrum. The moonlight error dominates: it
-grows toward the blue, where scattered moonlight is brightest, and reaches
-$\pm1$ in these units near 4000\,\AA, where the bright-Moon continuum is
-about 5. The zodiacal and diffuse errors stay within about $\pm0.3$ and
-$\pm0.2$, respectively. For all three components the median error of an
+grows toward the blue, where scattered moonlight is brightest. Its RMS over
+the observations is 0.3 in these units near 4000\,\AA, where the median
+continuum with the Moon up is 5, and 0.5 at the blue end. The RMS of the
+zodiacal and diffuse errors is below 0.1 and 0.15, respectively. For all three components the median error of an
 observation is narrowly distributed around zero, within or near the
 single-fiber noise.
 
 Figure~\ref{fig:atlas} condenses the comparison into percentile bands at
-each wavelength, separately for the Moon down (1090 observations,
-$f_{\rm pred}\le1/150$) and the Moon up (1798). Here the whole predicted sky
+each wavelength, separately for the Moon down (1101 observations,
+$f_{\rm pred}\le1/150$) and the Moon up (1751). Here the whole predicted sky
 is compared with the full decomposition of the science spectrum. The
 residual is therefore the transfer error alone: it contains neither the
 emission of the science field nor the residual of the decomposition's own
 fit. The median is consistent with zero at every wavelength. Its magnitude
 is typically 3\% of the single-fiber noise with the Moon down and 2\% with
-the Moon up, and nowhere more than 26\% and 38\%. As a fraction of the sky
-it is about 0.2\% in each of the blue, red and near-infrared ranges, with
-the prediction slightly high. The 68\% range lies inside the single-fiber
-noise on 97\% of pixels in both regimes, so for a typical observation the
+the Moon up, and nowhere more than 40\% and 33\%. As a fraction of the sky
+it is 0.3\% in the blue, 0.25\% in the red and 0.14\% in the
+near-infrared, with the prediction slightly high. The 68\% range lies inside
+the single-fiber noise on 97\% of pixels in both regimes, so for a typical observation the
 transfer error is below the photon noise of one fiber almost everywhere.
 The exceptions are the bright lines: [O\,\textsc{i}]\,5577 and 6300,
 Na\,\textsc{i}\,D and the OH bands beyond 7300\,\AA, where the line flux far
@@ -1817,8 +1890,8 @@ two-tailed 68.3, 95.5 and 99.7\% ranges (solid, dashed, dotted), the median
 \centering
 \includegraphics[width=\textwidth]{figures/wavelength_residual_atlas.pdf}
 \caption{Decomposition minus prediction of the science sky at each
-wavelength, for the held-out observations with the Moon down (top, 1090
-observations) and up (bottom, 1798), in units of
+wavelength, for the held-out observations with the Moon down (top, 1101
+observations) and up (bottom, 1751), in units of
 $10^{-14}$\,erg\,s$^{-1}$\,cm$^{-2}$\,\AA$^{-1}$. The truth is the full
 decomposition of the science spectrum, so the residual contains only the
 transfer error. The black line is the median over observations, and the dark
@@ -1975,18 +2048,22 @@ residuals of the sky arms, and the science spectrum itself.
 \label{sec:armcorr}
 
 In the blue, the residual of every decomposition is dominated by one
-pattern. Relative to the solar part of the model, $S$, the sum of moonlight
-and zodiacal light, it has an RMS of 10\% below 5000\,\AA{} and reaches
-36\% at the 99th percentile, at the Balmer lines, Ca\,\textsc{ii} H and K and
-the G band. On observations with a bright continuum, the fractional residual
-of the science spectrum correlates at 0.98 with a single fixed template. The
-solar spectrum is in the basis (Section~\ref{sec:moonfam}), so this is a
-mismatch of its lines, not their absence. A wavelength shift explains none
-of it. The observed lines are broader than the model's, by $+0.50$\,\AA$^2$
-in Gaussian variance, very consistently, and about 21\% shallower, as the
-filling-in of Fraunhofer lines by Raman scattering would produce. Together
-these three explain only 29\% of the pattern, so it is not corrected in the
-template.
+pattern of solar absorption lines: the Balmer lines, Ca\,\textsc{ii} H and K
+and the G band. The solar spectrum is in the basis
+(Section~\ref{sec:moonfam}), so this is a mismatch of its lines, not their
+absence. With the blue LSF fitted to the sky lines alone, as in the previous
+decomposition, the pattern had an RMS of 10\% of the solar part of the
+model, $S$ (the sum of moonlight and zodiacal light), below 5000\,\AA, and
+36\% at the 99th percentile. On observations with a bright continuum, the
+fractional residual of the science spectrum correlated at 0.98 with a single
+fixed template. A wavelength shift explained none of it. The observed lines
+were broader than the model's, by $+0.50$\,\AA$^2$ in Gaussian variance,
+and about 21\% shallower, as the filling-in of Fraunhofer lines by Raman
+scattering would produce. The reference blue LSF of Section~\ref{sec:lsf}
+removes much of the width mismatch. On 2000 observations, the fractional
+residual of the brighter half falls from 5.0\% to 2.2\% of $S$, and the
+median blue $\chi^2$ of the science decomposition from 1.21 to 0.61. The
+rest of the pattern remains.
 
 The two sky arms carry the same pattern at the same instant, so their
 residuals measure it directly. For arm $a$ (near or far) with observed
@@ -2012,7 +2089,7 @@ arms are combined with inverse-variance weights,
 with the photon variance of each arm's median spectrum
 (Section~\ref{sec:noise}).
 
-Two safeguards were found necessary. First, an arm whose own decomposition
+Three safeguards were found necessary. First, an arm whose own decomposition
 failed carries a residual unrelated to the science spectrum. An arm is
 therefore dropped when the RMS of $(y_a-m_a)/S_a$ below 5000\,\AA{} exceeds
 0.25; the median is 0.06, and failed fits sit near 1. Without this gate a
@@ -2021,8 +2098,22 @@ faint observations the arm noise competes with the pattern. A running median
 over three pixels then helps, but on bright observations it smooths the
 pattern itself. It is therefore applied only where the solar continuum is
 faint, at a signal-to-noise ratio below 100 against the combined arm noise.
-A wider filter discards the pattern: with a 10\,\AA{} running median the
-near-arm correction keeps only about a quarter of its gain.
+A wider filter discards the pattern; with the previous blue LSF, a
+10\,\AA{} running median kept only about a quarter of the near-arm gain.
+Third, a narrow feature in one sky field, such as nebular emission, a star
+or a cosmic ray, is not part of the shared pattern, but the weighted mean
+would carry about half of it into the science spectrum. Where the two
+arms' scaled residuals differ by more than five times their combined
+photon noise, the correction therefore takes the arm with the smaller
+residual instead of the mean. This affects 1.8\% of the pixels. For a
+2.5\,\AA-wide line injected into the near arm only, at 0.3, 1 and 3 times
+the local continuum, the fraction transferred to the science falls from
+48\% to 7, 1.4 and 0.3\%. The cost is small: the median blue $\chi^2$ of
+the corrected science decomposition rises from 0.129 to 0.138. Smoothing
+does much worse at the same task: an 8\,\AA{} running median still
+transfers 15--25\% of such a line and doubles that $\chi^2$. A feature that
+appears in both sky fields passes, as it must, since it is then
+indistinguishable from the shared sky pattern.
 
 By default the correction is applied below 5000\,\AA. It ends in a cosine
 taper over the following 100\,\AA{} rather than a step. The taper lies
@@ -2031,22 +2122,25 @@ lose about half of the gain over the last 100\,\AA{} of the range. The
 correction is equally effective redward of 5000\,\AA, so it can be extended
 to the whole band.
 
-Table~\ref{tab:armcorr} summarises the effect on the 2888 held-out
-observations. Below 5000\,\AA, the median $\chi^2$ falls from 1.13 to 0.22,
+Table~\ref{tab:armcorr} summarises the effect on the 2852 held-out
+observations. Below 5000\,\AA, the median $\chi^2$ falls from 0.63 to 0.23,
 and 0.9\% of the observations end up worse than uncorrected. The near arm
-alone, unscaled and unsmoothed, reaches 0.32 and makes 16\% of the
-observations worse. Compared with the near arm alone, the two arms lower the
-$\chi^2$ by a factor of 0.58 in the faintest quartile of the solar
-continuum, because their noise averages down, and still by 17\% in the
-brightest. The gain is smaller in
-crowded fields, where part of the residual is the science target's own
-light. Over the full band, with the correction applied everywhere, the
-median $\chi^2$ falls from 1.27 to 0.27, with no observation worse. The
-choice of $k_a$ matters little below 5000\,\AA. Over the full band the
-total-model ratio is best (0.269), ahead of the solar ratio (0.276) and of
-no scaling (0.287). The difference is largest on OH-line pixels, 0.85
-against 0.93 for the solar ratio. There the residual scales with the OH,
-not with the sunlight.
+alone, unscaled and unsmoothed, reaches 0.32 and makes 18\% of the
+observations worse. The two arms beat it on 82\% of the observations;
+relative to it they lower the $\chi^2$ by a factor of 0.61 in the faintest
+quartile of the moonlight, because their noise averages down, and by 10\%
+in the brightest. With the reference blue LSF the pattern is broader on
+average, so a 10\,\AA{} median of the near arm now keeps most of its gain
+(0.36), but it also transfers narrow features of that sky field. The gain
+is smaller in crowded fields, where part of the residual is the science
+target's own light. Over the full band, with the correction applied
+everywhere, the median $\chi^2$ falls from 1.12 to 0.41, with 0.1\% of the
+observations worse. On the previous decomposition the choice of $k_a$
+mattered little below 5000\,\AA. Over the full band the total-model ratio
+was best (0.269), ahead of the solar ratio (0.276) and of no scaling
+(0.287), and the difference was largest on OH-line pixels, 0.85 against
+0.93 for the solar ratio. There the residual scales with the OH, not with
+the sunlight.
 
 \begin{deluxetable}{lccc}
 \tablecaption{Median $\chi^2$ below 5000\,\AA{} on the held-out
@@ -2054,11 +2148,11 @@ observations, against the single-fiber noise.\label{tab:armcorr}}
 \tablehead{\colhead{} & \colhead{all} & \colhead{uncrowded} &
 \colhead{crowded}}
 \startdata
-uncorrected & 1.13 & 1.03 & 1.19 \\
-near arm only, $k=1$ & 0.32 & 0.23 & 0.54 \\
-\quad with 10\,\AA{} median & 0.90 & 0.79 & 0.98 \\
-both arms, Eq.~(\ref{eq:arm-estimate}) & 0.22 & 0.14 & 0.32 \\
-decomposition's own fit & 0.91 & & \\
+uncorrected & 0.63 & 0.58 & 0.69 \\
+near arm only, $k=1$ & 0.32 & 0.23 & 0.55 \\
+\quad with 10\,\AA{} median & 0.36 & 0.29 & 0.45 \\
+both arms, Eq.~(\ref{eq:arm-estimate}) & 0.23 & 0.16 & 0.35 \\
+decomposition's own fit & 0.49 & 0.47 & 0.53 \\
 \enddata
 \tablecomments{Crowded fields are those with fewer than 37\% of their
 science fibers left after the rejection of Gaia stars.}
@@ -2115,43 +2209,52 @@ line (Section~\ref{sec:sciencesafe}).
 
 In production the fit is made on each fiber, so that it also absorbs
 variations of the sky lines across the IFU and differences in fiber
-throughput. It was evaluated on the median science spectra of 600 held-out
-observations, after a full-band sky-arm correction (Table~\ref{tab:linescale}).
-In the red the median $\chi^2$ falls from 0.46 to 0.30, and on the OH-line
-pixels from 1.19 to 0.20, against 0.61 for the decomposition's own fit.
+throughput. It was evaluated on the median science spectra of the 2852
+held-out observations, after a full-band sky-arm correction
+(Table~\ref{tab:linescale}). In the red the median $\chi^2$ falls from 0.51
+to 0.35, and on the OH-line pixels from 1.11 to 0.32, against 0.86 for the
+decomposition's own fit.
 The scales are fitted on the high-passed lines, but the correction also
 carries the broad part of the templates, the line wings and blends. That part
-is needed on average: without it the median $\chi^2$ in the red is 0.70.
-On 8\% of the observations the $\chi^2$ in the red nevertheless rises, by at
-most 7.6\%. This is not damage to the lines. These observations carry, before
-the correction, a broad positive offset between the lines of 2.1\% of the sky
-continuum. That is continuum light, mostly in crowded fields. It meets the
-broad part of the correction, which is small and of opposite sign. Once broad
-offsets are removed from the residual by a 100\,\AA{} high-pass, the
-correction improves the same observations, with the median $\chi^2$ falling
-from 0.28 to 0.14. Only 1.5\% of all observations are then worse. Confining
+is needed on average: without it the median $\chi^2$ in the red was 0.70
+on the previous decomposition. On 8.7\% of the observations the $\chi^2$ in
+the red nevertheless rises, by at most 9\%. This is not damage to the lines.
+On the previous decomposition such observations carried, before the
+correction, a broad positive offset between the lines of 2.1\% of the sky
+continuum: continuum light, mostly in crowded fields. It meets the broad
+part of the correction, which is small and of opposite sign. Once broad
+offsets are removed from the residual by a 100\,\AA{} high-pass, the median
+$\chi^2$ in the red falls from 0.49 to 0.20, and only 1.5\% of the
+observations are worse. Confining
 the correction to the line regions would lower the raw count, but only by
 discarding real line correction: the high-passed $\chi^2$ rises from 0.15 to
-0.20 when the correction is kept only where the lines exceed the continuum.
+0.20 when the correction is kept only where the lines exceed the continuum
+(previous decomposition).
 Dropping the correction whenever it raises the $\chi^2$ of the spectrum is
 not an option either. That $\chi^2$ includes the science continuum, and a
 star of 0.3--10 times the sky continuum reversed such a decision on 40--75\%
-of the observations. The fitted scales can be checked
-against the decomposition of the same science spectrum, whose band
-brightness relative to the prediction is the true scale. The median error
-of the fit is 0.1--0.6\% per band, where the prediction alone misses by
-1.5--2.7\%; the correlation with the truth is 0.95--1.00. The result barely
-depends on the settings. High-pass widths of 10--50\,\AA, prior widths of
+of the observations. The remaining numbers in this paragraph were measured
+on 600 held-out observations of the previous decomposition. The fitted
+scales can be checked against the decomposition of the same science
+spectrum, whose band brightness relative to the prediction is the true
+scale. The median error of the fit was 0.1--0.6\% per band, where the
+prediction alone missed by 1.5--2.7\%; the correlation with the truth was
+0.95--1.00. The result barely depends on the settings. High-pass widths of 10--50\,\AA, prior widths of
 0.03--0.3 and the fit with or without Huber weights all agree to 0.003 in
 the red. The temperature terms help on the OH pixels (0.22 to 0.20); a
 single scale for all OH bands is clearly worse (0.29).
 
 \begin{deluxetable}{lccc}
-\tablecaption{Median $\chi^2$ of the sky-line scaling on 600 held-out
+\tablecaption{Median $\chi^2$ of the sky-line scaling on the held-out
 observations.\label{tab:linescale}}
 \tablehead{\colhead{} & \colhead{red} & \colhead{OH lines} &
 \colhead{full}}
 \startdata
+uncorrected & 1.44 & 1.87 & 1.12 \\
+sky-arm correction & 0.51 & 1.11 & 0.41 \\
+\quad + line scaling & 0.35 & 0.32 & 0.31 \\
+decomposition's own fit & 0.96 & 0.86 & 0.77 \\
+\multicolumn{4}{l}{previous decomposition, 600 observations:} \\
 sky-arm correction & 0.46 & 1.19 & 0.36 \\
 \quad + line scaling & 0.30 & 0.20 & 0.27 \\
 \quad\quad without science protection & 0.28 & 0.20 & 0.26 \\
@@ -2159,9 +2262,11 @@ sky-arm correction & 0.46 & 1.19 & 0.36 \\
 decomposition's own fit & 0.73 & 0.61 & 0.93 \\
 \enddata
 \tablecomments{Red: $\lambda\ge6000$\,\AA. OH lines: pixels where the
-predicted OH emission exceeds three times the median of the rest of the
-predicted sky. The sky-arm
-correction is applied over the full band.}
+OH emission exceeds three times the median of the rest of the sky (on the
+current decomposition, of the science spectrum's decomposition; on the
+previous one, of the prediction). The sky-arm correction is applied over the
+full band. The current sample is the 2852 held-out observations of the
+decomposition with the reference blue LSF.}
 \end{deluxetable}
 
 \subsubsection{Protecting the science signal}
@@ -2170,7 +2275,7 @@ correction is applied over the full band.}
 The line scaling is fitted on the spectrum it corrects, so any science
 signal that projects onto the sky-line templates leaks into the sky model and
 is subtracted from the science. This was tested by injection into 120
-uncrowded held-out observations. The stars were PHOENIX spectra
+uncrowded held-out observations of the previous decomposition. The stars were PHOENIX spectra
 \citep{Husser2013} of a G2 dwarf, K3 dwarf and giant, and M2 dwarf and M3
 giant, at 0.3 to 10 times the sky continuum and radial velocities within
 $\pm150$\,km\,s$^{-1}$. The lines were 15 red nebular lines at 0.5 and 3

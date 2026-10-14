@@ -44,12 +44,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-from sky_decomp.fit import reconstruct_component_spectra
-from sky_decomp.lsf_surface_iterative import (
-    LSFSurfaceState,
-    SkyDecompLSFSurfaceIterative,
-    load_lsf_surface_state,
-)
+from sky_decomp.lsf_surface_iterative import LSFSurfaceState, load_lsf_surface_state
 
 # ==========================================================================
 # Extracted from notebook cell id=f4b17802
@@ -956,26 +951,12 @@ def _wavelength_from_name(name):
     return float(lam) if lam is not None and np.isfinite(lam) else float('nan')
 
 
-def coef_wavelengths_from_basis(
-    coef_names,
-    wave,
-    lsf_sigma,
-    base_dir=None,
-    n_spline_knots=25,
-    split_zodi=False,
-    n_zodi_spline_knots=3,
-    palace_oh_suffix=None,
-    palace_diffuse_suffix=None,
-    only_indices=None,
-    verbose=True,
-    return_k_eff=False,
-    decomposer=None,
-):
+def coef_wavelengths_from_basis(coef_names, wave, decomposer, verbose=True):
     """Per-coefficient wavelength centroid and B^2-weighted effective extinction.
 
-    Exploits linearity of the decomposition: reconstructing with coef = e_j
-    returns basis component j on its own, so we read two scalars per
-    coefficient in one reconstruction pass:
+    Read straight off ``decomposer``'s design matrix (build it with
+    `make_corpus_basis_decomposer`): design row j is basis component j, so two
+    scalars per coefficient follow directly:
 
       1. INTENSITY-WEIGHTED CENTROID (reporting / binning):
              lambda_eff(j) = sum(lambda |f_j|) / sum(|f_j|)
@@ -986,137 +967,45 @@ def coef_wavelengths_from_basis(
          amplitude picks up the B^2-weighted average of any wavelength-dependent
          factor multiplying the true emissivity, so <k>_{B^2} is the correct
          effective extinction, not k(centroid). For narrow-line components
-         |f_j| is sharply peaked and both weightings agree; the correction only
-         matters for HO2 / FeO / O2Ac (continuum group) and any other broadband
-         basis functions.
+         both weightings agree; it only matters for HO2 / FeO / O2Ac and any
+         other broadband basis functions.
 
-    Read straight off the decomposer's design matrix when one is available
-    (~1 s for 388 coefficients); the per-coefficient reconstruction loop is
-    only a fallback. Nothing is cached: the build is cheap, and a cache keyed
-    on the coefficient names cannot tell two decomposition bases apart.
-    Components that reconstruct to zero (outside the wavelength range) leave
-    NaN in both arrays and fall back to name parsing / group defaults
-    downstream.
-
-    Returns `wavelengths_a` by default, or `(wavelengths_a, k_eff_a)` when
-    `return_k_eff=True`.
+    The decomposer must be built with the corpus's per-pixel ``lsf_sigma``
+    (a scalar 1.0 moves OH centroids by a median 224 A).  Components that
+    reconstruct to zero leave NaN in both arrays and fall back to name parsing
+    / group defaults downstream.  Returns ``(wavelengths_a, k_eff_a)``.
     """
     coef_names = [str(n) for n in coef_names]
     n_coef = len(coef_names)
     wave = np.asarray(wave, dtype=np.float64)
-
-    if base_dir is None:
-        if '_infer_base_dir_for_reconstruction' not in globals():
-            raise RuntimeError(
-                'base_dir not given and _infer_base_dir_for_reconstruction() is '
-                'not defined yet; run the reconstruction-helpers cell first or '
-                'pass base_dir= explicitly.'
-            )
-        base_dir = _infer_base_dir_for_reconstruction()
-
-    if only_indices is None:
-        targets = np.arange(n_coef)
-    else:
-        targets = np.unique(np.asarray(only_indices, dtype=int))
-        if verbose:
-            print(f'Basis wavelengths: evaluating {targets.size} of {n_coef} '
-                  f'coefficients (one reconstruction call each).')
-
     k_wave = np.asarray(_lco_extinction_k(wave), dtype=np.float64)
     lam_eff = np.full(n_coef, np.nan, dtype=np.float64)
     k_eff = np.full(n_coef, np.nan, dtype=np.float64)
-
-    # FAST, EXACT PATH: read the basis rows straight off the decomposer.
-    #
-    # Reconstructing with coef = e_j returns design row j and nothing else, so
-    # the 388 reconstruction calls below are computing something the design
-    # matrix already holds.  Verified bit-identical to the loop -- max
-    # |lambda diff| and max |k_eff diff| both exactly 0.0 over 33 probed
-    # coefficients spanning every family -- provided the decomposer is built
-    # with the SAME `lsf_sigma`.  (Building it with a scalar 1.0 instead of the
-    # per-pixel lsf_ref/2.35 moves OH centroids by a median 224 A, which is how
-    # this was nearly got wrong.)
-    #
-    # `decomposer` is how a caller supplies a non-split-zodi basis: the telluric
-    # variant groups OH by (v_upper, N_upper, F_upper) and `reconstruct_
-    # component_spectra` below can only build the split-zodi grouping, so
-    # without this the telluric cache could not be built at all.
-    _model = decomposer
-    if _model is None:
-        try:
-            _model = make_reconstruction_decomposer(
-                wave, n_spline_knots=n_spline_knots, base_dir=base_dir,
-                split_zodi=bool(split_zodi),
-                n_zodi_spline_knots=int(n_zodi_spline_knots),
-                palace_oh_suffix=palace_oh_suffix,
-                palace_diffuse_suffix=palace_diffuse_suffix,
-                telluric=None)
-            _model.lsf_sigma = lsf_sigma          # recorded for provenance only
-        except Exception as _exc_model:
-            if verbose:
-                print(f'  basis fast path unavailable ({type(_exc_model).__name__}: '
-                      f'{_exc_model}); using the per-coefficient loop.')
-            _model = None
-    if _model is not None:
-        _dn = [str(x) for x in getattr(_model, 'design_names', ())]
-        _dm = np.asarray(getattr(_model, 'design_matrix', np.empty((0, 0))),
-                         dtype=np.float64)
-        if _dn and _dm.shape[0] == len(_dn):
-            _by_name = {nm: i for i, nm in enumerate(_dn)}
-            _absent = [coef_names[j] for j in targets
-                       if coef_names[j] not in _by_name]
-            if _absent:
-                raise KeyError(
-                    f'{len(_absent)} coefficient(s) are absent from the '
-                    f'decomposer design ({_absent[:6]}); the decomposer does '
-                    f'not describe this corpus')
-            for j in targets:
-                _g = np.abs(_dm[_by_name[coef_names[j]]])
-                _t = float(np.nansum(_g))
-                if not (np.isfinite(_t) and _t > 0.0):
-                    continue
-                lam_eff[j] = float(np.nansum(wave * _g) / _t)
-                _g2 = _g * _g
-                _s2 = float(np.nansum(_g2))
-                if np.isfinite(_s2) and _s2 > 0.0:
-                    k_eff[j] = float(np.nansum(_g2 * k_wave) / _s2)
-            targets = np.empty(0, dtype=int)      # nothing left for the loop
-            if verbose:
-                print(f'  basis wavelengths read from the decomposer design '
-                      f'({len(_dn)} rows); no per-coefficient reconstruction '
-                      f'needed.')
-        elif verbose:
-            print(f'  decomposer exposes no aligned design_names/design_matrix '
-                  f'(names={len(_dn)}, rows={_dm.shape[0]}); using the loop.')
-    for j in targets:
-        unit = np.zeros(n_coef, dtype=np.float64)
-        unit[j] = 1.0
-        comps = reconstruct_component_spectra(
-            wave=wave,
-            coef=unit,
-            lsf_sigma=lsf_sigma,
-            n_spline_knots=n_spline_knots,
-            split_zodi=split_zodi,
-            n_zodi_spline_knots=n_zodi_spline_knots,
-            palace_oh_suffix=palace_oh_suffix,
-            palace_diffuse_suffix=palace_diffuse_suffix,
-            base_dir=base_dir,
-        )
-        f = np.abs(np.asarray(comps['total'], dtype=np.float64))
-        tot = float(np.nansum(f))
-        if np.isfinite(tot) and tot > 0.0:
-            lam_eff[j] = float(np.nansum(wave * f) / tot)
-            f2 = f * f
-            f2_sum = float(np.nansum(f2))
-            if np.isfinite(f2_sum) and f2_sum > 0.0:
-                k_eff[j] = float(np.nansum(f2 * k_wave) / f2_sum)
-
+    _dn = [str(x) for x in decomposer.design_names]
+    _dm = np.asarray(decomposer.design_matrix, dtype=np.float64)
+    if _dm.shape[0] != len(_dn):
+        raise ValueError(f'decomposer design has {_dm.shape[0]} rows for {len(_dn)} names')
+    _by_name = {nm: i for i, nm in enumerate(_dn)}
+    _absent = [nm for nm in coef_names if nm not in _by_name]
+    if _absent:
+        raise KeyError(
+            f'{len(_absent)} coefficient(s) are absent from the decomposer design '
+            f'({_absent[:6]}); the decomposer does not describe this corpus')
+    for j, nm in enumerate(coef_names):
+        _g = np.abs(_dm[_by_name[nm]])
+        _t = float(np.nansum(_g))
+        if not (np.isfinite(_t) and _t > 0.0):
+            continue
+        lam_eff[j] = float(np.nansum(wave * _g) / _t)
+        _g2 = _g * _g
+        _s2 = float(np.nansum(_g2))
+        if np.isfinite(_s2) and _s2 > 0.0:
+            k_eff[j] = float(np.nansum(_g2 * k_wave) / _s2)
     if verbose:
-        n_ok = int(np.isfinite(lam_eff).sum())
-        n_ok_k = int(np.isfinite(k_eff).sum())
-        print(f'Basis wavelengths derived for {n_ok}/{n_coef} coefficients; '
-              f'basis B^2-weighted extinction k for {n_ok_k}/{n_coef}.')
-    return (lam_eff, k_eff) if return_k_eff else lam_eff
+        print(f'Basis wavelengths derived for {int(np.isfinite(lam_eff).sum())}/{n_coef} '
+              f'coefficients; basis B^2-weighted extinction k for '
+              f'{int(np.isfinite(k_eff).sum())}/{n_coef}.')
+    return lam_eff, k_eff
 
 
 def resolve_coef_wavelengths_a(
@@ -2029,7 +1918,7 @@ def load_o2_vector_if_available(decomp_fits_path, spectrum_index):
     VECTOR_O2 ImageHDU (n_rows x n_wave) alongside COEF / META. Older
     decomposition products predate the split of the O2 amplitude into the
     coefficient, so their VECTOR_O2 is missing and the O2 basis reconstructs to
-    zero (matching the historical behaviour of reconstruct_component_spectra).
+    zero.
     """
     path = Path(decomp_fits_path)
     if not path.exists():
@@ -2054,64 +1943,31 @@ def load_o2_vector_if_available(decomp_fits_path, spectrum_index):
     return row
 
 
-# --- decomposition variants -------------------------------------------------
-# Two decomposition flavours now exist for the same corpus, and they differ in
-# more than a filename:
+# --- the decomposition -------------------------------------------------------
+# The corpus is decomposed with `sky_decomp.solar_lsf.SkyDecompPalaceCorrSolarBlueLSF`
+# (decompose_parallel's only fit model): PALACE VNF lines with OH grouped by
+# (v_upper, N_upper, F_upper) and ridge-corrected line strengths, a continuous
+# M-spline 2-D LSF whose blue channel is solar-constrained or held at the
+# survey reference, and TELLURIC ABSORPTION in the fit.  For anything that
+# reconstructs a spectrum from coefficients this means:
 #
-#   'split_zodi'  the production LSF-surface-iterative split-zodi fit.
-#                 One design matrix serves every row, which is what lets the
-#                 diagnostics hoist a single decomposer.
-#   'telluric'    palace-aijc-vnf-split-zodi-lsf-spline2d: PALACE VNF lines
-#                 with OH grouped by (v_upper, N_upper, F_upper), a continuous
-#                 M-spline 2-D LSF, and TELLURIC ABSORPTION in the fit.
-#
-# Two consequences for anything that reconstructs a spectrum from coefficients:
-#
-# 1. The LSF state is stored in a different representation
-#    ('continuous_mspline_density' vs 'native_grid_channel_median'), so the
-#    iterative class cannot read it -- `evaluate_lsf_surface` raises "state does
-#    not contain a discrete 11-tap LSF".  The spline2d class must be used.
+# 1. The reconstruction must use the same class (`make_reconstruction_decomposer`):
+#    its blue moonlight and zodiacal light are rendered through the solar
+#    operator with the row's LSF state, and its LSF surfaces are 11 x 4.
 # 2. Every family matrix is divided by that ROW's DRP transmission, so the
-#    design matrix is per-row and cannot be hoisted.  Rebuilding it costs about
-#    0.17 s/row (0.12 s construct + 0.05 s assemble), which is affordable.
+#    design matrix is per-row (`telluric_row_kwargs`); rebuilding it costs
+#    about 0.17 s/row.
 #
-# What does NOT change: the coefficient vector is the same 388 names in the same
-# order, so every coefficient-space quantity -- the ML targets, the group
-# indices, the integrated amplitudes A_g = c_g . v_g -- is directly comparable
-# between the two corpora.  Amplitudes deliberately keep the TELLURIC-FREE
-# template integrals `v_g`: the coefficient multiplies the same physical
-# template in both flavours and the transmission is a per-row correction applied
-# to it, so using the plain integrals is both the physical amplitude and the
-# only choice that makes the two corpora comparable.
-# 2026-09-18: the non-telluric variant was REMOVED from this branch.  The
-# telluric fit is the only supported decomposition here -- it fits ~30% better
-# full-band, and carrying a second variant meant every reconstruction path, the
-# wavelength cache and the diagnostics all had to branch.  A corpus written by
-# the old `_lsf_surface_iterative_split_zodi` path is no longer loadable from
-# this branch; check out a commit before this one to read it.
-#
-# `palace_oh_suffix` selects the OH line file, `pmd_popmodel_OH{suffix}.dat`
-# (None = the canonical PALACE file).  It MUST match the fit: the palacecorr
-# coefficients are nearly identical to the palace ones (OH p90 0.8%), so a
-# reconstruction on the wrong OH file is invisible in coefficient space and
-# wrong by +0.11 dex in r-band OH flux.  Every telluric basis gets it from here,
-# through `telluric_row_kwargs` -> `make_reconstruction_decomposer`.
-DECOMP_VARIANTS = {
-    'telluric': {
-        'suffix': '_palace_aijc_vnf_split_zodi_lsf_spline2d',
-        'telluric': True,
-        'palace_oh_suffix': None,
-    },
-    # 2026-09-24: SkyFar ridge-corrected PALACE OH line strengths, decompose_
-    # parallel's default fit model from that date.  Must equal sky_decomp's
-    # SKYFAR_LINEAR_RIDGE_PALACE_OH_SUFFIX (tested; not imported, to keep this
-    # module importable without the physics model).
-    'telluric-palacecorr': {
-        'suffix': '_palacecorr_aijc_vnf_split_zodi_lsf_spline2d',
-        'telluric': True,
-        'palace_oh_suffix': '_skyfar_linear_ridge_0p1_v1',
-    },
-}
+# Integrated amplitudes A_g = c_g . v_g keep the TELLURIC-FREE template
+# integrals: the coefficient multiplies the physical template and the
+# transmission is a per-row correction applied to it.
+DECOMP_SUFFIX = '_palacecorr_aijc_vnf_split_zodi_lsf_spline2d_solarblue'
+# The OH line file, `pmd_popmodel_OH{suffix}.dat`.  It MUST match the fit: a
+# reconstruction on the canonical file is invisible in coefficient space and
+# wrong by +0.11 dex in r-band OH flux.  Equal to sky_decomp's
+# SKYFAR_LINEAR_RIDGE_PALACE_OH_SUFFIX (tested; not imported, to keep this
+# module importable without the physics model).
+PALACE_OH_SUFFIX = '_skyfar_linear_ridge_0p1_v1'
 # decompose_parallel's fallback when META.pwv_med is missing or non-positive.
 DRP_DEFAULT_PWV_MM = 15.0
 
@@ -2133,53 +1989,11 @@ def default_telluric_calculator():
     return _TELLURIC_CALCULATOR
 
 
-def decomp_variant_for_suffix(suffix):
-    """Variant name for a decomposition suffix, or None if unrecognised."""
-    for _name, _spec in DECOMP_VARIANTS.items():
-        if str(suffix) == _spec['suffix']:
-            return _name
-    return None
-
-
-# Markers of the telluric / PALACE fit-model family.  None of them occurs in a
-# legacy non-telluric suffix (`_lsf_surface_iterative_split_zodi`, ...), so an
-# unregistered suffix carrying one is a NEW telluric variant this module does
-# not know -- and treating it as legacy would silently build the non-telluric
-# basis with the canonical OH file.
-_TELLURIC_FAMILY_MARKERS = ('palace', 'telluric', 'spline2d')
-
-
-def decomp_variant_spec(suffix):
-    """``DECOMP_VARIANTS`` entry for a suffix, or None for a legacy non-telluric one.
-
-    Raises for an unregistered suffix from the telluric family instead of
-    returning None: that is how a new fit model would otherwise be reconstructed
-    on the wrong basis without any error.
-    """
-    _name = decomp_variant_for_suffix(suffix)
-    if _name is not None:
-        return DECOMP_VARIANTS[_name]
-    _s = str(suffix or '').lower()
-    if any(_m in _s for _m in _TELLURIC_FAMILY_MARKERS):
-        raise ValueError(
-            f'decomposition suffix {suffix!r} looks like a telluric fit model '
-            f'but is not registered in data.DECOMP_VARIANTS '
-            f'({sorted(v["suffix"] for v in DECOMP_VARIANTS.values())}); add it, '
-            f'with its palace_oh_suffix, before reconstructing from it')
-    return None
-
-
-def palace_oh_suffix_for(decomp_suffix):
-    """The OH line-file suffix a decomposition was fitted with (None = canonical)."""
-    _spec = decomp_variant_spec(decomp_suffix)
-    return None if _spec is None else _spec.get('palace_oh_suffix')
-
-
 def telluric_row_kwargs(meta, row_index, kind, wave, lsf_row,
-                        telluric_calculator=None, palace_oh_suffix=None):
+                        telluric_calculator=None):
     """Per-row telluric constructor kwargs, mirroring decompose_parallel.
 
-    Reproduces `_telluric_decomposer_for_row` exactly, because a reconstruction
+    Reproduces decompose_parallel `_telluric_decomposer` exactly, because a reconstruction
     built on a different transmission than the fit is not the same model:
 
     * `pwv_mm` from META.pwv_med, falling back to DRP_DEFAULT_PWV_MM when it is
@@ -2190,10 +2004,6 @@ def telluric_row_kwargs(meta, row_index, kind, wave, lsf_row,
       lines themselves; for a sky arm it is selected by the sky_near/far LABEL,
       not by the column name, because the near/far assignment flips per
       exposure.
-    * `palace_oh_suffix` is the variant's OH line file (`palace_oh_suffix_for`).
-      It rides in the bundle so that every decomposer built from it gets the
-      OH templates the row was fitted with; `make_reconstruction_decomposer`
-      pops it back out.
     """
     if telluric_calculator is None:
         telluric_calculator = default_telluric_calculator()
@@ -2225,8 +2035,7 @@ def telluric_row_kwargs(meta, row_index, kind, wave, lsf_row,
         np.asarray(wave, dtype=np.float64), _lsf[None, :], _pwv, _sci_am,
         telluric_calculator), dtype=np.float64).ravel()
     return {'telluric_calculator': telluric_calculator, 'pwv_mm': _pwv,
-            'source_airmass': _src_am, 'drp_transmission': _trans,
-            'palace_oh_suffix': palace_oh_suffix}
+            'source_airmass': _src_am, 'drp_transmission': _trans}
 
 
 def telluric_representative_row(input_fits_path):
@@ -2344,8 +2153,7 @@ def science_line_mask_rows(input_fits_path, wave, flux_sci, flux_sky, *,
     extra = tuple((str(n), float(l)) for n, l in extra_lines)
     out = np.empty(sci.shape, dtype=bool)
     for i in range(sci.shape[0]):
-        v = (_dp.measure_halpha_velocity(wave, sci[i], sky[i])
-             if _dp.SCIENCE_LINE_MASK_CENTRE_ON_HALPHA else 0.0)
+        v = _dp.measure_halpha_velocity(wave, sci[i], sky[i])
         out[i] = static if v == 0.0 else _dp.science_line_mask(
             wave, ref, centre_velocity_km_s=v)[0]
         if extra:
@@ -2355,8 +2163,7 @@ def science_line_mask_rows(input_fits_path, wave, flux_sci, flux_sky, *,
     return out if np.ndim(flux_sci) > 1 else out[0]
 
 
-def make_telluric_row_lookup(input_fits_path, wave=None, verbose=True, *,
-                             decomp_suffix):
+def make_telluric_row_lookup(input_fits_path, wave=None, verbose=True):
     """Return ``f(kind, row) -> telluric kwargs`` bound to one input stack.
 
     `kind` is 'sci' / 'sky1' / 'sky2' (or 'near' / 'far'), `row` is a row index
@@ -2366,23 +2173,10 @@ def make_telluric_row_lookup(input_fits_path, wave=None, verbose=True, *,
     META and the three LSF planes are read once and held; the transmission
     itself is ~6 ms/row.
 
-    Call this ONLY for a telluric corpus, and decide that from the decomposition
-    SUFFIX (`decomp_variant_for_suffix`) -- not from the presence of the META
-    columns.  Both corpora are built from the same input stack, so `pwv_med` and
-    the per-arm airmasses are present either way and cannot discriminate.
-    Missing columns therefore raise here rather than silently degrading.
-
-    `decomp_suffix` is REQUIRED: it selects the OH line file that every bundle
-    this lookup returns carries (`palace_oh_suffix_for`), so the telluric
-    variants cannot be reconstructed on each other's OH templates.
+    Missing META columns raise here rather than silently degrading.
     """
     from astropy.io import fits as _fits
     from astropy.table import Table as _Table
-    _spec = decomp_variant_spec(decomp_suffix)
-    if _spec is None or not _spec['telluric']:
-        raise ValueError(f'make_telluric_row_lookup: {decomp_suffix!r} is not a '
-                         f'telluric decomposition suffix')
-    _oh_suffix = _spec.get('palace_oh_suffix')
     _need = {'pwv_med', 'sci_airmass', 'skye_airmass', 'skyw_airmass',
              'sky_near_label', 'sky_far_label'}
     _lsf_ext = {'sci': 'LSF_SCI', 'sky1': 'LSF_SKY_NEAR', 'near': 'LSF_SKY_NEAR',
@@ -2413,70 +2207,47 @@ def make_telluric_row_lookup(input_fits_path, wave=None, verbose=True, *,
                                f'{input_fits_path}')
             _cache[_key] = telluric_row_kwargs(
                 _meta, int(row), str(kind), _w, _plane[int(row)],
-                telluric_calculator=_calc, palace_oh_suffix=_oh_suffix)
+                telluric_calculator=_calc)
         return _cache[_key]
 
     if verbose:
         print(f'  [telluric] per-row reconstruction enabled from '
               f'{input_fits_path} ({len(_meta)} rows, '
-              f'{sum(1 for _ in _lsf)} LSF planes, OH file '
-              f'pmd_popmodel_OH{_oh_suffix or ""}.dat)')
+              f'{sum(1 for _ in _lsf)} LSF planes)')
     return _lookup
 
 
-def make_reconstruction_decomposer(wave, *, n_spline_knots, base_dir,
-                                   split_zodi=True, n_zodi_spline_knots=3,
-                                   palace_oh_suffix=None,
-                                   palace_diffuse_suffix=None,
-                                   telluric=None,
-                                   lsf_sigma=1.0):
-    """Build the decomposer whose basis matches how the corpus was fitted.
+def make_reconstruction_decomposer(wave, *, n_spline_knots, base_dir, telluric,
+                                   n_zodi_spline_knots=3, lsf_sigma=1.0):
+    """The decomposer whose basis matches how the corpus was fitted.
 
-    `telluric` is the dict from `telluric_row_kwargs` (per row), or None for the
-    production split-zodi flavour.
+    `telluric` is the per-row bundle from `telluric_row_kwargs`.  The class and
+    its LSF configuration mirror decompose_parallel's worker: the solarblue
+    decomposer with 11 x 4 LSF surfaces and the ridge-corrected OH lines.
 
     `lsf_sigma` MUST be passed at construction to take effect: the design
     matrix is built in the constructor and assigning `.lsf_sigma` afterwards
-    does NOT rebuild it. Leaving the 1.0 A default in place while assigning
-    the real width afterwards silently builds the basis at the wrong
-    resolution -- measured on the telluric variant as a median 13.3 A shift in
-    the OH coefficient centroids (p95 48 A, max 82 A).  The telluric branch mirrors
-    decompose_parallel's constructor, including
-    `roughness_fraction=1e-4` -- that is a BASIS-shaping knob on the LSF
-    solution, not a fitting-only one, so it has to match.
+    does NOT rebuild it (built at the 1.0 A default, the OH coefficient
+    centroids came out a median 13.3 A wrong).
     """
-    from sky_decomp.lsf_surface_iterative import (
-        LSFSurfaceIterativeConfig, SkyDecompLSFSurfaceIterative)
-    if telluric:
-        # The bundle names the OH file the row was fitted with.  An explicit
-        # argument may agree with it but never silently override it.
-        telluric = dict(telluric)
-        _tel_oh = telluric.pop('palace_oh_suffix', None)
-        if (palace_oh_suffix is not None and _tel_oh is not None
-                and palace_oh_suffix != _tel_oh):
-            raise ValueError(
-                f'palace_oh_suffix={palace_oh_suffix!r} disagrees with the '
-                f'telluric bundle\'s {_tel_oh!r}')
-        palace_oh_suffix = palace_oh_suffix if palace_oh_suffix is not None else _tel_oh
-    _common = dict(lsf_sigma=lsf_sigma, n_spline_knots=int(n_spline_knots),
-                   base_dir=base_dir, palace_oh_suffix=palace_oh_suffix,
-                   palace_diffuse_suffix=palace_diffuse_suffix,
-                   split_zodi=bool(split_zodi),
-                   n_zodi_spline_knots=int(n_zodi_spline_knots))
+    from sky_decomp.lsf_surface_iterative import LSFSurfaceIterativeConfig
+    from sky_decomp.solar_lsf import SkyDecompPalaceCorrSolarBlueLSF
     if not telluric:
-        return SkyDecompLSFSurfaceIterative(wave, **_common)
-    from sky_decomp.residual_pca import SkyDecompPalaceAijcVNFSplitZodiLSFSpline2D
-    return SkyDecompPalaceAijcVNFSplitZodiLSFSpline2D(
-        wave, moon_smooth_lambda=0.1, moon_interline_boost=0.0,
-        config=LSFSurfaceIterativeConfig(n_refinement_cycles=5,
-                                         roughness_fraction=1.0e-4),
-        **_common, **telluric)
+        raise ValueError('make_reconstruction_decomposer needs the row\'s telluric bundle '
+                         '(telluric_row_kwargs / make_telluric_row_lookup)')
+    return SkyDecompPalaceCorrSolarBlueLSF(
+        wave, lsf_sigma=lsf_sigma, n_spline_knots=int(n_spline_knots),
+        n_zodi_spline_knots=int(n_zodi_spline_knots), base_dir=base_dir,
+        palace_oh_suffix=PALACE_OH_SUFFIX,
+        moon_smooth_lambda=0.1, moon_interline_boost=0.0,
+        config=LSFSurfaceIterativeConfig(n_refinement_cycles=30, n_basis=4,
+                                         roughness_fraction=0.0,
+                                         fallback_prior_fraction=0.0),
+        **dict(telluric))
 
 
-def make_corpus_basis_decomposer(wave_ref, *, input_fits_for_basis, decomp_suffix,
-                                 n_spline_knots, split_zodi, n_zodi_spline_knots,
-                                 palace_oh_suffix=None, palace_diffuse_suffix=None,
-                                 kind='sci', verbose=False):
+def make_corpus_basis_decomposer(wave_ref, *, input_fits_for_basis, n_spline_knots,
+                                 n_zodi_spline_knots, kind='sci', verbose=False):
     """One decomposer whose basis matches how the corpus was fitted.
 
     Anything that needs a SINGLE basis for a whole corpus -- the coefficient
@@ -2484,107 +2255,65 @@ def make_corpus_basis_decomposer(wave_ref, *, input_fits_for_basis, decomp_suffi
     basis -- faces the same two problems, and this is the one place they are
     solved:
 
-    * A telluric corpus divides its design by a PER-ROW transmission, so a
-      representative row has to stand in for all of them. The median-airmass
-      row is that choice; see `telluric_representative_row` for why it is a
-      mild one.
+    * The design is divided by a PER-ROW transmission, so a representative row
+      has to stand in for all of them. The median-airmass row is that choice;
+      see `telluric_representative_row` for why it is a mild one.
     * The LSF is not a constant. `make_reconstruction_decomposer` defaults to
       `lsf_sigma=1.0` A, which is nobody's LSF; the real per-pixel width comes
       from the input stack's LSF plane, as FWHM, so it is divided by 2.35.
 
     Getting either wrong produces a basis that silently disagrees with the one
-    the coefficients were fitted against: for `palace-aijc-vnf-split-zodi-lsf-
-    spline2d` the OH template integrals come out a median 11.2% high, p5-p95
-    0.713-1.475, worst case 2.93x.
+    the coefficients were fitted against (OH template integrals a median 11.2%
+    high, worst case 2.93x).
 
-    Returns ``(decomposer, note)``; ``note`` is a short provenance string for
-    logging. ``decomp_suffix=None`` returns the plain split-zodi decomposer,
-    which is the historical behaviour.
+    Returns ``(decomposer, note)``; ``note`` is a short provenance string.
     """
     from astropy.io import fits as _fits
     from astropy.table import Table as _Table
+    from sky_decomp.moon_zodi_model import LSF_FWHM_TO_SIGMA
 
     wave_ref = np.asarray(wave_ref, dtype=np.float64)
     wave_ref = wave_ref if wave_ref.ndim == 1 else wave_ref[0]
     _lsf_ext = {'sci': 'LSF_SCI', 'sky1': 'LSF_SKY_NEAR', 'near': 'LSF_SKY_NEAR',
                 'sky2': 'LSF_SKY_FAR', 'far': 'LSF_SKY_FAR'}[str(kind)]
-
-    _spec = decomp_variant_spec(decomp_suffix)
-    _is_telluric = bool(_spec is not None and _spec['telluric'])
-
     with _fits.open(str(input_fits_for_basis), memmap=False) as _h:
         _meta = _Table(_h['META'].data)
         _lsf_plane = np.asarray(_h[_lsf_ext].data, dtype=np.float64)
-
-    _tel = None
-    _note = 'split-zodi basis'
-    _rep = None
-    if _is_telluric:
-        _rep = telluric_representative_row(input_fits_for_basis)
-        _tel = telluric_row_kwargs(_meta, _rep, str(kind), wave_ref,
-                                   _lsf_plane[_rep],
-                                   palace_oh_suffix=_spec.get('palace_oh_suffix'))
-        _am = float(np.asarray(_meta['sci_airmass'], dtype=np.float64)[_rep])
-        _note = (f'telluric basis from representative row {_rep}, '
-                 f'sci_airmass {_am:.3f}, pwv {_tel["pwv_mm"]:g} mm')
-
+    _rep = telluric_representative_row(input_fits_for_basis)
+    _tel = telluric_row_kwargs(_meta, _rep, str(kind), wave_ref, _lsf_plane[_rep])
+    _am = float(np.asarray(_meta['sci_airmass'], dtype=np.float64)[_rep])
     # Resolve the width BEFORE constructing: the design matrix is built in
     # the constructor and a later assignment does not rebuild it.
-    from sky_decomp.moon_zodi_model import LSF_FWHM_TO_SIGMA
-    _lsf_ref = _lsf_plane[_rep] if _rep is not None else np.nanmedian(_lsf_plane, axis=0)
-    _sigma = np.asarray(_lsf_ref, dtype=np.float64) / LSF_FWHM_TO_SIGMA
+    _sigma = np.asarray(_lsf_plane[_rep], dtype=np.float64) / LSF_FWHM_TO_SIGMA
     _dec = make_reconstruction_decomposer(
         wave_ref, n_spline_knots=int(n_spline_knots),
-        base_dir=_infer_base_dir_for_reconstruction(),
-        split_zodi=bool(split_zodi),
         n_zodi_spline_knots=int(n_zodi_spline_knots),
-        palace_oh_suffix=palace_oh_suffix,
-        palace_diffuse_suffix=palace_diffuse_suffix,
-        telluric=_tel, lsf_sigma=_sigma)
-
-    _note += f', lsf_sigma median {float(np.nanmedian(_sigma)):.3f} A'
-
-    # The spline2d class renders its lines through a fitted LSF SURFACE and
-    # raises on a None state, so a caller that wants `_assemble_refined_
-    # matrices()` (rather than the static `design_matrix`) has to install one.
-    # `_nominal_state` builds it from `lsf_sigma`, which is why it is set
-    # first.
-    #
-    # APPROXIMATION, and the reason this is not simply "the corpus's basis":
-    # the nominal state is a Gaussian surface at the real median width, not
-    # the per-row 2-D M-spline surface each row was actually fitted with. It
-    # captures the telluric transmission and the correct LSF WIDTH -- the two
-    # things that were plainly wrong -- but not the per-row LSF SHAPE. A
-    # per-row basis would mean rebuilding it 14469 times.
-    if getattr(_dec, 'lsf_surface_state', None) is None and hasattr(_dec, '_nominal_state'):
-        _dec._set_lsf_state(_dec._nominal_state('corpus_basis_nominal_lsf'))
-        _note += ', nominal LSF surface'
+        base_dir=_infer_base_dir_for_reconstruction(), telluric=_tel, lsf_sigma=_sigma)
+    # A caller that wants `_assemble_refined_matrices()` (rather than the static
+    # `design_matrix`) needs an LSF state.  APPROXIMATION: the nominal state is a
+    # Gaussian surface at the representative row's width, not the per-row 2-D
+    # M-spline surface each row was fitted with; it captures the transmission
+    # and the LSF WIDTH but not the per-row LSF SHAPE.
+    _dec._set_lsf_state(_dec._nominal_state('corpus_basis_nominal_lsf'))
+    _note = (f'telluric basis from representative row {_rep}, sci_airmass {_am:.3f}, '
+             f'pwv {_tel["pwv_mm"]:g} mm, lsf_sigma median {float(np.nanmedian(_sigma)):.3f} A, '
+             f'nominal LSF surface')
     if verbose:
         print(f'  [basis] {_note}')
     return _dec, _note
 
 
-def reconstruction_basis(wave, lsf_state, *, n_spline_knots=25, base_dir=None,
-                         o2_vector=None, split_zodi=True, n_zodi_spline_knots=3,
-                         palace_oh_suffix=None, palace_diffuse_suffix=None,
-                         telluric=None):
+def reconstruction_basis(wave, lsf_state, *, telluric, n_spline_knots=25, base_dir=None,
+                         o2_vector=None, n_zodi_spline_knots=3):
     """``(model, mats)`` that `reconstruct_with_lsf` reconstructs a row with.
 
-    For an ``LSFSurfaceState`` only.  Exposed so that a consumer that needs the
-    basis itself -- e.g. the per-band sky-line templates of
-    `mlp_predictor.sky_line_scaling` -- uses exactly the reconstruction's.
+    Exposed so that a consumer that needs the basis itself -- e.g. the per-band
+    sky-line templates of `mlp_predictor.sky_line_scaling` -- uses exactly the
+    reconstruction's.  `telluric` is the row's bundle from `telluric_row_kwargs`.
     """
-    # `telluric` (from `telluric_row_kwargs`) selects the spline2d + telluric
-    # class.  It is REQUIRED for a telluric corpus, and not optional in the
-    # usual sense: the iterative class cannot even read that corpus's LSF
-    # state, so omitting it raises rather than quietly reconstructing
-    # something else.
     model = make_reconstruction_decomposer(
         wave, n_spline_knots=n_spline_knots, base_dir=base_dir,
-        split_zodi=split_zodi, n_zodi_spline_knots=n_zodi_spline_knots,
-        palace_oh_suffix=palace_oh_suffix,
-        palace_diffuse_suffix=palace_diffuse_suffix,
-        telluric=telluric)
+        n_zodi_spline_knots=n_zodi_spline_knots, telluric=telluric)
     model._set_lsf_state(lsf_state)
     mats = model._assemble_refined_matrices()
     # VECTOR_O2 on disk is already convolved by the fitted LSF surface at fit
@@ -2601,72 +2330,47 @@ def reconstruction_basis(wave, lsf_state, *, n_spline_knots=25, base_dir=None,
     return model, mats
 
 
-def reconstruct_with_lsf(wave, coef, lsf, *, n_spline_knots=25, base_dir=None,
-                         o2_vector=None, coef_err=None,
-                         split_zodi=True, n_zodi_spline_knots=3,
-                         palace_oh_suffix=None, palace_diffuse_suffix=None,
-                         telluric=None):
-    """Reconstruct component spectra, dispatching on the LSF representation.
+def reconstruct_with_lsf(wave, coef, lsf, *, telluric, n_spline_knots=25, base_dir=None,
+                         o2_vector=None, coef_err=None, n_zodi_spline_knots=3):
+    """Reconstruct a row's component spectra from its coefficients.
 
-    ``lsf`` is either an ``LSFSurfaceState`` (uses the wavelength-dependent
-    B-spline kernel via ``SkyDecompLSFSurfaceIterative._assemble_refined_matrices``)
-    or a per-pixel Gaussian sigma vector / scalar (uses the parent-class
-    ``reconstruct_component_spectra``).  Returns the same components dict as
-    ``reconstruct_component_spectra``.
+    ``lsf`` is the row's ``LSFSurfaceState`` (`load_lsf_state_if_available`)
+    and ``telluric`` its bundle from `telluric_row_kwargs`.  Returns the
+    components dict (``oh``, ``moon``, ``zodi``, ``diffuse``, ``atom``,
+    ``orc``, ``o2``, ``total``, ...).
 
     If ``coef_err`` (per-coefficient 1σ, same shape as ``coef``) is
     provided, the returned dict additionally contains ``sigma`` (dict of
     per-component 1σ flux uncertainty per pixel) and ``sigma_total``
-    (quadrature sum across independent components).  See
-    ``SkyDecompBase._components_sigma_from_coef_err`` for the propagation.
-
-    ``telluric``, when given, is the per-row dict from `telluric_row_kwargs`
-    and switches to the telluric spline2d basis; see `DECOMP_VARIANTS`.
+    (quadrature sum across independent components).
     """
-    if isinstance(lsf, LSFSurfaceState):
-        model, mats = reconstruction_basis(
-            wave, lsf, n_spline_knots=n_spline_knots, base_dir=base_dir,
-            o2_vector=o2_vector, split_zodi=split_zodi,
-            n_zodi_spline_knots=n_zodi_spline_knots,
-            palace_oh_suffix=palace_oh_suffix,
-            palace_diffuse_suffix=palace_diffuse_suffix, telluric=telluric)
-        coef_arr = np.asarray(coef, float).ravel()
-        n_expected = sum(m.shape[0] for m in mats.values())
-        if coef_arr.size != n_expected:
+    if not isinstance(lsf, LSFSurfaceState):
+        raise TypeError('reconstruct_with_lsf needs the row\'s LSFSurfaceState '
+                        f'(load_lsf_state_if_available); got {type(lsf).__name__}')
+    model, mats = reconstruction_basis(
+        wave, lsf, telluric=telluric, n_spline_knots=n_spline_knots, base_dir=base_dir,
+        o2_vector=o2_vector, n_zodi_spline_knots=n_zodi_spline_knots)
+    coef_arr = np.asarray(coef, float).ravel()
+    n_expected = sum(m.shape[0] for m in mats.values())
+    if coef_arr.size != n_expected:
+        raise ValueError(
+            f"reconstruct_with_lsf: coef size mismatch "
+            f"(got {coef_arr.size}, expected {n_expected})")
+    comps = model._components_from_coef(coef_arr, mats)
+    comps['total'] = (comps['oh'] + comps['moon'] + comps['zodi'] + comps['diffuse']
+                      + comps['atom'] + comps['orc'] + comps['o2'])
+    if coef_err is not None:
+        err_arr = np.asarray(coef_err, float).ravel()
+        if err_arr.size != coef_arr.size:
             raise ValueError(
-                f"reconstruct_with_lsf: coef size mismatch "
-                f"(got {coef_arr.size}, expected {n_expected})")
-        comps = model._components_from_coef(coef_arr, mats)
-        comps['total'] = (comps['oh'] + comps['moon'] + comps.get('zodi', 0) + comps['diffuse']
-                          + comps['atom'] + comps['orc'] + comps['o2'])
-        if coef_err is not None:
-            err_arr = np.asarray(coef_err, float).ravel()
-            if err_arr.size != coef_arr.size:
-                raise ValueError(
-                    f'coef_err length mismatch: expected {coef_arr.size}, '
-                    f'got {err_arr.size}'
-                )
-            sigma_comps = model._components_sigma_from_coef_err(err_arr, mats)
-            comps['sigma'] = sigma_comps
-            comps['sigma_total'] = np.sqrt(
-                sigma_comps['oh'] ** 2
-                + sigma_comps['moon'] ** 2
-                + sigma_comps.get('zodi', np.zeros_like(sigma_comps['moon'])) ** 2
-                + sigma_comps['diffuse'] ** 2
-                + sigma_comps['atom'] ** 2
-                + sigma_comps['orc'] ** 2
-                + sigma_comps['o2'] ** 2
+                f'coef_err length mismatch: expected {coef_arr.size}, '
+                f'got {err_arr.size}'
             )
-        return comps
-    return reconstruct_component_spectra(
-        wave=wave, coef=coef, lsf_sigma=lsf,
-        n_spline_knots=n_spline_knots, base_dir=base_dir, o2_vector=o2_vector,
-        coef_err=coef_err,
-        split_zodi=bool(split_zodi),
-        n_zodi_spline_knots=int(n_zodi_spline_knots),
-        palace_oh_suffix=palace_oh_suffix,
-        palace_diffuse_suffix=palace_diffuse_suffix,
-    )
+        sigma_comps = model._components_sigma_from_coef_err(err_arr, mats)
+        comps['sigma'] = sigma_comps
+        comps['sigma_total'] = np.sqrt(sum(
+            sigma_comps[k] ** 2 for k in ('oh', 'moon', 'zodi', 'diffuse', 'atom', 'orc', 'o2')))
+    return comps
 
 # ==========================================================================
 # Extracted from notebook cell id=cd99f8df

@@ -229,12 +229,13 @@ def test_public_callable_signatures():
     )
 
 
-def test_batch_and_cli_defaults_resolve_to_five_cycles(monkeypatch):
+def test_batch_and_cli_defaults_resolve_to_the_deployed_cycles(monkeypatch):
     assert (
         inspect.signature(decompose_parallel.init_worker).parameters["n_refinement_cycles"].default
-        == 5
+        == decompose_parallel.N_REFINEMENT_CYCLES == 30
     )
-    assert inspect.signature(decompose_parallel.run).parameters["n_refinement_cycles"].default == 5
+    assert (inspect.signature(decompose_parallel.run).parameters["n_refinement_cycles"].default
+            == decompose_parallel.N_REFINEMENT_CYCLES)
 
     captured = {}
     monkeypatch.setattr(
@@ -256,55 +257,17 @@ def test_batch_and_cli_defaults_resolve_to_five_cycles(monkeypatch):
 
     decompose_parallel.main()
 
-    assert captured["n_refinement_cycles"] == 5
-
-
-def test_moon_zodi_cli_does_not_require_legacy_palace_path(monkeypatch):
-    captured = {}
-    monkeypatch.setattr(
-        decompose_parallel,
-        "run",
-        lambda **kwargs: captured.update(kwargs),
-    )
-    monkeypatch.setattr(
-        decompose_parallel,
-        "extract_meta_and_coef_products",
-        lambda **kwargs: None,
-    )
-    monkeypatch.setattr(
-        decompose_parallel,
-        "thin_fits_every_n",
-        lambda *args, **kwargs: None,
-    )
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "decompose_parallel.py",
-            "input.fits",
-            "--fit-model",
-            decompose_parallel.PALACE_VNF_SPLIT_ZODI_FIT_MODEL,
-            "--moon-zodi-data-root",
-            "/external/data",
-        ],
-    )
-
-    decompose_parallel.main()
-
-    assert captured["palace_dir"] is None
-    assert str(captured["moon_zodi_data_root"]) == "/external/data"
+    assert captured["n_refinement_cycles"] == decompose_parallel.N_REFINEMENT_CYCLES
 
 
 def test_chunk_worker_preserves_indices_and_reports_each_row(monkeypatch):
     progress = []
 
-    class Decomposer:
-        def fit(self, flux, ivar, **kwargs):
-            return float(flux[0])
-
-    monkeypatch.setattr(decompose_parallel, "_WORKER_DECOMPOSER", Decomposer())
+    monkeypatch.setattr(decompose_parallel, "_WORKER_DECOMPOSER", object())
+    monkeypatch.setattr(decompose_parallel, "_fit_ivar_row", lambda kind, idx, flux: None)
+    monkeypatch.setattr(decompose_parallel, "_fit_worker_row",
+                        lambda kind, idx, flux, ivar: (float(flux[0]), None))
     monkeypatch.setattr(decompose_parallel, "_WORKER_FACTOR", 2.0)
-    monkeypatch.setattr(decompose_parallel, "_WORKER_FIT_MODEL", "baseline")
     monkeypatch.setattr(
         decompose_parallel,
         "_WORKER_FLUX",
@@ -384,7 +347,7 @@ def test_batch_run_restores_row_order_and_writes_three_outputs(monkeypatch, tmp_
             pass
 
     written = []
-    monkeypatch.setattr(decompose_parallel, "resolve_base_dir", lambda path: tmp_path)
+    monkeypatch.setattr(decompose_parallel, "resolve_data_root", lambda path=None: tmp_path)
     monkeypatch.setattr(decompose_parallel.fits, "getdata", lambda *args: np.arange(4.0))
     monkeypatch.setattr(decompose_parallel.fits, "open", lambda *args, **kwargs: FitsFile())
     monkeypatch.setattr(decompose_parallel.mp, "get_context", lambda *args: SimpleNamespace(
@@ -419,7 +382,7 @@ def test_batch_run_restores_row_order_and_writes_three_outputs(monkeypatch, tmp_
     # Every row here comes back with no reliability columns (the stub future
     # reports None), so no extra META block is written at all.
     assert written == [
-        (["sci-0", "sci-1", "sci-2"], "input_decomp_sci.fits", None),
-        (["sky1-0", "sky1-1", "sky1-2"], "input_decomp_sky1.fits", None),
-        (["sky2-0", "sky2-1", "sky2-2"], "input_decomp_sky2.fits", None),
+        (["sci-0", "sci-1", "sci-2"], f"input_decomp_sci{decompose_parallel.FIT_MODEL_SUFFIX}.fits", None),
+        (["sky1-0", "sky1-1", "sky1-2"], f"input_decomp_sky1{decompose_parallel.FIT_MODEL_SUFFIX}.fits", None),
+        (["sky2-0", "sky2-1", "sky2-2"], f"input_decomp_sky2{decompose_parallel.FIT_MODEL_SUFFIX}.fits", None),
     ]

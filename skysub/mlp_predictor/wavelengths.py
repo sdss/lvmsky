@@ -26,6 +26,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 from astropy.io import fits
+from astropy.table import Table
 
 from sky_decomp.moon_zodi_model import LSF_FWHM_TO_SIGMA
 
@@ -39,19 +40,16 @@ from .data import (
 )
 
 
-def infer_spline_knots(coef_names: list[str]) -> tuple[int, bool, int]:
+def infer_spline_knots(coef_names: list[str]) -> tuple[int, int]:
     """Auto-infer B-spline knot counts from the actual coef_names.
 
-    Returns ``(n_moon_knots, split_zodi, n_zodi_knots)``.  The cubic B-spline
-    convention is ``n_basis = n_interior_knots + 4``.
+    Returns ``(n_moon_knots, n_zodi_knots)``.  The cubic B-spline convention
+    is ``n_basis = n_interior_knots + 4``.
     """
 
     moon_bs_count = sum(1 for n in coef_names if str(n).startswith("Moon_bs"))
     zodi_bs_count = sum(1 for n in coef_names if str(n).startswith("Zodi_bs"))
-    n_moon_knots = moon_bs_count - 4
-    split_zodi = zodi_bs_count > 0
-    n_zodi_knots = (zodi_bs_count - 4) if split_zodi else 0
-    return n_moon_knots, split_zodi, n_zodi_knots
+    return moon_bs_count - 4, zodi_bs_count - 4
 
 
 def build_coef_wavelengths(
@@ -59,107 +57,47 @@ def build_coef_wavelengths(
     input_fits_for_basis: str | Path,
     coef_names: list[str],
     n_moon_knots: int,
-    split_zodi: bool,
     n_zodi_knots: int,
-    palace_oh_suffix: str | None = None,
-    palace_diffuse_suffix: str | None = None,
     verbose: bool = True,
-    decomp_suffix: str | None = None,
-) -> tuple[np.ndarray, np.ndarray] | tuple[None, None]:
-    """Build the per-coefficient wavelength centroids and k_eff for a corpus.
+) -> tuple[np.ndarray, np.ndarray]:
+    """Build the per-coefficient wavelength centroids and k_eff for the corpus.
 
-    Nothing is cached.  The centroid and the B^2-weighted ``k_eff`` are read
-    straight off the decomposer's design matrix, which costs ~1 s for the 388
-    coefficients (the old per-coefficient reconstruction loop took ~13 min and
-    is now only a fallback).  That is cheap enough that a cache would only buy
-    back ~1 s per run while reintroducing the stale-cache failure mode: the
-    coefficient NAMES are identical across decomposition variants -- the
-    telluric fit is also OH_000..OH_356 -- so a cache copied between corpora
-    passed the name check while carrying OH centroids wrong by a median 46.9 A.
+    Nothing is cached: the centroid and the B^2-weighted ``k_eff`` are read
+    straight off the decomposer's design matrix in ~1 s for the 388
+    coefficients.
 
-    ``decomp_suffix`` selects WHICH basis to build.  Returns ``(None, None)``
-    only if the FITS reference is missing the required extensions and the
-    computation fails.
+    The basis is divided by a PER-ROW transmission, but one set of wavelengths
+    serves the whole corpus, so the row with the median sci_airmass stands in:
+    the transmission enters a centroid only as a smooth multiplicative weight
+    (median T = 0.9997), so the choice moves the centroids far less than the
+    line grouping does.  The LSF width is the stack's first LSF_SCI row.
     """
+    from . import data as _data
 
     t0 = time.perf_counter()
     with fits.open(str(input_fits_for_basis)) as hdul:
-        ext_names = [h.name for h in hdul]
-        if "WAVE" not in ext_names:
-            raise KeyError(f"{input_fits_for_basis} has no WAVE extension")
         wave_ref = np.asarray(hdul["WAVE"].data, dtype=np.float64)
-        lsf_name = "LSF_SCI" if "LSF_SCI" in ext_names else ("LSF" if "LSF" in ext_names else None)
-        if lsf_name is None:
-            raise KeyError(f"{input_fits_for_basis} has no LSF_SCI or LSF extension")
-        lsf_ref = np.asarray(hdul[lsf_name].data, dtype=np.float64)
-    if wave_ref.ndim > 1:
-        wave_ref = wave_ref[0]
-    if lsf_ref.ndim > 1:
-        lsf_ref = lsf_ref[0]
-
-    # BASIS FOR THIS VARIANT.  `coef_wavelengths_from_basis` builds a split-zodi
-    # basis by default and cannot produce the telluric line grouping, so for a
-    # telluric corpus we hand it the right decomposer explicitly.  Without this
-    # we would silently get split-zodi OH centroids -- wrong by a median
-    # 46.9 A -- for a telluric corpus.
-    from . import data as _data
-    _spec = _data.decomp_variant_spec(decomp_suffix)
-    _decomposer = None
-    _tel_note = ''
-    if _spec is not None and _spec['telluric']:
-        # The telluric basis is divided by a PER-ROW transmission, but we need
-        # one set of wavelengths for the whole corpus, so a representative row
-        # is needed.  Use the row whose sci_airmass is the median: T enters the
-        # centroid only as a smooth multiplicative weight (median T = 0.9997
-        # on this corpus), so the choice moves the centroids far less than the
-        # line grouping it exists to capture -- measured below and reported.
-        from astropy.io import fits as _fits
-        from astropy.table import Table as _Table
-        with _fits.open(str(input_fits_for_basis), memmap=False) as _h:
-            _meta = _Table(_h['META'].data)
-            _lsf = np.asarray(_h['LSF_SCI'].data, dtype=np.float64)
-        _am = np.asarray(_meta['sci_airmass'], dtype=np.float64)
-        _ok = np.flatnonzero(np.isfinite(_am) & (_am > 0.0))
-        if _ok.size == 0:
-            raise ValueError(f'{input_fits_for_basis} has no usable sci_airmass '
-                             f'row to build a representative telluric basis')
-        _rep = int(_ok[np.argsort(_am[_ok])[_ok.size // 2]])
-        _tel = _data.telluric_row_kwargs(
-            _meta, _rep, 'sci', wave_ref,
-            _lsf[_rep], palace_oh_suffix=_spec.get('palace_oh_suffix'))
-        _decomposer = _data.make_reconstruction_decomposer(
-            wave_ref, n_spline_knots=n_moon_knots, base_dir=_data._infer_base_dir_for_reconstruction(),
-            split_zodi=split_zodi, n_zodi_spline_knots=n_zodi_knots,
-            palace_oh_suffix=palace_oh_suffix,
-            palace_diffuse_suffix=palace_diffuse_suffix, telluric=_tel,
-            # AT CONSTRUCTION. Assigning `.lsf_sigma` afterwards does not
-            # rebuild the design matrix, and this basis IS the design matrix:
-            # built at the 1.0 A default it put the OH centroids a median
-            # 13.3 A out (p95 48 A, max 82 A).
-            lsf_sigma=lsf_ref / LSF_FWHM_TO_SIGMA)
-        _tel_note = (f' (telluric basis from representative row {_rep}, '
-                     f'sci_airmass {_am[_rep]:.3f}, pwv {_tel["pwv_mm"]:g} mm, '
-                     f'OH file pmd_popmodel_OH{_spec.get("palace_oh_suffix") or ""}.dat)')
-        if verbose:
-            print(f'[wavelength-basis] building the TELLURIC basis{_tel_note}')
-    result = coef_wavelengths_from_basis(
-        coef_names=coef_names,
-        wave=wave_ref,
-        lsf_sigma=lsf_ref / LSF_FWHM_TO_SIGMA,
-        n_spline_knots=n_moon_knots,
-        split_zodi=split_zodi,
-        n_zodi_spline_knots=n_zodi_knots,
-        palace_oh_suffix=palace_oh_suffix,
-        palace_diffuse_suffix=palace_diffuse_suffix,
-        return_k_eff=True,
-        verbose=verbose,
-        decomposer=_decomposer,
-    )
+        lsf_ref = np.asarray(hdul["LSF_SCI"].data, dtype=np.float64)
+        meta = Table(hdul["META"].data)
+    wave_ref = wave_ref if wave_ref.ndim == 1 else wave_ref[0]
+    lsf_all = lsf_ref
+    lsf_ref = lsf_ref if lsf_ref.ndim == 1 else lsf_ref[0]
+    rep = _data.telluric_representative_row(input_fits_for_basis)
+    tel = _data.telluric_row_kwargs(meta, rep, 'sci', wave_ref, lsf_all[rep])
+    decomposer = _data.make_reconstruction_decomposer(
+        wave_ref, n_spline_knots=n_moon_knots, n_zodi_spline_knots=n_zodi_knots,
+        base_dir=_data._infer_base_dir_for_reconstruction(), telluric=tel,
+        # AT CONSTRUCTION. Assigning `.lsf_sigma` afterwards does not rebuild
+        # the design matrix, and this basis IS the design matrix: built at the
+        # 1.0 A default it put the OH centroids a median 13.3 A out.
+        lsf_sigma=lsf_ref / LSF_FWHM_TO_SIGMA)
+    if verbose:
+        print(f'[wavelength-basis] telluric basis from representative row {rep}, '
+              f'sci_airmass {float(meta["sci_airmass"][rep]):.3f}, pwv {tel["pwv_mm"]:g} mm')
+    result = coef_wavelengths_from_basis(coef_names, wave_ref, decomposer, verbose=verbose)
     if verbose:
         print(f"[wavelength-basis] built in {time.perf_counter() - t0:.1f} s")
-    if isinstance(result, tuple):
-        return result
-    return result, None
+    return result
 
 
 @dataclass
@@ -205,11 +143,8 @@ def resolve_wavelengths_and_extinction(
     *,
     input_fits_for_basis: str | Path,
     use_fitted_extinction: bool = True,
-    palace_oh_suffix: str | None = None,
-    palace_diffuse_suffix: str | None = None,
     n_wavelength_bins: int = 8,
     verbose: bool = True,
-    decomp_suffix: str | None = None,
 ) -> ExtinctionResolution:
     """Populate ``filtered_triplet`` with ``coef_wavelengths_a`` + ``coef_extinction_k``.
 
@@ -223,11 +158,10 @@ def resolve_wavelengths_and_extinction(
     """
 
     coef_names = list(filtered_triplet["coef_names"])
-    n_moon_knots, split_zodi, n_zodi_knots = infer_spline_knots(coef_names)
+    n_moon_knots, n_zodi_knots = infer_spline_knots(coef_names)
     if verbose:
         print("Auto-inferred spline settings from filtered_triplet['coef_names']:")
-        print(f"  n_spline_knots = {n_moon_knots}, split_zodi = {split_zodi}, "
-              f"n_zodi_spline_knots = {n_zodi_knots}")
+        print(f"  n_spline_knots = {n_moon_knots}, n_zodi_spline_knots = {n_zodi_knots}")
 
     group_indices = _build_group_indices(coef_names)
     grp_sizes = {g: int(idx.size) for g, idx in group_indices.items()}
@@ -249,12 +183,8 @@ def resolve_wavelengths_and_extinction(
             input_fits_for_basis=input_fits_for_basis,
             coef_names=coef_names,
             n_moon_knots=n_moon_knots,
-            split_zodi=split_zodi,
             n_zodi_knots=n_zodi_knots,
-            palace_oh_suffix=palace_oh_suffix,
-            palace_diffuse_suffix=palace_diffuse_suffix,
             verbose=verbose,
-            decomp_suffix=decomp_suffix,
         )
     except Exception as exc:
         if verbose:

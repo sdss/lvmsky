@@ -10,9 +10,6 @@ from skysub.sky_decomp.moon_zodi_model import (
     DEFAULT_PALACE_OH_SUFFIX,
 )
 from skysub.sky_decomp.telluric_corrected_lines import (
-    SkyDecompAdam25kNivContinuumLSFSpline2D,
-    SkyDecompAdam25kTelluricLSFSpline2D,
-    SkyDecompAdam25kTelluricSplitZodiLSFSpline2D,
     SkyDecompTelluricCorrectedLinesLSFSpline2D,
     SkyDecompTelluricLinesLSFSpline2D,
     calculate_drp_transmission,
@@ -184,54 +181,3 @@ def test_corrected_domain_operator_divides_only_after_lsf():
         )
 
 
-def test_named_adam25k_class_locks_its_oh_asset():
-    wave = _wave()
-    wave_hr = np.linspace(wave[0] - 10.0, wave[-1] + 10.0, 40_000)
-    model = SkyDecompAdam25kTelluricLSFSpline2D(
-        wave,
-        **_model_kwargs(),
-        telluric_calculator=_FakeTelluric(wave_hr, np.ones_like(wave_hr)),
-        pwv_mm=2.0,
-        source_airmass=1.1,
-        drp_transmission=np.ones_like(wave),
-    )
-
-    assert model.palace_oh_suffix == DEFAULT_PALACE_OH_SUFFIX
-    with pytest.raises(ValueError, match="requires its bundled OH source table"):
-        SkyDecompAdam25kTelluricLSFSpline2D(
-            wave,
-            **(_model_kwargs() | {"palace_oh_suffix": "_other"}),
-            telluric_calculator=_FakeTelluric(wave_hr, np.ones_like(wave_hr)),
-            pwv_mm=2.0,
-            source_airmass=1.1,
-            drp_transmission=np.ones_like(wave),
-        )
-
-
-def test_split_zodi_adam_class_uses_production_defaults_and_allows_overrides():
-    wave = _wave()
-    wave_hr = np.linspace(wave[0] - 10.0, wave[-1] + 10.0, 40_000)
-    common = {
-        **_model_kwargs(),
-        "telluric_calculator": _FakeTelluric(wave_hr, np.ones_like(wave_hr)),
-        "pwv_mm": 2.0,
-        "source_airmass": 1.1,
-        "drp_transmission": np.ones_like(wave),
-    }
-    common.pop("n_spline_knots", None)
-    common.pop("n_zodi_spline_knots", None)
-    model = SkyDecompAdam25kTelluricSplitZodiLSFSpline2D(wave, **common)
-
-    assert model.split_zodi is True
-    assert model.n_spline_knots == 11
-    assert model.n_zodi_spline_knots == 1
-    assert model.diffuse_oh_scope == "block"
-    overridden = SkyDecompAdam25kTelluricSplitZodiLSFSpline2D(
-        wave,
-        **(common | {"moon_ratio_bound": 0.6}),
-    )
-    assert overridden.moon_ratio_bound == 0.6
-    assert (
-        SkyDecompAdam25kNivContinuumLSFSpline2D
-        is SkyDecompAdam25kTelluricSplitZodiLSFSpline2D
-    )

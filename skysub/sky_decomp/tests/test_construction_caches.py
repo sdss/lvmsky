@@ -2,8 +2,7 @@
 
 `decompose_parallel` builds a fresh decomposer for every fitted row of a
 telluric fit model (the DRP transmission and the source airmass are per-row),
-where the non-telluric models build one decomposer per worker.  Construction
-is therefore on the hot path, and it is made cheap by a windowed line-profile
+so construction is on the hot path, and it is made cheap by a windowed line-profile
 sum plus caches on the parts that cannot vary from row to row.  These tests
 pin the two properties that make that safe: the window is exact to float64,
 and nothing row-dependent is ever shared between instances.
@@ -22,7 +21,7 @@ from skysub.sky_decomp.fit import (
 from skysub.sky_decomp.lsf_surface_iterative import LSFSurfaceIterativeConfig
 from skysub.sky_decomp.moon_zodi_model import DEFAULT_DATA_ROOT
 from skysub.sky_decomp.telluric_corrected_lines import (
-    SkyDecompAdam25kTelluricSplitZodiLSFSpline2D,
+    SkyDecompPalaceCorrAijcVNFSplitZodiLSFSpline2D,
 )
 
 GOLDEN = (
@@ -90,7 +89,7 @@ def test_windowed_line_sum_handles_degenerate_input():
 
 
 def _telluric_model(pwv_mm, source_airmass, drp_transmission):
-    return SkyDecompAdam25kTelluricSplitZodiLSFSpline2D(
+    return SkyDecompPalaceCorrAijcVNFSplitZodiLSFSpline2D(
         _wave(),
         telluric_calculator=_FakeTelluric(),
         pwv_mm=pwv_mm,

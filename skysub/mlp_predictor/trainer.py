@@ -77,7 +77,6 @@ import torch
 import torch.nn.functional as F
 from astropy.io import fits
 
-from sky_decomp.lsf_surface_iterative import SkyDecompLSFSurfaceIterative
 
 from . import data as _data_mod
 from .compressor import (
@@ -2083,11 +2082,7 @@ def _precompute_flux_basis_and_geometry(
     compress_geom_kwargs,
     input_fits_for_basis,
     n_moon_knots,
-    split_zodi,
     n_zodi_knots,
-    palace_oh_suffix=None,
-    palace_diffuse_suffix=None,
-    decomp_suffix=None,
     group_indices=None,
     input_fits_flux=None,
     pixel_weight_floor_frac=0.05,
@@ -2109,39 +2104,17 @@ def _precompute_flux_basis_and_geometry(
 
     with fits.open(str(input_fits_for_basis)) as hdul:
         wave_ref = np.asarray(hdul["WAVE"].data, dtype=np.float64)
-    if decomp_suffix:
-        # Build the basis the corpus was actually fitted with. Without this
-        # the loss maps coefficients to flux through a DIFFERENT basis than
-        # the one that produced them: for the telluric spline2d variant the
-        # OH template integrals come out a median 11.2% high (p5-p95
-        # 0.713-1.475, worst 2.93x), and lsf_sigma=1.0 A below is 50% wider
-        # than the corpus's real 0.67 A.
-        model, _basis_note = make_corpus_basis_decomposer(
-            wave_ref,
-            input_fits_for_basis=input_fits_for_basis,
-            decomp_suffix=decomp_suffix,
-            n_spline_knots=n_moon_knots,
-            split_zodi=split_zodi,
-            n_zodi_spline_knots=n_zodi_knots,
-            palace_oh_suffix=palace_oh_suffix,
-            palace_diffuse_suffix=palace_diffuse_suffix,
-        )
-        if verbose:
-            print(f"  [flux-basis] {_basis_note}")
-    else:
-        # Historical path, kept so a caller that passes no suffix gets exactly
-        # what it got before. It is WRONG for every current corpus -- see the
-        # branch above -- so pass cfg.data.decomp_suffix.
-        if verbose:
-            print("  [flux-basis] no decomp_suffix given: split-zodi basis at "
-                  "lsf_sigma=1.0 A, which matches no deployed corpus.")
-        model = SkyDecompLSFSurfaceIterative(
-            wave_ref, lsf_sigma=1.0, n_spline_knots=n_moon_knots,
-            base_dir=_infer_base_dir_for_reconstruction(),
-            palace_oh_suffix=palace_oh_suffix,
-            palace_diffuse_suffix=palace_diffuse_suffix,
-            split_zodi=split_zodi, n_zodi_spline_knots=n_zodi_knots,
-        )
+    # Build the basis the corpus was actually fitted with: the loss must map
+    # coefficients to flux through the same basis that produced them (a
+    # mismatched basis put the OH template integrals a median 11.2% high).
+    model, _basis_note = make_corpus_basis_decomposer(
+        wave_ref,
+        input_fits_for_basis=input_fits_for_basis,
+        n_spline_knots=n_moon_knots,
+        n_zodi_spline_knots=n_zodi_knots,
+    )
+    if verbose:
+        print(f"  [flux-basis] {_basis_note}")
     # Per-coefficient NATIVE-grid template integral, keyed BY NAME.
     # `design_names` and `_assemble_design_matrix()` are built from the same
     # block order inside `_build_static_basis`, so zipping them is the class's
@@ -2227,7 +2200,7 @@ def _precompute_flux_basis_and_geometry(
     flux_basis_matrices["moon"] = (
         np.asarray(model.matrix_moon[:, stride], dtype=np.float32)
         if _moon_basis is None else _moon_basis)
-    if split_zodi and model.matrix_zodi.shape[0] > 0:
+    if model.matrix_zodi.shape[0] > 0:
         _zb = _group_basis("zodi")
         flux_basis_matrices["zodi"] = (
             np.asarray(model.matrix_zodi[:, stride], dtype=np.float32)
@@ -2382,7 +2355,7 @@ class Trainer:
         trainer = Trainer(cfg=default_dual_group_config)
         artifacts = trainer.run_ensemble(
             filtered_triplet, compressors, group_indices, geom_kwargs,
-            input_fits_for_basis=..., n_moon_knots=..., split_zodi=..., n_zodi_knots=...,
+            input_fits_for_basis=..., n_moon_knots=..., n_zodi_knots=...,
         )
     """
 
@@ -2514,11 +2487,7 @@ class Trainer:
         input_fits_for_basis,
         input_fits_flux=None,
         n_moon_knots,
-        split_zodi,
         n_zodi_knots,
-        palace_oh_suffix=None,
-        palace_diffuse_suffix=None,
-        decomp_suffix=None,
         train_row_mask=None,
         verbose=True,
     ):
@@ -2551,11 +2520,7 @@ class Trainer:
                 compress_geom_kwargs=geom_kwargs,
                 input_fits_for_basis=input_fits_for_basis,
                 n_moon_knots=n_moon_knots,
-                split_zodi=split_zodi,
                 n_zodi_knots=n_zodi_knots,
-                palace_oh_suffix=palace_oh_suffix,
-                palace_diffuse_suffix=palace_diffuse_suffix,
-                decomp_suffix=decomp_suffix,
                 group_indices=group_indices,
                 input_fits_flux=(input_fits_flux if _want_w else None),
                 pixel_weight_floor_frac=float(

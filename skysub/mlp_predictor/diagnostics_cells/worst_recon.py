@@ -3,10 +3,9 @@ import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from astropy.io import fits
-from sky_decomp.moon_zodi_model import LSF_FWHM_TO_SIGMA
 from sky_decomp.result_io import (load_lsf_surface_cubes,
                                   lsf_surface_state_from_cubes)
-from mlp_predictor.data import make_telluric_row_lookup
+from mlp_predictor.data import DECOMP_SUFFIX, make_telluric_row_lookup
 
 from pathlib import Path
 
@@ -21,14 +20,13 @@ required = [
     "build_triplet_coef_dataset",
     "context_cols",
     "FACTOR",
-    "_DECOMP_SUFFIX",
 ]
 missing = [k for k in required if k not in globals()]
 if missing:
     raise RuntimeError("Run the batch RMSE subset cell first. Missing: " + ", ".join(missing))
 
-# Telluric variant: see full_spectrum_batch_rmse for why the basis is per row.
-# Telluric transmission is looked up BY ROW, so it has to come from the file
+# See full_spectrum_batch_rmse for why the basis is per row.  Telluric
+# transmission is looked up BY ROW, so it has to come from the file
 # these row indices address.  The shared TELLURIC_ROW_FOR is bound to
 # `input_fits_for_basis` (the every10 stack), and the batch-RMSE cell now hands
 # us corpus rows -- feeding those to it raises IndexError, or silently returns
@@ -57,7 +55,7 @@ if "coef_sci_pred" in globals() and np.asarray(coef_sci_pred).shape[0] == sci_rm
     coef_pred_subset = np.asarray(coef_sci_pred, dtype=np.float64)
 else:
     _e10_stem = f"{DECOMP_DATA_ROOT}/{DECOMP_STEM}_every10"
-    _e10_suffix = _DECOMP_SUFFIX
+    _e10_suffix = DECOMP_SUFFIX
     EVERY10_INPUT = f"{_e10_stem}.fits"
     EVERY10_NEAR = f"{_e10_stem}_decomp_sky1{_e10_suffix}.fits"
     EVERY10_FAR = f"{_e10_stem}_decomp_sky2{_e10_suffix}.fits"
@@ -154,7 +152,7 @@ else:
 # corpus row 4930).  Fall back to every10 only for a results dict written
 # before the paths were recorded.
 _e10_stem = f"{DECOMP_DATA_ROOT}/{DECOMP_STEM}_every10"
-_e10_suffix = _DECOMP_SUFFIX
+_e10_suffix = DECOMP_SUFFIX
 _src = rmse_subset_results if "rmse_subset_results" in globals() else {}
 EVERY10_INPUT = _src.get("source_input", f"{_e10_stem}.fits")
 EVERY10_NEAR = _src.get("source_near", f"{_e10_stem}_decomp_sky1{_e10_suffix}.fits")
@@ -162,9 +160,7 @@ EVERY10_FAR = _src.get("source_far", f"{_e10_stem}_decomp_sky2{_e10_suffix}.fits
 EVERY10_SCI = _src.get("source_sci", f"{_e10_stem}_decomp_sci{_e10_suffix}.fits")
 print(f"  worst-recon reads {Path(EVERY10_INPUT).name} "
       f"(the file the batch-RMSE row indices belong to)")
-if globals().get('TELLURIC_ROW_FOR') is not None:
-    _telluric_for = make_telluric_row_lookup(EVERY10_INPUT, verbose=False,
-                                             decomp_suffix=_DECOMP_SUFFIX)
+_telluric_for = make_telluric_row_lookup(EVERY10_INPUT, verbose=False)
 # LSF cubes once per arm: load_lsf_state_if_available re-reads LSF_COEF +
 # LSF_KNOTS + LSF_META (~80 MB on a corpus file) on every call, and this cell
 # makes three per plotted row.
@@ -192,10 +188,6 @@ with fits.open(EVERY10_INPUT, memmap=True) as hdul:
     flux_far_all = np.asarray(hdul["FLUX_SKY_FAR"].data[row_idx], dtype=np.float64)
     flux_sci_all = np.asarray(hdul["FLUX_SCI"].data[row_idx], dtype=np.float64)
     wave_arr = np.asarray(hdul["WAVE"].data, dtype=np.float64)
-    _lsf_full = hdul["LSF_SCI"].data
-    lsf_sci_arr = (np.asarray(_lsf_full, dtype=np.float64)
-                   if np.ndim(_lsf_full) == 1
-                   else np.asarray(_lsf_full[row_idx], dtype=np.float64))
 
 base_dir_guess = _infer_base_dir_for_reconstruction()
 
@@ -214,20 +206,14 @@ fig = make_subplots(
 for case_i, j in enumerate(worst_local):
     rr = int(row_idx[j])
     wave_row = wave_arr if wave_arr.ndim == 1 else np.asarray(wave_arr[rr], dtype=np.float64)
-    # NB the flux / LSF arrays above were loaded as data[row_idx], so they are
-    # addressed by POSITION j, while the decomposition lookups below still take
-    # the file row rr.
-    lsf_row = lsf_sci_arr if lsf_sci_arr.ndim == 1 else np.asarray(lsf_sci_arr[j], dtype=np.float64)
-
-    lsf_sigma = lsf_row / LSF_FWHM_TO_SIGMA
-
+    # NB the flux arrays above were loaded as data[row_idx], so they are
+    # addressed by POSITION j, while the decomposition lookups below take the
+    # file row rr.
     lsf_state_near = _lsf_state_for(EVERY10_NEAR, rr)
     lsf_state_far = _lsf_state_for(EVERY10_FAR, rr)
     lsf_state_sci = _lsf_state_for(EVERY10_SCI, rr)
 
-    lsf_arg_near = lsf_state_near if lsf_state_near is not None else lsf_sigma
-    lsf_arg_far = lsf_state_far if lsf_state_far is not None else lsf_sigma
-    lsf_arg_sci = lsf_state_sci if lsf_state_sci is not None else lsf_sigma
+    lsf_arg_near, lsf_arg_far, lsf_arg_sci = lsf_state_near, lsf_state_far, lsf_state_sci
 
     o2_near = load_o2_vector_if_available(EVERY10_NEAR, rr)
     o2_far = load_o2_vector_if_available(EVERY10_FAR, rr)
@@ -236,20 +222,20 @@ for case_i, j in enumerate(worst_local):
     comps_near = reconstruct_with_lsf(
         wave=wave_row, coef=coef_near_subset[j], lsf=lsf_arg_near,
         n_spline_knots=N_MOON_KNOTS, base_dir=base_dir_guess, o2_vector=o2_near,
-        split_zodi=SPLIT_ZODI, n_zodi_spline_knots=N_ZODI_KNOTS,
-        telluric=(None if _telluric_for is None else _telluric_for('sky1', rr)),
+        n_zodi_spline_knots=N_ZODI_KNOTS,
+        telluric=_telluric_for('sky1', rr),
     )
     comps_far = reconstruct_with_lsf(
         wave=wave_row, coef=coef_far_subset[j], lsf=lsf_arg_far,
         n_spline_knots=N_MOON_KNOTS, base_dir=base_dir_guess, o2_vector=o2_far,
-        split_zodi=SPLIT_ZODI, n_zodi_spline_knots=N_ZODI_KNOTS,
-        telluric=(None if _telluric_for is None else _telluric_for('sky2', rr)),
+        n_zodi_spline_knots=N_ZODI_KNOTS,
+        telluric=_telluric_for('sky2', rr),
     )
     comps_sci = reconstruct_with_lsf(
         wave=wave_row, coef=coef_pred_subset[j], lsf=lsf_arg_sci,
         n_spline_knots=N_MOON_KNOTS, base_dir=base_dir_guess, o2_vector=o2_sci,
-        split_zodi=SPLIT_ZODI, n_zodi_spline_knots=N_ZODI_KNOTS,
-        telluric=(None if _telluric_for is None else _telluric_for('sci', rr)),
+        n_zodi_spline_knots=N_ZODI_KNOTS,
+        telluric=_telluric_for('sci', rr),
     )
 
     near_obs = np.asarray(flux_near_all[j], dtype=np.float64) * FACTOR

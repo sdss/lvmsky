@@ -18,7 +18,7 @@ if _missing:
         'assignment) before executing this cell.'
     )
 
-_suffix = globals().get('_DECOMP_SUFFIX', '_lsf_surface_iterative_split_zodi')
+from mlp_predictor.data import DECOMP_SUFFIX as _suffix
 INPUT_FITS = f'{DECOMP_DATA_ROOT}/{DECOMP_STEM}.fits'
 NEAR_FITS = f'{DECOMP_DATA_ROOT}/{DECOMP_STEM}_decomp_sky1{_suffix}.fits'
 FAR_FITS = f'{DECOMP_DATA_ROOT}/{DECOMP_STEM}_decomp_sky2{_suffix}.fits'

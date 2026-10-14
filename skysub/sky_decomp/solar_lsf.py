@@ -40,7 +40,7 @@ from .lsf_surface_iterative import (
     _wave_fingerprint,
     evaluate_bspline_basis,
 )
-from .residual_pca import SkyDecompPalaceCorrAijcVNFSplitZodiLSFSpline2D
+from .telluric_corrected_lines import SkyDecompPalaceCorrAijcVNFSplitZodiLSFSpline2D
 
 SOLAR_BLUE_MODEL = "solar_continuum_joint_mspline"
 REFERENCE_BLUE_MODEL = "fixed_empirical_reference"

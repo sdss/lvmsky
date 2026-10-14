@@ -49,15 +49,15 @@ DEFAULT_CONTEXT_COLUMNS: tuple[str, ...] = (
 class DataConfig:
     """Where the decomposition corpus lives and which flavour to read."""
 
-    decomp_data_root: str = "moon_zodi_spline4"
-    decomp_stem: str = "lvmsframe_median_stack_1.2.1_p40_p70"
+    decomp_data_root: str = "gaia-stars-solarblue"
+    decomp_stem: str = "lvmsframe_median_stack_1.3.2_gaia1over100_fiber_roles"
     palace_dir: str = "../"
     factor: float = 1.0e14
     context_columns: tuple[str, ...] = DEFAULT_CONTEXT_COLUMNS
 
-    # The split-zodi LSF-surface-iterative decomposition is the only flavour
-    # produced by the current pipeline; the suffix is hard-coded.
-    decomp_suffix: str = "_lsf_surface_iterative_split_zodi"
+    # The solarblue decomposition (decompose_parallel.FIT_MODEL) is the only
+    # flavour the pipeline produces; data.DECOMP_SUFFIX is the same string.
+    decomp_suffix: str = "_palacecorr_aijc_vnf_split_zodi_lsf_spline2d_solarblue"
 
     @property
     def decomp_prefix(self) -> str:

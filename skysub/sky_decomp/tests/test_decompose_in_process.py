@@ -7,16 +7,9 @@ from skysub import decompose_parallel as dp
 def _initargs_by_name(**overrides):
     kw = dict(
         wave="WAVE", lsf_sigma=0.5, base_dir="BASE", factor=1e14, data_file="F",
-        progress_queue="Q", fit_model="M", n_refinement_cycles=5,
+        progress_queue="Q", n_refinement_cycles=5,
         worker_counter="C", pin_workers=False, diagnose_threads=False,
-        palace_suffix="ps", palace_oh_suffix="pos", palace_diffuse_suffix="pds",
-        exposure_seconds=900.0, moon_zodi_data_root="ROOT", n_spline_knots=11,
-        n_zodi_spline_knots=1, zodi_smooth_lambda=0.1, moon_smooth_lambda=0.2,
-        mask_science_lines=True, centre_on_halpha=True, fit_pixel_weights=True,
-        fit_pixel_weight_clip=None, reversal_retry_bound=0.85,
-        diffuse_ratio_bound_dex=0.2, diffuse_ratio_nominal=(1, 2, 3),
-        diffuse_oh_centre_log10=-0.6, diffuse_oh_bound_dex=0.15,
-        compact_cache_root="CACHE", run_fingerprint="FP")
+        exposure_seconds=900.0, compact_cache_root="CACHE", run_fingerprint="FP")
     kw.update(overrides)
     names = [p for p in inspect.signature(dp.init_worker).parameters]
     return dict(zip(names, dp._worker_initargs(**kw))), kw
@@ -27,21 +20,17 @@ def test_initargs_land_on_the_right_init_worker_parameters():
     assert len(by_name) == len(inspect.signature(dp.init_worker).parameters)
     # Every value arrives under the parameter of the same meaning.
     assert by_name["pin_cpu"] is False and by_name["worker_counter"] == "C"
-    assert by_name["moon_zodi_data_root"] == "ROOT"
-    assert by_name["moon_smooth_lambda"] == 0.2 and by_name["zodi_smooth_lambda"] == 0.1
-    assert by_name["reversal_retry_bound"] == 0.85
-    assert by_name["diffuse_ratio_nominal"] == (1, 2, 3)
+    assert by_name["n_refinement_cycles"] == 5 and by_name["exposure_seconds"] == 900.0
     assert by_name["compact_cache_dir"] == "CACHE" and by_name["run_fingerprint"] == "FP"
+    assert by_name["kinds"] == ("sci", "sky1", "sky2") and by_name["lsf_reference_file"] is None
 
 
 def test_parser_defaults_are_the_deployed_configuration():
     args = dp.build_arg_parser().parse_args(["stack.fits"])
     kw = dp._run_kwargs_from_args(args)
-    assert kw["fit_model"] == dp.PALACECORR_VNF_SPLIT_ZODI_FIT_MODEL
-    assert kw["mask_science_lines"] and kw["centre_on_halpha"] and kw["fit_pixel_weights"]
-    assert kw["reversal_retry_bound"] == dp.SPLIT_ZODI_REVERSAL_RETRY_BOUND
-    assert kw["n_spline_knots"] == dp.MOON_N_KNOTS_DEFAULT
-    assert kw["diffuse_ratio_nominal"] == tuple(float(v) for v in dp.SPLIT_ZODI_DIFFUSE_RATIO_NOMINAL)
+    assert kw["fit_model"] == dp.FIT_MODEL
+    assert kw["n_refinement_cycles"] == dp.N_REFINEMENT_CYCLES
+    assert kw["blue_lsf"] == "solar"
 
 
 def test_individual_fiber_cli_and_input_pixel_weights(monkeypatch):
@@ -91,16 +80,13 @@ def test_blue_lsf_options_and_reference_file(tmp_path):
     kw = dp._run_kwargs_from_args(dp.build_arg_parser().parse_args(
         ["stack.fits", "--blue-lsf", "reference", "--lsf-calibration", str(tmp_path)]))
     assert kw["blue_lsf"] == "reference" and kw["lsf_calibration"] == tmp_path
-    solarblue = dp.PALACECORR_SOLARBLUE_FIT_MODEL
-    assert dp._survey_lsf_reference_file(solarblue, "solar", tmp_path) is None
+    assert dp._survey_lsf_reference_file("solar", tmp_path) is None
     with pytest.raises(FileNotFoundError):
-        dp._survey_lsf_reference_file(solarblue, "reference", tmp_path)
+        dp._survey_lsf_reference_file("reference", tmp_path)
     survey = tmp_path / dp.SURVEY_LSF_REFERENCE
     survey.parent.mkdir()
     survey.write_bytes(b"")
-    assert dp._survey_lsf_reference_file(solarblue, "reference", tmp_path) == survey.resolve()
-    with pytest.raises(ValueError):
-        dp._survey_lsf_reference_file(dp.PALACECORR_VNF_SPLIT_ZODI_FIT_MODEL, "reference", tmp_path)
+    assert dp._survey_lsf_reference_file("reference", tmp_path) == survey.resolve()
     by_name, _ = _initargs_by_name(lsf_reference_file=survey)
     assert by_name["lsf_reference_file"] == str(survey)
 
@@ -165,14 +151,12 @@ def test_an_in_memory_stack_is_passed_through_unchanged():
 
 
 def test_solarblue_cli_routing_and_provenance():
-    args = dp.build_arg_parser().parse_args(["stack.fits", "--fit-model", dp.PALACECORR_SOLARBLUE_FIT_MODEL])
+    args = dp.build_arg_parser().parse_args(["stack.fits", "--fit-model", dp.FIT_MODEL])
     kw = dp._run_kwargs_from_args(args)
-    assert kw["fit_model"] == dp.PALACECORR_SOLARBLUE_FIT_MODEL
-    suffix = dp._resolved_palace_oh_suffix(kw["fit_model"], kw["palace_oh_suffix"])
-    assert suffix == dp.SKYFAR_LINEAR_RIDGE_PALACE_OH_SUFFIX
-    assert kw["mask_science_lines"] and kw["fit_pixel_weights"]
-    assert dp.FIT_MODEL_SUFFIXES[kw["fit_model"]].endswith("_solarblue")
-    meta = dp._fit_model_primary_meta(kw["fit_model"], suffix)
+    assert kw["fit_model"] == dp.FIT_MODEL
+    assert dp.PALACE_OH_SUFFIX == dp.SKYFAR_LINEAR_RIDGE_PALACE_OH_SUFFIX
+    assert dp.FIT_MODEL_SUFFIX.endswith("_solarblue")
+    meta = dp._fit_model_primary_meta()
     assert meta["BLUELSF"] == "solar_continuum_joint"
     assert meta["OHRIDGE"] == dp.SKYFAR_LINEAR_RIDGE_LAMBDA
 
@@ -181,9 +165,9 @@ def test_solarblue_cache_fingerprint_tracks_implementation(tmp_path, monkeypatch
     import numpy as np
     monkeypatch.setattr(dp, "file_sha256", lambda p: str(p))
     before = dp._compact_run_provenance(tmp_path / "stack.fits", np.arange(10.),
-        dp.PALACECORR_SOLARBLUE_FIT_MODEL, tmp_path, {})
+        tmp_path, {})
     assert "solar_lsf.py" in before["source_sha256"]
     monkeypatch.setattr(dp, "file_sha256", lambda p: "changed" if str(p).endswith("solar_lsf.py") else str(p))
     after = dp._compact_run_provenance(tmp_path / "stack.fits", np.arange(10.),
-        dp.PALACECORR_SOLARBLUE_FIT_MODEL, tmp_path, {})
+        tmp_path, {})
     assert before["run_fingerprint"] != after["run_fingerprint"]

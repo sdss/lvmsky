@@ -2,18 +2,15 @@
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
-# Explicit: the variant-aware decomposer factory is newer than this cell's
-# `required` contract, so do not rely on it being in the shared namespace.
 import time as _time
 
 from sky_decomp.result_io import (load_lsf_surface_cubes,
                                   lsf_surface_state_from_cubes)
 
 from mlp_predictor import cell_parallel as _cell_parallel
-from mlp_predictor.data import (make_reconstruction_decomposer,
+from mlp_predictor.data import (DECOMP_SUFFIX, make_reconstruction_decomposer,
                                 make_telluric_row_lookup,
                                 science_line_mask_rows)
-from sky_decomp.moon_zodi_model import LSF_FWHM_TO_SIGMA
 
 RUN_RMSE_SUBSET_EVAL = True  # Set True to execute this slower evaluation cell.
 
@@ -22,8 +19,6 @@ required = [
     "predict_sci_coefficients_default",
     "context_cols",
     "build_triplet_coef_dataset",
-    "reconstruct_component_spectra",
-    "reconstruct_with_lsf",
     "load_lsf_state_if_available",
     "load_o2_vector_if_available",
     "_infer_base_dir_for_reconstruction",
@@ -45,7 +40,7 @@ else:
     # reads a whole plane: flux, VECTOR_O2 and FLUX_SIGMA_TOTAL are sliced to
     # the selected rows, and the LSF cubes are read once rather than per row.
     _eval_stem = f"{DECOMP_DATA_ROOT}/{DECOMP_STEM}"
-    _eval_suffix = _DECOMP_SUFFIX  # inherited from cell 6
+    _eval_suffix = DECOMP_SUFFIX
     EVAL_INPUT = f"{_eval_stem}.fits"
     EVAL_NEAR = f"{_eval_stem}_decomp_sky1{_eval_suffix}.fits"
     EVAL_FAR = f"{_eval_stem}_decomp_sky2{_eval_suffix}.fits"
@@ -257,10 +252,6 @@ else:
         flux_sci_sel = np.asarray(hdul["FLUX_SCI"].data[sel_rows],
                                   dtype=np.float32)
         wave_arr = np.asarray(hdul["WAVE"].data, dtype=np.float64)
-        _lsf_sci_full = hdul["LSF_SCI"].data
-        lsf_sci_sel = (np.asarray(_lsf_sci_full, dtype=np.float32)
-                       if np.ndim(_lsf_sci_full) == 1
-                       else np.asarray(_lsf_sci_full[sel_rows], dtype=np.float32))
         _expnum_sel = None
         if "META" in hdul:
             _meta_ev = Table(hdul["META"].data)
@@ -366,7 +357,7 @@ else:
 
     # 4a) Optimization (2026-08-11): build ONE reconstruction model outside the loop and
     #     precache per-file LSF-availability + full VECTOR_O2 cubes. Previously the loop
-    #     rebuilt SkyDecompLSFSurfaceIterative (basis + solar-reference + moon spline)
+    #     rebuilt the decomposer (basis + solar-reference + moon spline)
     #     3 x n_use times and re-read VECTOR_O2 on every call, both of which dominated
     #     the runtime. See §12 (2026-08-11 batch-RMSE cell reconstruction hoisted).
     _t_recon0 = _time.perf_counter()
@@ -378,43 +369,20 @@ else:
                 _wave_probe, _wave_ref_recon, rtol=0.0, atol=1e-8):
             raise RuntimeError(
                 "wave_arr rows differ between sampled rows; model hoisting assumes a shared grid. "
-                "Fall back to per-row reconstruct_with_lsf if this ever triggers on your dataset.")
-    # DECOMPOSITION VARIANT.  `TELLURIC_ROW_FOR` is a callable f(kind, row) that
-    # the notebook installs for a telluric corpus (see data.DECOMP_VARIANTS) and
-    # leaves as None for the production split-zodi one.  It matters here because
-    # the telluric design matrix is divided by that ROW's DRP transmission, so
-    # unlike the split-zodi basis it cannot be hoisted -- and because the
-    # telluric corpus stores its LSF as a continuous M-spline density, which the
-    # iterative class cannot read at all.  Rebuilding per row costs ~0.17 s.
-    # Telluric transmission must be looked up in the file whose rows we are
-    # indexing.  The shared `TELLURIC_ROW_FOR` is bound to
-    # `input_fits_for_basis`, i.e. the EVERY10 stack (1867 rows), so feeding it
-    # a corpus row raises IndexError at best and returns another exposure's
-    # transmission at worst.  Build this cell's own lookup against EVAL_INPUT.
-    _telluric_for = None
-    if globals().get('TELLURIC_ROW_FOR') is not None:
-        _telluric_for = make_telluric_row_lookup(EVAL_INPUT, verbose=False,
-                                                 decomp_suffix=_DECOMP_SUFFIX)
-    _model_cache = {}
+                "The model hoisting assumes one wavelength grid.")
+    # The design matrix is divided by each ROW's DRP transmission, so the
+    # basis cannot be hoisted: it is rebuilt per row (~0.17 s/row/arm).  The
+    # transmission must come from the file whose rows we index -- the shared
+    # `TELLURIC_ROW_FOR` is bound to the every10 stack -- so this cell builds
+    # its own lookup against EVAL_INPUT.
+    _telluric_for = make_telluric_row_lookup(EVAL_INPUT, verbose=False)
 
     def _model_for(telluric):
         """Decomposer whose basis matches how this row was fitted."""
-        if telluric is None:
-            if 'plain' not in _model_cache:
-                _model_cache['plain'] = make_reconstruction_decomposer(
-                    _wave_ref_recon, n_spline_knots=N_MOON_KNOTS,
-                    base_dir=base_dir_guess, split_zodi=SPLIT_ZODI,
-                    n_zodi_spline_knots=N_ZODI_KNOTS, telluric=None)
-            return _model_cache['plain']
         return make_reconstruction_decomposer(
             _wave_ref_recon, n_spline_knots=N_MOON_KNOTS,
-            base_dir=base_dir_guess, split_zodi=SPLIT_ZODI,
-            n_zodi_spline_knots=N_ZODI_KNOTS, telluric=telluric)
-
-    _lsf_model = _model_for(None)
-    if _telluric_for is not None:
-        print('  reconstruction: TELLURIC variant -- the design matrix is '
-              'rebuilt per row (per-row DRP transmission), ~0.17 s/row/arm.')
+            base_dir=base_dir_guess, n_zodi_spline_knots=N_ZODI_KNOTS,
+            telluric=telluric)
 
     def _precache_decomp_state(decomp_path):
         state = {"path": Path(decomp_path), "has_lsf": False, "o2_cube": None,
@@ -496,8 +464,7 @@ else:
             return None
         return row
 
-    def _fast_reconstruct(coef, lsf_state, o2_vec, lsf_sigma_fallback,
-                          coef_err=None, telluric=None):
+    def _fast_reconstruct(coef, lsf_state, o2_vec, coef_err=None, telluric=None):
         _mdl = _model_for(telluric)
         if isinstance(lsf_state, LSFSurfaceState):
             _mdl._set_lsf_state(lsf_state)
@@ -523,12 +490,8 @@ else:
                     + _sigmas["diffuse"] ** 2 + _sigmas["atom"] ** 2
                     + _sigmas["orc"] ** 2 + _sigmas["o2"] ** 2)
             return _comps
-        # Rare fallback path: no LSF surface state for this row -- take the slow route.
-        return reconstruct_with_lsf(
-            wave=_mdl.wave, coef=coef, lsf=lsf_sigma_fallback,
-            n_spline_knots=N_MOON_KNOTS, base_dir=base_dir_guess, o2_vector=o2_vec,
-            split_zodi=SPLIT_ZODI, n_zodi_spline_knots=N_ZODI_KNOTS,
-            coef_err=coef_err, telluric=telluric)
+        raise RuntimeError('no LSF surface state for this row; every '
+                           'solarblue decomposition carries one')
 
     def _row_line_templates(coef, lsf_state, o2_vec, telluric):
         """Sky-line templates (physical units) on the row's own basis, or None.
@@ -578,10 +541,6 @@ else:
         r = sel_rows[i]
         rr = int(r)
         wave_row = wave_arr if wave_arr.ndim == 1 else np.asarray(wave_arr[rr], dtype=np.float64)
-        # Cast in BOTH branches: lsf_sci_sel is float32 on disk, and the
-        # 1-D branch would otherwise leak float32 into _lsf_sigma_fallback.
-        lsf_row = np.asarray(lsf_sci_sel if lsf_sci_sel.ndim == 1
-                             else lsf_sci_sel[i], dtype=np.float64)
 
         flux_near_true = np.asarray(flux_near_sel[i], dtype=np.float64)
         flux_far_true = np.asarray(flux_far_sel[i], dtype=np.float64)
@@ -590,7 +549,6 @@ else:
         _lsf_state_near = _lsf_state_from_cache(_state_near, rr)
         _lsf_state_far  = _lsf_state_from_cache(_state_far,  rr)
         _lsf_state_sci  = _lsf_state_from_cache(_state_sci,  rr)
-        _lsf_sigma_fallback = lsf_row / LSF_FWHM_TO_SIGMA
 
         _o2_vec_near = _o2_vec_from_cache(_state_near, i)
         _o2_vec_far  = _o2_vec_from_cache(_state_far,  i)
@@ -607,19 +565,19 @@ else:
         # are attenuated along that arm's line of sight) while the DRP
         # transmission that divides the basis is the SCIENCE one for all three.
         # `_telluric_for` handles both, keyed by kind.
-        _tel_near = None if _telluric_for is None else _telluric_for('sky1', rr)
-        _tel_far  = None if _telluric_for is None else _telluric_for('sky2', rr)
-        _tel_sci  = None if _telluric_for is None else _telluric_for('sci',  rr)
+        _tel_near = _telluric_for('sky1', rr)
+        _tel_far  = _telluric_for('sky2', rr)
+        _tel_sci  = _telluric_for('sci',  rr)
         comps_near = _fast_reconstruct(coef_near_sel[i], _lsf_state_near,
-                                        _o2_vec_near, _lsf_sigma_fallback,
+                                        _o2_vec_near,
                                         coef_err=_cerr_near_row,
                                         telluric=_tel_near)
         comps_far  = _fast_reconstruct(coef_far_sel[i],  _lsf_state_far,
-                                        _o2_vec_far,  _lsf_sigma_fallback,
+                                        _o2_vec_far,
                                         coef_err=_cerr_far_row,
                                         telluric=_tel_far)
         comps_sci  = _fast_reconstruct(coef_sci_pred[i], _lsf_state_sci,
-                                        _o2_vec_sci,  _lsf_sigma_fallback,
+                                        _o2_vec_sci,
                                         coef_err=_cerr_sci_row,
                                         telluric=_tel_sci)
 
@@ -679,7 +637,7 @@ else:
         # per-component residuals (pred - recon(sci_true)) can be separated in
         # the multi-panel residual plot below (matches cell 26 fig_deltas).
         comps_sci_true_batch = _fast_reconstruct(
-            coef_sci_sel[i], _lsf_state_sci, _o2_vec_sci, _lsf_sigma_fallback,
+            coef_sci_sel[i], _lsf_state_sci, _o2_vec_sci,
             coef_err=None, telluric=_tel_sci,
         )
         _dmoon    = (np.asarray(comps_sci["moon"], dtype=np.float64)

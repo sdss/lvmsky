@@ -118,3 +118,23 @@ def test_single_row_matches_the_batch_row_and_validates_inputs():
         sky_arm_residual_correction(WAVE, m, sol, [a1], scale="oh")
     with pytest.raises(ValueError):
         sky_arm_residual_correction(WAVE[:-1], m, sol, [a1])
+
+
+def test_a_narrow_feature_in_one_arm_is_not_transferred():
+    rng = np.random.default_rng(3)
+    p = _pattern()
+    s = np.full(WAVE.size, 10.0)
+    near = _arm(s, p, 1e-3, rng)
+    far = _arm(s, p, 1e-3, rng)
+    line = 5.0 * np.exp(-0.5 * ((WAVE - 4500.0) / 1.06) ** 2)     # emission in the near field only
+    near = SkyArm(near.observed + line, near.model, near.solar, near.variance)
+    win = np.abs(WAVE - 4500.0) < 6
+    kw = dict(smoothing=0, max_wavelength=np.inf)
+    off = sky_arm_residual_correction(WAVE, *_sci(s), [near, far], consistency_clip=None, **kw)
+    on, info = sky_arm_residual_correction(WAVE, *_sci(s), [near, far], return_info=True, **kw)
+    assert off[win].sum() > 0.4 * line[win].sum()                 # half the line, without the clip
+    assert abs(on[win].sum()) < 0.02 * line[win].sum()            # gone with it (the default)
+    # The shared pattern is still corrected away from the line.
+    away = (np.abs(WAVE - 4500.0) > 10) & (WAVE < 5900)
+    assert np.allclose(on[away], (p * (s + AIRGLOW))[away], atol=5e-3)
+    assert 0 < info["clipped_fraction"] < 0.05

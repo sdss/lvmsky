@@ -22,11 +22,11 @@
 # fall back to drawing and reconstructing its own every10 sample.
 import time as _time
 from pathlib import Path
-from sky_decomp.moon_zodi_model import LSF_FWHM_TO_SIGMA
+from mlp_predictor.data import DECOMP_SUFFIX, make_reconstruction_decomposer
 
 required = ['filtered_triplet', 'mlp_artifacts', 'predict_sci_coefficients_default',
             'context_cols', 'build_triplet_coef_dataset',
-            'reconstruct_component_spectra', 'reconstruct_with_lsf',
+            'TELLURIC_ROW_FOR',
             'load_lsf_state_if_available', 'load_o2_vector_if_available',
             '_infer_base_dir_for_reconstruction']
 _missing = [k for k in required if k not in globals()]
@@ -44,7 +44,7 @@ n_sample_atlas = 500
 rng_seed_atlas = 42
 
 _e10_stem = f'{DECOMP_DATA_ROOT}/{DECOMP_STEM}_every10'
-_e10_suffix = _DECOMP_SUFFIX
+_e10_suffix = DECOMP_SUFFIX
 EVERY10_INPUT = f'{_e10_stem}.fits'
 EVERY10_NEAR  = f'{_e10_stem}_decomp_sky1{_e10_suffix}.fits'
 EVERY10_FAR   = f'{_e10_stem}_decomp_sky2{_e10_suffix}.fits'
@@ -263,18 +263,11 @@ else:
     # Load wavelength grid + LSF ref from the input FITS (matches the recon cell).
     with fits.open(EVERY10_INPUT) as hdul:
         wave_arr = np.asarray(hdul['WAVE'].data, dtype=np.float64)
-        lsf_sci_arr = np.asarray(hdul['LSF_SCI'].data, dtype=np.float64)
 
     _wave_ref_recon = wave_arr if wave_arr.ndim == 1 else wave_arr[int(sel_rows[0])]
     base_dir_guess = _infer_base_dir_for_reconstruction()
 
-    from mlp_predictor.data import make_reconstruction_decomposer
-    _telluric_for = globals().get('TELLURIC_ROW_FOR')
-    _lsf_model = SkyDecompLSFSurfaceIterative(
-        _wave_ref_recon, lsf_sigma=1.0, n_spline_knots=N_MOON_KNOTS,
-        base_dir=base_dir_guess,
-        split_zodi=SPLIT_ZODI, n_zodi_spline_knots=N_ZODI_KNOTS,
-    )
+    _telluric_for = TELLURIC_ROW_FOR
 
 
     def _precache_decomp_state(decomp_path):
@@ -299,7 +292,7 @@ else:
 
     # Reconstruction components -> ML coefficient groups (§3.2).  'oh' and 'o2'
     # both belong to the mesospheric group; the rest are one-to-one.
-    def _reconstruct_sci_total(coef_row, row_idx, lsf_sigma_fallback):
+    def _reconstruct_sci_total(coef_row, row_idx):
         """Return (total_flux, {group: component_flux}) for one row."""
         _lsf_state = None
         if _state_sci['has_lsf']:
@@ -312,26 +305,19 @@ else:
             _o2_row = _state_sci['o2_cube'][int(row_idx)]
             if np.isfinite(_o2_row).any() and float(np.nansum(np.abs(_o2_row))) > 0.0:
                 _o2 = _o2_row
-        # Telluric variant: the basis is per row, so rebuild instead of reusing the
-        # hoisted model.  See full_spectrum_batch_rmse for the reasoning.
-        _tel = (None if _telluric_for is None
-                else _telluric_for('sci', int(row_idx)))
-        _mdl = (_lsf_model if _tel is None else make_reconstruction_decomposer(
-            _lsf_model.wave, n_spline_knots=N_MOON_KNOTS, base_dir=base_dir_guess,
-            split_zodi=SPLIT_ZODI, n_zodi_spline_knots=N_ZODI_KNOTS, telluric=_tel))
-        if isinstance(_lsf_state, LSFSurfaceState):
-            _mdl._set_lsf_state(_lsf_state)
-            _mats = _mdl._assemble_refined_matrices()
-            if _o2 is not None:
-                _mats['o2'] = np.asarray(_o2, float).ravel()[None, :]
-            _comps = _mdl._components_from_coef(np.asarray(coef_row, float).ravel(), _mats)
-        else:
-            # Rare fallback.
-            _comps = reconstruct_with_lsf(
-                wave=_mdl.wave, coef=coef_row, lsf=lsf_sigma_fallback,
-                n_spline_knots=N_MOON_KNOTS, base_dir=base_dir_guess, o2_vector=_o2,
-                split_zodi=SPLIT_ZODI, n_zodi_spline_knots=N_ZODI_KNOTS,
-                telluric=_tel)
+        # The basis is per row (per-row transmission), so it is rebuilt here.
+        # See full_spectrum_batch_rmse for the reasoning.
+        if not isinstance(_lsf_state, LSFSurfaceState):
+            raise RuntimeError(f'row {int(row_idx)} has no fitted LSF surface')
+        _mdl = make_reconstruction_decomposer(
+            _wave_ref_recon, n_spline_knots=N_MOON_KNOTS, base_dir=base_dir_guess,
+            n_zodi_spline_knots=N_ZODI_KNOTS,
+            telluric=_telluric_for('sci', int(row_idx)))
+        _mdl._set_lsf_state(_lsf_state)
+        _mats = _mdl._assemble_refined_matrices()
+        if _o2 is not None:
+            _mats['o2'] = np.asarray(_o2, float).ravel()[None, :]
+        _comps = _mdl._components_from_coef(np.asarray(coef_row, float).ravel(), _mats)
         _by_group = _group_components(_comps)
         _total = np.zeros_like(next(iter(_by_group.values())), dtype=np.float64)
         for _v in _by_group.values():
@@ -359,10 +345,8 @@ else:
 
     _t0 = _time.perf_counter()
     for _i, _rr in enumerate(sel_rows):
-        _lsf_row = lsf_sci_arr if lsf_sci_arr.ndim == 1 else lsf_sci_arr[int(_rr)]
-        _lsf_sigma_fb = _lsf_row / LSF_FWHM_TO_SIGMA
-        _y_true, _c_true = _reconstruct_sci_total(coef_sci_true_atlas[_i], _rr, _lsf_sigma_fb)
-        _y_pred, _c_pred = _reconstruct_sci_total(coef_sci_pred_atlas[_i], _rr, _lsf_sigma_fb)
+        _y_true, _c_true = _reconstruct_sci_total(coef_sci_true_atlas[_i], _rr)
+        _y_pred, _c_pred = _reconstruct_sci_total(coef_sci_pred_atlas[_i], _rr)
         _y_true = _y_true
         _y_pred = _y_pred
         _resid[_i, :] = _y_pred - _y_true

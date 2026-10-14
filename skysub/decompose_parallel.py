@@ -1,13 +1,19 @@
 #!/usr/bin/env python3
 
 """
-Run sky spectral decomposition on a median-stacked LVM frame.
+Run the sky spectral decomposition on a median-stacked LVM frame.
+
+The decomposition is `sky_decomp.solar_lsf.SkyDecompPalaceCorrSolarBlueLSF`
+(fit model ``palacecorr-aijc-vnf-split-zodi-lsf-spline2d-solarblue``): the
+telluric split-zodi fit with ridge-corrected PALACE OH line strengths, whose
+blue-channel LSF is either fitted from the solar lines (``--blue-lsf solar``)
+or held at the survey-wide empirical reference (``--blue-lsf reference``).
 
 Usage:
-    python decompose_parallel.py <data_file> [palace_dir] [options]
+    python decompose_parallel.py <data_file> [data_root] [options]
 
 Example:
-    python decompose_parallel.py lvmsframe_median_stack.fits ../ --n-workers 8
+    python decompose_parallel.py lvmsframe_median_stack.fits --blue-lsf reference --n-workers 8
 """
 
 import os
@@ -95,18 +101,13 @@ _WORKER_INPUT_MASK = {}
 _WORKER_LSF = {}
 _WORKER_META = None
 _WORKER_PROGRESS_QUEUE = None
-_WORKER_FIT_MODEL = "baseline"
 _WORKER_EXPOSURE_SECONDS = 900.0
 _WORKER_WAVE = None
 _WORKER_LOG_WAVE = None  # log(wave), for the reversal colour test
-_WORKER_REVERSAL_RETRY_BOUND = None  # None disables retry-on-reversal
 _WORKER_TELLURIC_CALCULATOR = None
 _WORKER_DECOMPOSER_KWARGS = {}
 _WORKER_SCIENCE_LINE_MASK = None
 _WORKER_SCIENCE_LINE_FWHM = None
-_WORKER_SCIENCE_LINE_CENTRE = True  # overwritten by init_worker
-_WORKER_FIT_PIXEL_WEIGHTS = False  # overwritten by init_worker
-_WORKER_FIT_PIXEL_WEIGHT_CLIP = None  # overwritten by init_worker
 _WORKER_SENS_ABS = None  # absolute sensitivity on _WORKER_WAVE, when weighting
 _WORKER_COMPACT_CACHE_DIR = None
 _WORKER_RUN_FINGERPRINT = None
@@ -122,8 +123,7 @@ _PWV_FALLBACK_REPORTED = False
 DRP_DEFAULT_PWV_MM = 15.0
 
 # --- per-pixel fit weights -------------------------------------------------
-# ON BY DEFAULT since 2026-09-18; `--no-fit-pixel-weights` restores the old
-# behaviour.
+# Always on (since 2026-09-18).
 #
 # The fit USED to be run with ivar = 1 on every pixel -- an unweighted MASK with
 # 0 only in the science-line windows, not a variance, and not even
@@ -164,14 +164,6 @@ DRP_DEFAULT_PWV_MM = 15.0
 # reversal count (sci 13 -> 17) by moving the moon/zodi partition, and the retry
 # absorbs it (43/43 recovered).  Turning the weights on WITHOUT the retry would
 # cost yield rather than save it.
-FIT_PIXEL_WEIGHTS = True
-# Bound on the weight dynamic range, as a factor about the row mean: `3.0` keeps
-# every weight inside [1/3, 3].  None leaves the raw photon weights, which span
-# ~600x within a row.  A 20-row probe had put the diffuse-collapse rate at 5%
-# and clipping at 3 removed it for half the chi2 gain; on the full 1447-row
-# subset the true rate is 0.83%, so the clip is NOT needed and defaults to off.
-FIT_PIXEL_WEIGHT_CLIP = None
-
 FIT_PIXEL_WEIGHT_FLOOR_FRAC = 0.05
 FIT_PIXEL_WEIGHT_EXPTIME_S = 900.0
 # Per-arm fibre-count column; only used when the weights are NOT normalised.
@@ -199,130 +191,45 @@ class _InvalidAirmassError(_FailedInputError):
 class _UnusableLSFError(_FailedInputError):
     """A row whose detector LSF has no pixel `_sanitised_lsf_row` can use."""
 
-FIT_MODEL_SUFFIXES = {
-    "baseline": "",
-    "lsf-surface-iterative": "_lsf_surface_iterative",
-    "lsf-surface-iterative-split-zodi": "_lsf_surface_iterative_split_zodi",
-    "lsf-spline2d-split-zodi": "_lsf_spline2d_split_zodi",
-    "moon-zodi-lsf-surface-iterative": "_moon_zodi_lsf_surface_iterative",
-    "adam25k-telluric-lsf-spline2d": "_adam25k_telluric_lsf_spline2d",
-    "palace-aijc-vnf-line-amplitude-pca30": "_palace_aijc_vnf_line_amplitude_pca30",
-    "adam25k-telluric-split-zodi-lsf-spline2d": (
-        "_adam25k_telluric_split_zodi_lsf_spline2d"
-    ),
-    "palace-aijc-vnf-split-zodi-lsf-spline2d": (
-        "_palace_aijc_vnf_split_zodi_lsf_spline2d"
-    ),
-    "palacecorr-aijc-vnf-split-zodi-lsf-spline2d": (
-        "_palacecorr_aijc_vnf_split_zodi_lsf_spline2d"
-    ),
-    "palacecorr-aijc-vnf-split-zodi-lsf-spline2d-solarblue": (
-        "_palacecorr_aijc_vnf_split_zodi_lsf_spline2d_solarblue"
-    ),
-    "palace-aijc-vnf-pca30-split-zodi-lsf-spline2d": (
-        "_palace_aijc_vnf_pca30_split_zodi_lsf_spline2d"
-    ),
-    # Compatibility aliases for existing commands and persisted provenance.
-    "adam25k-telluric-niv-continuum": "_adam25k_telluric_niv_continuum",
-    "palace-aijc-vnf-pca30-niv-continuum": "_palace_aijc_vnf_pca30_niv_continuum",
-}
-MOON_ZODI_FIT_MODEL = "moon-zodi-lsf-surface-iterative"
-SPLIT_ZODI_FIT_MODEL = "lsf-surface-iterative-split-zodi"
-SPLINE2D_SPLIT_ZODI_FIT_MODEL = "lsf-spline2d-split-zodi"
-SPLIT_ZODI_FIT_MODELS = (SPLIT_ZODI_FIT_MODEL, SPLINE2D_SPLIT_ZODI_FIT_MODEL)
-ADAM25K_TELLURIC_FIT_MODEL = "adam25k-telluric-lsf-spline2d"
-PALACE_VNF_PCA30_FIT_MODEL = "palace-aijc-vnf-line-amplitude-pca30"
-ADAM25K_SPLIT_ZODI_FIT_MODEL = "adam25k-telluric-split-zodi-lsf-spline2d"
-PALACE_VNF_SPLIT_ZODI_FIT_MODEL = "palace-aijc-vnf-split-zodi-lsf-spline2d"
-PALACECORR_VNF_SPLIT_ZODI_FIT_MODEL = (
-    "palacecorr-aijc-vnf-split-zodi-lsf-spline2d"
-)
-PALACECORR_SOLARBLUE_FIT_MODEL = (
-    "palacecorr-aijc-vnf-split-zodi-lsf-spline2d-solarblue"
-)
-PALACECORR_FIT_MODELS = (
-    PALACECORR_VNF_SPLIT_ZODI_FIT_MODEL,
-    PALACECORR_SOLARBLUE_FIT_MODEL,
-)
-# SolarBlue blue-channel LSF: "solar" fits it from the solar lines in the
-# Moon/Zodi continuum; "reference" holds it at the empirical survey-wide
-# reference of lsf_calibration/ (per fiber for individual-fiber rows, the
-# mean over the telescope's fibers for fiber-stacked rows).  r and z are
-# fitted in situ either way.
+FIT_MODEL = "palacecorr-aijc-vnf-split-zodi-lsf-spline2d-solarblue"
+# The name the analysis scripts and tests use for it.
+FIT_MODEL_SUFFIX = "_palacecorr_aijc_vnf_split_zodi_lsf_spline2d_solarblue"
+# The OH line strengths: SkyFar ridge-corrected PALACE populations.
+PALACE_OH_SUFFIX = SKYFAR_LINEAR_RIDGE_PALACE_OH_SUFFIX
+# Blue-channel LSF: "solar" fits it from the solar lines in the Moon/Zodi
+# continuum; "reference" holds it at the empirical survey-wide reference of
+# lsf_calibration/ (per fiber for individual-fiber rows, the mean over the
+# fibers that entered the median -- FIBER_ROLE -- or over the telescope's
+# fibers for fiber-stacked rows).  r and z are fitted in situ either way.
 BLUE_LSF_CHOICES = ("solar", "reference")
 DEFAULT_LSF_CALIBRATION_DIR = Path(__file__).resolve().parent / "lsf_calibration"
 SURVEY_LSF_REFERENCE = Path("survey") / "lsf_survey.fits"
-PALACE_VNF_PCA30_SPLIT_ZODI_FIT_MODEL = (
-    "palace-aijc-vnf-pca30-split-zodi-lsf-spline2d"
-)
-LEGACY_ADAM25K_SPLIT_ZODI_FIT_MODEL = "adam25k-telluric-niv-continuum"
-LEGACY_PALACE_VNF_PCA30_SPLIT_ZODI_FIT_MODEL = (
-    "palace-aijc-vnf-pca30-niv-continuum"
-)
-# Public compatibility names used by already-generated notebooks.
-ADAM25K_NIV_CONTINUUM_FIT_MODEL = LEGACY_ADAM25K_SPLIT_ZODI_FIT_MODEL
-PALACE_VNF_PCA30_NIV_CONTINUUM_FIT_MODEL = (
-    LEGACY_PALACE_VNF_PCA30_SPLIT_ZODI_FIT_MODEL
-)
-ADAM25K_SPLIT_ZODI_FIT_MODELS = (
-    ADAM25K_SPLIT_ZODI_FIT_MODEL,
-    LEGACY_ADAM25K_SPLIT_ZODI_FIT_MODEL,
-)
-PALACE_VNF_PCA30_SPLIT_ZODI_FIT_MODELS = (
-    PALACE_VNF_PCA30_SPLIT_ZODI_FIT_MODEL,
-    LEGACY_PALACE_VNF_PCA30_SPLIT_ZODI_FIT_MODEL,
-)
-SPLIT_ZODI_TELLURIC_FIT_MODELS = (
-    *ADAM25K_SPLIT_ZODI_FIT_MODELS,
-    PALACE_VNF_SPLIT_ZODI_FIT_MODEL,
-    *PALACECORR_FIT_MODELS,
-    *PALACE_VNF_PCA30_SPLIT_ZODI_FIT_MODELS,
-)
-TELLURIC_FIT_MODELS = (
-    ADAM25K_TELLURIC_FIT_MODEL,
-    PALACE_VNF_PCA30_FIT_MODEL,
-    *SPLIT_ZODI_TELLURIC_FIT_MODELS,
-)
+# Refinement-cycle limit; the cycles stop earlier on convergence.
+N_REFINEMENT_CYCLES = 30
 
 
-def _resolved_palace_oh_suffix(fit_model, palace_oh_suffix):
-    if fit_model not in PALACECORR_FIT_MODELS:
-        return palace_oh_suffix
-    if palace_oh_suffix not in (None, SKYFAR_LINEAR_RIDGE_PALACE_OH_SUFFIX):
-        raise ValueError(
-            "palacecorr requires pmd_popmodel_OH"
-            f"{SKYFAR_LINEAR_RIDGE_PALACE_OH_SUFFIX}.dat"
-        )
-    return SKYFAR_LINEAR_RIDGE_PALACE_OH_SUFFIX
-
-
-def _fit_model_primary_meta(fit_model, palace_oh_suffix, blue_lsf="solar",
-                            lsf_reference_file=None):
+def _fit_model_primary_meta(blue_lsf="solar", lsf_reference_file=None):
     metadata = {
-        "DECOMPM": fit_model,
+        "DECOMPM": FIT_MODEL,
         "ZODICORR": (SPLIT_ZODI_ZODI_CORRECTION, "Leinert zodi correction used by the anchor"),
+        "OHFILE": f"pmd_popmodel_OH{PALACE_OH_SUFFIX}.dat",
+        "OHRIDGE": SKYFAR_LINEAR_RIDGE_LAMBDA,
     }
-    if palace_oh_suffix is not None:
-        metadata["OHFILE"] = f"pmd_popmodel_OH{palace_oh_suffix}.dat"
-    if fit_model in PALACECORR_FIT_MODELS:
-        metadata["OHRIDGE"] = SKYFAR_LINEAR_RIDGE_LAMBDA
-    if fit_model == PALACECORR_SOLARBLUE_FIT_MODEL and blue_lsf == "reference":
+    if blue_lsf == "reference":
         metadata["BLUELSF"] = "survey_reference"
         metadata["LSFREF"] = (str(lsf_reference_file), "blue LSF reference file")
         metadata["LSFREFSH"] = (file_sha256(lsf_reference_file), "sha256 of LSFREF")
-    elif fit_model == PALACECORR_SOLARBLUE_FIT_MODEL:
+    else:
         metadata["BLUELSF"] = "solar_continuum_joint"
     return metadata
 
 
-def _survey_lsf_reference_file(fit_model, blue_lsf, lsf_calibration):
+def _survey_lsf_reference_file(blue_lsf, lsf_calibration):
     """The survey reference file a `--blue-lsf reference` run uses, else None."""
     if blue_lsf not in BLUE_LSF_CHOICES:
         raise ValueError(f"blue_lsf must be one of {BLUE_LSF_CHOICES}, got {blue_lsf!r}")
     if blue_lsf == "solar":
         return None
-    if fit_model != PALACECORR_SOLARBLUE_FIT_MODEL:
-        raise ValueError(f"--blue-lsf reference requires --fit-model {PALACECORR_SOLARBLUE_FIT_MODEL}")
     path = Path(DEFAULT_LSF_CALIBRATION_DIR if lsf_calibration is None else lsf_calibration)
     path = path.expanduser().resolve() / SURVEY_LSF_REFERENCE
     if not path.is_file():
@@ -335,11 +242,9 @@ def _survey_lsf_reference_file(fit_model, blue_lsf, lsf_calibration):
 SPLIT_ZODI_N_KNOTS_DEFAULT = SPLIT_ZODI_CONTINUUM_DEFAULTS["n_zodi_spline_knots"]
 SPLIT_ZODI_SMOOTH_LAMBDA_DEFAULT = SPLIT_ZODI_CONTINUUM_DEFAULTS["zodi_smooth_lambda"]
 MOON_SMOOTH_LAMBDA_DEFAULT = SPLIT_ZODI_CONTINUUM_DEFAULTS["moon_smooth_lambda"]
-SPLIT_ZODI_MOON_ALBEDO_PHASE_DEG = SPLIT_ZODI_CONTINUUM_DEFAULTS[
-    "moon_albedo_fiducial_phase_deg"
-]
-SPLIT_ZODI_COLOR_EXPONENT = SPLIT_ZODI_CONTINUUM_DEFAULTS["zodi_color_exponent"]
 # --- split-zodi identifiability defaults (validated 2026-09-03) --------------
+# The bounds below are applied through sky_decomp.fit.SPLIT_ZODI_CONTINUUM_DEFAULTS,
+# which the decomposer takes as its defaults; the notes record why they are set.
 # Without these the split is degenerate in a way fit quality cannot see: on 200
 # lunation-stratified sky spectra the deployed configuration put the moon and
 # zodi colours in the WRONG ORDER on 164 of 168 moon-up spectra (fitted moon
@@ -361,8 +266,6 @@ SPLIT_ZODI_COLOR_EXPONENT = SPLIT_ZODI_CONTINUUM_DEFAULTS["zodi_color_exponent"]
 # Cost: median rms x1.01 over the sample, concentrated entirely at bright moon
 # (x1.49 median for FLI > 0.8, ~1% of the continuum, blue-weighted).  Part of
 # that is the baseline overfitting via the spline hole described above.
-SPLIT_ZODI_MOON_RATIO_BOUND = SPLIT_ZODI_CONTINUUM_DEFAULTS["moon_ratio_bound"]
-SPLIT_ZODI_ZODI_RATIO_BOUND = SPLIT_ZODI_CONTINUUM_DEFAULTS["zodi_ratio_bound"]
 
 # RETRY-ON-REVERSAL.  A reversal -- fitted moon continuum REDDER than the fitted
 # zodi, i.e. the two families have swapped roles -- is a MISLABELLED row, not a
@@ -389,7 +292,6 @@ SPLIT_ZODI_ZODI_RATIO_BOUND = SPLIT_ZODI_CONTINUUM_DEFAULTS["zodi_ratio_bound"]
 # tightened.  The retry is recorded in the `reliability` column either way, so a
 # consumer can still tell a retried row from a clean one, and a row that stays
 # reversed is flagged rather than silently written.
-SPLIT_ZODI_REVERSAL_RETRY = True
 SPLIT_ZODI_REVERSAL_RETRY_BOUND = 0.85
 # Test geometry, matching mlp_predictor.data.split_zodi_reversal_diagnostics and
 # sky_decomp.reliability: only rows whose moon share of the moon+zodi continuum
@@ -397,7 +299,6 @@ SPLIT_ZODI_REVERSAL_RETRY_BOUND = 0.85
 SPLIT_ZODI_REVERSAL_MIN_COMPONENT_FRAC = 0.05
 SPLIT_ZODI_REVERSAL_MIN_SEPARATION = 0.0
 SPLIT_ZODI_AMP_PRIOR_TOL = SPLIT_ZODI_CONTINUUM_DEFAULTS["amp_prior_tol"]
-SPLIT_ZODI_ZODI_AMP_BOUND = SPLIT_ZODI_CONTINUUM_DEFAULTS["zodi_amp_bound"]
 
 # Diffuse species-ratio bracket, ON by default since 2026-09-10.  The three
 # diffuse species are individually unidentifiable in the LVM band: on the
@@ -539,12 +440,6 @@ SPLIT_ZODI_DIFFUSE_OH_CENTRE_LOG10 = SPLIT_ZODI_CONTINUUM_DEFAULTS[
 ]
 SPLIT_ZODI_DIFFUSE_OH_BOUND_DEX = SPLIT_ZODI_CONTINUUM_DEFAULTS[
     "diffuse_oh_bound_dex"
-]
-SPLIT_ZODI_DIFFUSE_OH_GATE_FRAC = SPLIT_ZODI_CONTINUUM_DEFAULTS[
-    "diffuse_oh_gate_frac"
-]
-SPLIT_ZODI_DIFFUSE_OH_RELAX_DEX = SPLIT_ZODI_CONTINUUM_DEFAULTS[
-    "diffuse_oh_relax_dex"
 ]
 # Absolute recentring of the Leinert anchor.  The anchor brackets the fitted
 # zodi total to [Z_pred/kappa_z, kappa_z * Z_pred], and Z_pred comes from
@@ -712,7 +607,7 @@ SCIENCE_EMISSION_LINES = (
 #
 # A displaced line is not a wing effect -- the core itself moves -- so instead
 # of widening the windows the mask SLIDES them, using a Halpha velocity
-# measured per row (SCIENCE_LINE_MASK_CENTRE_ON_HALPHA).  The extra widening
+# measured per row.  The extra widening
 # term SCIENCE_LINE_MASK_VELOCITY_KM_S is therefore 0 by default.
 #
 # THE CENTROID MUST BE MEASURED AGAINST A SKY REFERENCE.  There are OH lines
@@ -741,7 +636,6 @@ SCIENCE_EMISSION_LINES = (
 #
 # Masked pixel count stays 83-87 against the rest-frame 85, so dof moves by at
 # most a couple of pixels and reduced_chi2 stays comparable across rows.
-SCIENCE_LINE_MASK_ENABLED = True
 SCIENCE_LINE_MASK_FWHM_MULTIPLE = 1.5
 SCIENCE_LINE_MASK_VELOCITY_KM_S = 0.0
 SCIENCE_LINE_MASK_MIN_HALF_WIDTH_A = 2.0
@@ -751,7 +645,6 @@ SCIENCE_LINE_MASK_MIN_HALF_WIDTH_A = 2.0
 # the shift is a property of the emitting gas, not of the line, and keeping it
 # common across arms means the three fits still exclude exactly the same
 # pixels, which is what makes their coefficients comparable.
-SCIENCE_LINE_MASK_CENTRE_ON_HALPHA = True
 SCIENCE_LINE_MASK_MAX_SHIFT_KM_S = 300.0
 SCIENCE_LINE_MASK_CENTRE_MIN_SNR = 5.0
 _C_KM_S = 299792.458
@@ -904,37 +797,17 @@ def init_worker(
     factor,
     data_file,
     progress_queue=None,
-    fit_model="baseline",
-    n_refinement_cycles=5,
+    n_refinement_cycles=N_REFINEMENT_CYCLES,
     worker_counter=None,
     pin_cpu=False,
     diagnose_threads=False,
-    palace_suffix=None,
-    palace_oh_suffix=None,
-    palace_diffuse_suffix=None,
     exposure_seconds=900.0,
-    moon_zodi_data_root=None,
-    n_spline_knots=MOON_N_KNOTS_DEFAULT,
-    n_zodi_spline_knots=SPLIT_ZODI_N_KNOTS_DEFAULT,
-    zodi_smooth_lambda=SPLIT_ZODI_SMOOTH_LAMBDA_DEFAULT,
-    moon_smooth_lambda=MOON_SMOOTH_LAMBDA_DEFAULT,
-    mask_science_lines=SCIENCE_LINE_MASK_ENABLED,
-    centre_on_halpha=SCIENCE_LINE_MASK_CENTRE_ON_HALPHA,
-    fit_pixel_weights=FIT_PIXEL_WEIGHTS,
-    fit_pixel_weight_clip=FIT_PIXEL_WEIGHT_CLIP,
-    reversal_retry_bound=(
-        SPLIT_ZODI_REVERSAL_RETRY_BOUND if SPLIT_ZODI_REVERSAL_RETRY else None
-    ),
-    diffuse_ratio_bound_dex=SPLIT_ZODI_DIFFUSE_RATIO_BOUND_DEX,
-    diffuse_ratio_nominal=SPLIT_ZODI_DIFFUSE_RATIO_NOMINAL,
-    diffuse_oh_centre_log10=SPLIT_ZODI_DIFFUSE_OH_CENTRE_LOG10,
-    diffuse_oh_bound_dex=SPLIT_ZODI_DIFFUSE_OH_BOUND_DEX,
     compact_cache_dir=None,
     run_fingerprint=None,
     kinds=("sci", "sky1", "sky2"),
     lsf_reference_file=None,
 ):
-    """Initialise one SkyDecomp instance per worker process."""
+    """Initialise the decomposer settings and the input arrays of one worker."""
     global \
         _WORKER_DECOMPOSER, \
         _WORKER_FACTOR, \
@@ -945,18 +818,13 @@ def init_worker(
         _WORKER_LSF, \
         _WORKER_META, \
         _WORKER_PROGRESS_QUEUE, \
-        _WORKER_FIT_MODEL, \
         _WORKER_EXPOSURE_SECONDS, \
         _WORKER_WAVE, \
         _WORKER_TELLURIC_CALCULATOR, \
         _WORKER_DECOMPOSER_KWARGS, \
         _WORKER_SCIENCE_LINE_MASK, \
         _WORKER_SCIENCE_LINE_FWHM, \
-        _WORKER_SCIENCE_LINE_CENTRE, \
-        _WORKER_FIT_PIXEL_WEIGHTS, \
-        _WORKER_FIT_PIXEL_WEIGHT_CLIP, \
         _WORKER_LOG_WAVE, \
-        _WORKER_REVERSAL_RETRY_BOUND, \
         _WORKER_SENS_ABS, \
         _WORKER_COMPACT_CACHE_DIR, \
         _WORKER_RUN_FINGERPRINT, \
@@ -967,7 +835,6 @@ def init_worker(
         _PWV_FALLBACK_REPORTED
 
     _clamp_native_threads(1)
-    palace_oh_suffix = _resolved_palace_oh_suffix(fit_model, palace_oh_suffix)
 
     worker_rank = 0
     if worker_counter is not None:
@@ -984,13 +851,10 @@ def init_worker(
             print(f"[worker pid={os.getpid()}] pin_cpu failed: {exc}", flush=True)
 
     _WORKER_FACTOR = float(factor)
-    _WORKER_FIT_MODEL = fit_model
     _WORKER_EXPOSURE_SECONDS = float(exposure_seconds)
     _WORKER_WAVE = np.asarray(wave, dtype=np.float64)
     with np.errstate(divide="ignore", invalid="ignore"):
         _WORKER_LOG_WAVE = np.log(_WORKER_WAVE)
-    _WORKER_TELLURIC_CALCULATOR = None
-    _WORKER_DECOMPOSER_KWARGS = {}
     _WORKER_COMPACT_CACHE_DIR = compact_cache_dir
     _WORKER_RUN_FINGERPRINT = run_fingerprint
     _WORKER_BLUE_REFERENCE_FILE = lsf_reference_file
@@ -1035,274 +899,73 @@ def init_worker(
         kind: np.asarray(_WORKER_HDU[f"MASK_{extension[kind]}"].data)
         for kind in kinds if f"MASK_{extension[kind]}" in _WORKER_HDU
     }
-    # split-zodi needs the same LSF + META as the model-based mode: its
-    # amplitude priors are geometry predictions, one per spectrum.
-    if fit_model in (
-        MOON_ZODI_FIT_MODEL,
-        *SPLIT_ZODI_FIT_MODELS,
-        *TELLURIC_FIT_MODELS,
-    ):
-        _WORKER_LSF = {
-            kind: np.asarray(_WORKER_HDU[f"LSF_{extension[kind]}"].data)
-            for kind in kinds
-        }
-        _WORKER_META = _WORKER_HDU["META"].data
-    else:
-        _WORKER_LSF = {}
-        _WORKER_META = None
-    if fit_model == "baseline":
-        from skysub.sky_decomp.fit import SkyDecomp
+    # The telluric transmission and the amplitude priors are per spectrum:
+    # they need each row's LSF and META.
+    _WORKER_LSF = {
+        kind: np.asarray(_WORKER_HDU[f"LSF_{extension[kind]}"].data)
+        for kind in kinds
+    }
+    _WORKER_META = _WORKER_HDU["META"].data
 
-        _WORKER_DECOMPOSER = SkyDecomp(
-            wave,
-            lsf_sigma=lsf_sigma,
-            base_dir=base_dir,
-            palace_suffix=palace_suffix,
-            palace_oh_suffix=palace_oh_suffix,
-            palace_diffuse_suffix=palace_diffuse_suffix,
-            moon_smooth_lambda=0.1,
-            moon_interline_boost=10000.0,
-            moon_interline_red_min=6000.0,
-            moon_interline_exclusion_a=2.5,
-            moon_interline_line_flux_threshold=0.01,
-        )
-    elif fit_model == "lsf-surface-iterative":
-        from skysub.sky_decomp.lsf_surface_iterative import (
-            LSFSurfaceIterativeConfig,
-            SkyDecompLSFSurfaceIterative,
-        )
+    from lvmdrp.core.fluxcal import TelluricCalculator
+    from skysub.sky_decomp.lsf_surface_iterative import LSFSurfaceIterativeConfig
+    from skysub.sky_decomp.solar_lsf import SkyDecompPalaceCorrSolarBlueLSF
 
-        _WORKER_DECOMPOSER = SkyDecompLSFSurfaceIterative(
-            wave,
-            lsf_sigma=lsf_sigma,
-            base_dir=base_dir,
-            palace_suffix=palace_suffix,
-            palace_oh_suffix=palace_oh_suffix,
-            palace_diffuse_suffix=palace_diffuse_suffix,
-            moon_smooth_lambda=0.1,
-            moon_interline_boost=0.0,
-            n_spline_knots=int(n_spline_knots),
-            config=LSFSurfaceIterativeConfig(
-                n_refinement_cycles=n_refinement_cycles,
-            ),
-        )
-    elif fit_model in SPLIT_ZODI_FIT_MODELS:
-        from skysub.sky_decomp.lsf_surface_iterative import (
-            LSFSurfaceIterativeConfig,
-            SkyDecompLSFSurfaceIterative,
-        )
+    # The decomposer is built per row (`_telluric_decomposer`): its basis is
+    # divided by that row's DRP transmission.
+    _WORKER_DECOMPOSER = SkyDecompPalaceCorrSolarBlueLSF
+    _WORKER_TELLURIC_CALCULATOR = TelluricCalculator()
+    _WORKER_DECOMPOSER_KWARGS = {
+        "lsf_sigma": lsf_sigma,
+        "base_dir": base_dir,
+        "palace_oh_suffix": PALACE_OH_SUFFIX,
+        "moon_smooth_lambda": MOON_SMOOTH_LAMBDA_DEFAULT,
+        "moon_interline_boost": 0.0,
+        "n_spline_knots": MOON_N_KNOTS_DEFAULT,
+        "n_zodi_spline_knots": SPLIT_ZODI_N_KNOTS_DEFAULT,
+        "zodi_smooth_lambda": SPLIT_ZODI_SMOOTH_LAMBDA_DEFAULT,
+        "diffuse_ratio_bound_dex": SPLIT_ZODI_DIFFUSE_RATIO_BOUND_DEX,
+        "diffuse_ratio_nominal": SPLIT_ZODI_DIFFUSE_RATIO_NOMINAL,
+        "diffuse_oh_centre_log10": SPLIT_ZODI_DIFFUSE_OH_CENTRE_LOG10,
+        "diffuse_oh_bound_dex": SPLIT_ZODI_DIFFUSE_OH_BOUND_DEX,
+        "config": LSFSurfaceIterativeConfig(
+            n_refinement_cycles=int(n_refinement_cycles),
+            n_basis=4,
+            roughness_fraction=0.0,
+            fallback_prior_fraction=0.0,
+        ),
+    }
 
-        decomposer_class = SkyDecompLSFSurfaceIterative
-        if fit_model == SPLINE2D_SPLIT_ZODI_FIT_MODEL:
-            from skysub.sky_decomp.lsf_spline2d import SkyDecompLSFSpline2D
-
-            decomposer_class = SkyDecompLSFSpline2D
-        _WORKER_DECOMPOSER = decomposer_class(
-            wave,
-            lsf_sigma=lsf_sigma,
-            base_dir=base_dir,
-            palace_suffix=palace_suffix,
-            palace_oh_suffix=palace_oh_suffix,
-            palace_diffuse_suffix=palace_diffuse_suffix,
-            moon_smooth_lambda=0.1,
-            moon_interline_boost=0.0,
-            n_spline_knots=int(n_spline_knots),
-            split_zodi=True,
-            n_zodi_spline_knots=int(n_zodi_spline_knots),
-            zodi_smooth_lambda=float(zodi_smooth_lambda),
-            moon_albedo_fiducial_phase_deg=SPLIT_ZODI_MOON_ALBEDO_PHASE_DEG,
-            zodi_color_exponent=SPLIT_ZODI_COLOR_EXPONENT,
-            moon_ratio_bound=SPLIT_ZODI_MOON_RATIO_BOUND,
-            zodi_ratio_bound=SPLIT_ZODI_ZODI_RATIO_BOUND,
-            amp_prior_tol=SPLIT_ZODI_AMP_PRIOR_TOL,
-            zodi_amp_bound=SPLIT_ZODI_ZODI_AMP_BOUND,
-            diffuse_ratio_bound_dex=float(diffuse_ratio_bound_dex),
-            diffuse_ratio_nominal=diffuse_ratio_nominal,
-            diffuse_oh_centre_log10=diffuse_oh_centre_log10,
-            diffuse_oh_bound_dex=float(diffuse_oh_bound_dex),
-            diffuse_oh_gate_frac=SPLIT_ZODI_DIFFUSE_OH_GATE_FRAC,
-            diffuse_oh_relax_dex=SPLIT_ZODI_DIFFUSE_OH_RELAX_DEX,
-            diffuse_oh_scope="block",
-            config=LSFSurfaceIterativeConfig(
-                n_refinement_cycles=n_refinement_cycles,
-                **(
-                    {"roughness_fraction": 1.0e-4}
-                    if fit_model == SPLINE2D_SPLIT_ZODI_FIT_MODEL
-                    else {}
-                ),
-            ),
-        )
-    elif fit_model == MOON_ZODI_FIT_MODEL:
-        from skysub.sky_decomp.lsf_surface_iterative import LSFSurfaceIterativeConfig
-        from skysub.sky_decomp.moon_zodi_lsf_surface_iterative import (
-            SkyDecompMoonZodiLSFSurfaceIterative,
-        )
-        _WORKER_DECOMPOSER = SkyDecompMoonZodiLSFSurfaceIterative(
-            wave,
-            lsf_sigma=lsf_sigma,
-            data_root=(
-                DEFAULT_MOON_ZODI_DATA_ROOT
-                if moon_zodi_data_root is None
-                else moon_zodi_data_root
-            ),
-            palace_suffix=palace_suffix,
-            palace_oh_suffix=palace_oh_suffix,
-            palace_diffuse_suffix=palace_diffuse_suffix,
-            moon_smooth_lambda=0.1,
-            moon_interline_boost=0.0,
-            physical_to_fit_flux_scale=float(factor),
-            config=LSFSurfaceIterativeConfig(
-                n_refinement_cycles=n_refinement_cycles,
-            ),
-        )
-    elif fit_model in TELLURIC_FIT_MODELS:
-        from lvmdrp.core.fluxcal import TelluricCalculator
-        from skysub.sky_decomp.lsf_surface_iterative import LSFSurfaceIterativeConfig
-
-        if fit_model == ADAM25K_TELLURIC_FIT_MODEL:
-            from skysub.sky_decomp.telluric_corrected_lines import (
-                SkyDecompAdam25kTelluricLSFSpline2D,
-            )
-
-            _WORKER_DECOMPOSER = SkyDecompAdam25kTelluricLSFSpline2D
-        elif fit_model == PALACE_VNF_PCA30_FIT_MODEL:
-            from skysub.sky_decomp.residual_pca import (
-                SkyDecompPalaceAijcVNFLineAmplitudePCA,
-            )
-
-            _WORKER_DECOMPOSER = SkyDecompPalaceAijcVNFLineAmplitudePCA
-        elif fit_model in ADAM25K_SPLIT_ZODI_FIT_MODELS:
-            from skysub.sky_decomp.telluric_corrected_lines import (
-                SkyDecompAdam25kTelluricSplitZodiLSFSpline2D,
-            )
-
-            _WORKER_DECOMPOSER = SkyDecompAdam25kTelluricSplitZodiLSFSpline2D
-        elif fit_model == PALACE_VNF_SPLIT_ZODI_FIT_MODEL:
-            from skysub.sky_decomp.residual_pca import (
-                SkyDecompPalaceAijcVNFSplitZodiLSFSpline2D,
-            )
-
-            _WORKER_DECOMPOSER = SkyDecompPalaceAijcVNFSplitZodiLSFSpline2D
-        elif fit_model == PALACECORR_VNF_SPLIT_ZODI_FIT_MODEL:
-            from skysub.sky_decomp.residual_pca import (
-                SkyDecompPalaceCorrAijcVNFSplitZodiLSFSpline2D,
-            )
-
-            _WORKER_DECOMPOSER = SkyDecompPalaceCorrAijcVNFSplitZodiLSFSpline2D
-        elif fit_model == PALACECORR_SOLARBLUE_FIT_MODEL:
-            from skysub.sky_decomp.solar_lsf import SkyDecompPalaceCorrSolarBlueLSF
-
-            _WORKER_DECOMPOSER = SkyDecompPalaceCorrSolarBlueLSF
-        else:
-            from skysub.sky_decomp.residual_pca import (
-                SkyDecompPalaceAijcVNFSplitZodiLineAmplitudePCA30,
-            )
-
-            _WORKER_DECOMPOSER = SkyDecompPalaceAijcVNFSplitZodiLineAmplitudePCA30
-        _WORKER_TELLURIC_CALCULATOR = TelluricCalculator()
-        _WORKER_DECOMPOSER_KWARGS = {
-            "lsf_sigma": lsf_sigma,
-            "base_dir": base_dir,
-            "palace_suffix": palace_suffix,
-            "palace_oh_suffix": palace_oh_suffix,
-            "palace_diffuse_suffix": palace_diffuse_suffix,
-            "moon_smooth_lambda": float(moon_smooth_lambda),
-            "moon_interline_boost": 0.0,
-            "n_spline_knots": int(n_spline_knots),
-            "config": LSFSurfaceIterativeConfig(
-                n_refinement_cycles=(30 if fit_model == PALACECORR_SOLARBLUE_FIT_MODEL
-                    and n_refinement_cycles == 5 else n_refinement_cycles),
-                n_basis=(4 if fit_model == PALACECORR_SOLARBLUE_FIT_MODEL else 6),
-                roughness_fraction=(0.0 if fit_model == PALACECORR_SOLARBLUE_FIT_MODEL else 1.0e-4),
-                fallback_prior_fraction=(0.0 if fit_model == PALACECORR_SOLARBLUE_FIT_MODEL else 1.0e-4),
-            ),
-        }
-        if fit_model in SPLIT_ZODI_TELLURIC_FIT_MODELS:
-            _WORKER_DECOMPOSER_KWARGS.update(
-                n_zodi_spline_knots=int(n_zodi_spline_knots),
-                zodi_smooth_lambda=float(zodi_smooth_lambda),
-                diffuse_ratio_bound_dex=float(diffuse_ratio_bound_dex),
-                diffuse_ratio_nominal=diffuse_ratio_nominal,
-                diffuse_oh_centre_log10=diffuse_oh_centre_log10,
-                diffuse_oh_bound_dex=float(diffuse_oh_bound_dex),
-            )
-        if fit_model in (
-            PALACE_VNF_PCA30_FIT_MODEL,
-            *PALACE_VNF_PCA30_SPLIT_ZODI_FIT_MODELS,
-        ):
-            _WORKER_DECOMPOSER_KWARGS["n_line_amplitude_pca_components"] = 30
-    else:
-        raise ValueError(f"Unknown fit model: {fit_model}")
-
-    # Science emission-line mask, built once per worker.  Deliberately built
-    # from the init-time LSF rather than per row: the row-to-row LSF variation
-    # is small next to the +/-150 km/s velocity term, and a row-dependent mask
-    # would make the number of fitted pixels vary from row to row, which
-    # reduced_chi2 and the dof count would then carry.
-    _WORKER_SCIENCE_LINE_MASK = None
-    _WORKER_SCIENCE_LINE_FWHM = None
-    _WORKER_SCIENCE_LINE_CENTRE = bool(centre_on_halpha)
-    _WORKER_REVERSAL_RETRY_BOUND = (
-        None if reversal_retry_bound is None else float(reversal_retry_bound)
-    )
-    _WORKER_FIT_PIXEL_WEIGHTS = bool(fit_pixel_weights)
-    _WORKER_FIT_PIXEL_WEIGHT_CLIP = (
-        None if fit_pixel_weight_clip is None else float(fit_pixel_weight_clip)
-    )
+    # Per-pixel fit weights: the input IVAR/MASK when the stack carries them,
+    # else the absolute photon model.
     _WORKER_SENS_ABS = None
     if _WORKER_INPUT_IVAR and all(kind in _WORKER_INPUT_IVAR for kind in kinds):
         if worker_rank == 0:
             print('[fit weights] using input IVAR and MASK', flush=True)
-    elif _WORKER_FIT_PIXEL_WEIGHTS:
+    else:
         from skysub.sky_decomp.pixel_weights import absolute_sensitivity
-        try:
-            _WORKER_SENS_ABS = absolute_sensitivity(
-                wave, verbose=(worker_rank == 0))
-        except RuntimeError as error:
-            # Deliberately fatal rather than a silent fallback: the weights are
-            # ON by default now, and quietly producing an UNWEIGHTED corpus that
-            # everyone believes is weighted is the worse failure by far.  Say
-            # what to do about it.
-            raise RuntimeError(
-                f"{error}  The per-pixel photon weights are on by default and "
-                f"need the absolute sensitivity across the whole fitted grid. "
-                f"Pass --no-fit-pixel-weights to fit unweighted instead (the "
-                f"pre-2026-09-18 behaviour), or restrict the wavelength grid to "
-                f"the covered range.") from error
+
+        _WORKER_SENS_ABS = absolute_sensitivity(wave, verbose=(worker_rank == 0))
         if worker_rank == 0:
-            print('[fit weights] per-pixel inverse-variance weighting ON '
-                  '(row-normalised to mean 1; reduced_chi2 is now a '
-                  'WEIGHTED chi2 and not comparable to earlier runs)')
-    if mask_science_lines:
-        # Use the DETECTOR LSF FWHM from the input FITS, median-combined over
-        # rows and arms, not the scalar `lsf_sigma` argument -- that is a
-        # 0.5 A Gaussian sigma by default while the real FWHM is ~1.57 A, so
-        # feeding it here would size every window off the wrong quantity.
-        # _WORKER_LSF is empty for fit models that do not need it; then the
-        # instrumental term is simply dropped.
-        _fwhm_ref = (
-            _science_mask_lsf_reference(wave, _WORKER_LSF)
-            if _WORKER_LSF
-            else None
-        )
-        # Use the `wave` ARGUMENT, not _WORKER_DECOMPOSER.wave: every
-        # decomposer is constructed from this same array, and reading it off
-        # the object couples worker init to the concrete decomposer class
-        # (test_palace_suffix's FakeDecomposer has no `.wave`).
-        _mask, _widths = science_line_mask(wave, _fwhm_ref)
-        _WORKER_SCIENCE_LINE_MASK = _mask
-        # Kept so fit_chunk_worker can rebuild the mask per row at the
-        # measured Halpha velocity; the static mask above stays as the
-        # fallback for rows where the line is not measurable.
-        _WORKER_SCIENCE_LINE_FWHM = _fwhm_ref
-        if worker_rank == 0:
-            print(f"[science-line mask] {int(_mask.sum())}/{_mask.size} pixels "
-                  f"({100.0 * _mask.mean():.2f}%) excluded via IVAR=0 in "
-                  f"{len(SCIENCE_EMISSION_LINES)} windows: "
-                  + ", ".join(f"{n} +/-{w:.1f}A" for n, w in _widths.items())
-                  + ("; centred per row on the measured Halpha velocity"
-                     if _WORKER_SCIENCE_LINE_CENTRE else "; fixed at rest"),
-                  flush=True)
+            print('[fit weights] per-pixel inverse-variance photon weights '
+                  '(row-normalised to mean 1; reduced_chi2 is a weighted chi2)')
+
+    # Science emission-line mask, built once per worker from the DETECTOR LSF
+    # FWHM, median-combined over rows and arms.  Deliberately not per row: the
+    # row-to-row LSF variation is small next to the velocity term, and a
+    # row-dependent mask would make the number of fitted pixels vary.  Rows
+    # are re-centred on their measured Halpha velocity in
+    # `_science_line_mask_for_row`.
+    _WORKER_SCIENCE_LINE_FWHM = _science_mask_lsf_reference(wave, _WORKER_LSF)
+    _WORKER_SCIENCE_LINE_MASK, _widths = science_line_mask(wave, _WORKER_SCIENCE_LINE_FWHM)
+    if worker_rank == 0:
+        _mask = _WORKER_SCIENCE_LINE_MASK
+        print(f"[science-line mask] {int(_mask.sum())}/{_mask.size} pixels "
+              f"({100.0 * _mask.mean():.2f}%) excluded via IVAR=0 in "
+              f"{len(SCIENCE_EMISSION_LINES)} windows: "
+              + ", ".join(f"{n} +/-{w:.1f}A" for n, w in _widths.items())
+              + "; centred per row on the measured Halpha velocity",
+              flush=True)
 
     # After all heavy imports, clamp once more and (optionally) report per-worker state.
     _clamp_native_threads(1)
@@ -1930,8 +1593,6 @@ def _install_split_zodi_amplitude_prior(decomposer, kind, row_index):
         geometry_amplitude_prior,
     )
 
-    if _WORKER_META is None or not _WORKER_LSF:
-        return
     _lsf = _sanitised_lsf_row(kind, row_index)
     if _lsf is None:
         # No usable LSF anywhere in this row: fall back to the shape bounds
@@ -1957,20 +1618,16 @@ def _install_split_zodi_amplitude_prior(decomposer, kind, row_index):
 def _science_line_mask_for_row(row_index):
     """Science-line mask for one row, centred on its measured Halpha velocity.
 
-    Falls back to the worker's static rest-frame mask whenever centring is
-    disabled, the science flux is unavailable, or the velocity cannot be
-    measured -- ``measure_halpha_velocity`` returns 0.0 in that case, which
-    reproduces the static mask exactly.  The window WIDTH never changes, so
+    Falls back to the worker's static rest-frame mask whenever the science
+    flux is unavailable or the velocity cannot be measured --
+    ``measure_halpha_velocity`` returns 0.0 then, which reproduces the static
+    mask exactly.  The window WIDTH never changes, so
     the number of masked pixels is constant to within a pixel or two and the
     dof count stays comparable from row to row.
     """
-    if _WORKER_SCIENCE_LINE_MASK is None:
-        return None
     names = set(_WORKER_META.dtype.names or ())
     if "telescope" in names and _text_value(_WORKER_META[row_index]["telescope"]) != "Sci":
         return np.zeros_like(_WORKER_SCIENCE_LINE_MASK, dtype=bool)
-    if not _WORKER_SCIENCE_LINE_CENTRE:
-        return _WORKER_SCIENCE_LINE_MASK
     sci = _WORKER_FLUX.get("sci")
     if sci is None:
         return _WORKER_SCIENCE_LINE_MASK
@@ -1993,11 +1650,7 @@ def _science_line_mask_for_row(row_index):
 
 
 def _fit_ivar_row(kind, idx, flux_row):
-    """Per-pixel ivar for one row: photon weights when enabled, else all ones.
-
-    The all-ones fallback reproduces the historical behaviour exactly, so the
-    flag is the only thing that changes a fit.
-    """
+    """Per-pixel ivar for one row: the input IVAR/MASK, else photon weights."""
     if kind in _WORKER_INPUT_IVAR:
         ivar = np.asarray(_WORKER_INPUT_IVAR[kind][idx], dtype=np.float64)
         ivar = ivar / _WORKER_FACTOR**2
@@ -2005,8 +1658,6 @@ def _fit_ivar_row(kind, idx, flux_row):
         if kind in _WORKER_INPUT_MASK:
             good &= np.asarray(_WORKER_INPUT_MASK[kind][idx]) == 0
         return np.where(good, ivar, 0.0)
-    if not _WORKER_FIT_PIXEL_WEIGHTS or _WORKER_SENS_ABS is None:
-        return np.ones_like(flux_row)
     from skysub.sky_decomp.pixel_weights import pixel_ivar
 
     n_fibres = None
@@ -2031,7 +1682,7 @@ def _fit_ivar_row(kind, idx, flux_row):
         n_fibres=n_fibres,
         flux_scale=_WORKER_FACTOR,
         floor_frac=FIT_PIXEL_WEIGHT_FLOOR_FRAC,
-        clip=_WORKER_FIT_PIXEL_WEIGHT_CLIP,
+        clip=None,
         sens=_WORKER_SENS_ABS,
         normalise=True,
     )
@@ -2204,8 +1855,6 @@ def _fit_split_zodi_with_reversal_retry(decomposer, flux_row, ivar_row, fixed_ls
 
     fit_options = {} if fixed_lsf_state is None else {'fixed_lsf_state': fixed_lsf_state}
     result = decomposer.fit(flux_row, ivar_row, verbose=False, **fit_options)
-    if _WORKER_REVERSAL_RETRY_BOUND is None:
-        return result, False, float("nan"), False
     if str(getattr(result, "fit_status", "")) != "Solved":
         return result, False, float("nan"), False
     is_reversed, _testable, _info = rel.reversal_state(
@@ -2214,7 +1863,7 @@ def _fit_split_zodi_with_reversal_retry(decomposer, flux_row, ivar_row, fixed_ls
         min_separation=SPLIT_ZODI_REVERSAL_MIN_SEPARATION)
     if not is_reversed:
         return result, False, float("nan"), False
-    bound = float(_WORKER_REVERSAL_RETRY_BOUND)
+    bound = float(SPLIT_ZODI_REVERSAL_RETRY_BOUND)
     saved = (getattr(decomposer, "moon_ratio_bound", None),
              getattr(decomposer, "zodi_ratio_bound", None))
     try:
@@ -2270,69 +1919,22 @@ def _blue_reference_lsf(kind, row_index):
 
 def _fit_worker_row(kind, idx, flux_row, ivar_row, fixed_lsf_state=None):
     """Fit one row.  Returns ``(result, reliability_columns)``."""
-    if _WORKER_SCIENCE_LINE_MASK is not None:
-        ivar_row[_science_line_mask_for_row(idx)] = 0.0
-    if _WORKER_FIT_MODEL == "baseline":
-        result = _WORKER_DECOMPOSER.fit(
-            flux_row, ivar_row, verbose=False, n_lsf_refits=3
-        )
+    ivar_row[_science_line_mask_for_row(idx)] = 0.0
+    try:
+        decomposer = _telluric_decomposer(kind, idx)
+    except _FailedInputError as error:
+        schema = _telluric_decomposer(kind, idx, schema_only=True)
+        result = schema.failed_input_result(str(error))
         return result, _reliability_flags(result, row_index=idx)
-    if _WORKER_FIT_MODEL == "lsf-surface-iterative":
-        result = _WORKER_DECOMPOSER.fit(flux_row, ivar_row, verbose=False)
-        return result, _reliability_flags(result, row_index=idx)
-    if _WORKER_FIT_MODEL in SPLIT_ZODI_FIT_MODELS:
-        _install_split_zodi_amplitude_prior(_WORKER_DECOMPOSER, kind, idx)
-        result, retried, bound, was_reversed = (
-            _fit_split_zodi_with_reversal_retry(
-                _WORKER_DECOMPOSER, flux_row, ivar_row))
-        return result, _reliability_flags(
-            result, retried, bound, was_reversed,
-            decomposer=_WORKER_DECOMPOSER, ivar=ivar_row, row_index=idx)
-    if _WORKER_FIT_MODEL == MOON_ZODI_FIT_MODEL:
-        # Invalid source pixels remain on the native grid and are excluded only
-        # by zero inverse variance.
-        ivar_row = np.isfinite(flux_row).astype(np.float64)
-        if _WORKER_SCIENCE_LINE_MASK is not None:
-            ivar_row[_science_line_mask_for_row(idx)] = 0.0
-        lsf_row = _sanitised_lsf_row(kind, idx)
-        if lsf_row is None:
-            # The physical predictor is driven by the detector LSF, so this
-            # row cannot be fitted at all.  Record it as a failed input, the
-            # same as an invalid airmass, rather than killing the chunk.
-            reason = _unusable_lsf_reason(kind, idx)
-            _report_unusable_lsf(kind, idx, reason)
-            result = _WORKER_DECOMPOSER.failed_input_result(reason)
-            return result, _reliability_flags(result, row_index=idx)
-        result = _WORKER_DECOMPOSER.fit(
-            flux_row,
-            ivar_row,
-            observation=_moon_zodi_observation(kind, idx),
-            detector_lsf_fwhm=lsf_row,
-            verbose=False,
-        )
-        return result, _reliability_flags(result, row_index=idx)
-    if _WORKER_FIT_MODEL in TELLURIC_FIT_MODELS:
-        try:
-            decomposer = _telluric_decomposer(kind, idx)
-        except _FailedInputError as error:
-            schema = _telluric_decomposer(kind, idx, schema_only=True)
-            result = schema.failed_input_result(str(error))
-            return result, _reliability_flags(result, row_index=idx)
-        decomposer._measure_peak_memory = _WORKER_COMPACT_CACHE_DIR is None
-        if _WORKER_BLUE_REFERENCE_FILE is not None:
-            decomposer.blue_reference_lsf = _blue_reference_lsf(kind, idx)
-        if _WORKER_FIT_MODEL in SPLIT_ZODI_TELLURIC_FIT_MODELS:
-            _install_split_zodi_amplitude_prior(decomposer, kind, idx)
-            result, retried, bound, was_reversed = (
-                _fit_split_zodi_with_reversal_retry(
-                    decomposer, flux_row, ivar_row, fixed_lsf_state=fixed_lsf_state))
-            return result, _reliability_flags(
-                result, retried, bound, was_reversed,
-                decomposer=decomposer, ivar=ivar_row, row_index=idx)
-        result = decomposer.fit(flux_row, ivar_row, verbose=False)
-        return result, _reliability_flags(
-            result, decomposer=decomposer, ivar=ivar_row, row_index=idx)
-    raise RuntimeError(f"Worker has unsupported fit model: {_WORKER_FIT_MODEL}")
+    decomposer._measure_peak_memory = _WORKER_COMPACT_CACHE_DIR is None
+    if _WORKER_BLUE_REFERENCE_FILE is not None:
+        decomposer.blue_reference_lsf = _blue_reference_lsf(kind, idx)
+    _install_split_zodi_amplitude_prior(decomposer, kind, idx)
+    result, retried, bound, was_reversed = _fit_split_zodi_with_reversal_retry(
+        decomposer, flux_row, ivar_row, fixed_lsf_state=fixed_lsf_state)
+    return result, _reliability_flags(
+        result, retried, bound, was_reversed,
+        decomposer=decomposer, ivar=ivar_row, row_index=idx)
 
 
 def fit_chunk_worker(args):
@@ -2374,63 +1976,12 @@ def fit_chunk_worker(args):
     return kind, out
 
 
-def resolve_base_dir(path_arg):
-    """Accept either the project base dir or the palace dir and return SkyDecomp base_dir."""
-    path = Path(path_arg).expanduser().resolve()
-
-    if (path / "palace" / "PMD").exists():
-        return path
-    if path.name == "palace" and (path / "PMD").exists():
-        return path.parent
-
-    raise FileNotFoundError(
-        "Could not resolve a valid SkyDecomp base directory from "
-        f"{path}. Expected either a base dir containing palace/PMD or the palace directory itself."
-    )
-
-
-def resolve_runtime_data_roots(
-    fit_model,
-    palace_dir=None,
-    moon_zodi_data_root=None,
-):
-    """Resolve only the data contract used by the selected fit model."""
-    if fit_model == MOON_ZODI_FIT_MODEL or fit_model in TELLURIC_FIT_MODELS:
-        candidate = (
-            moon_zodi_data_root
-            if moon_zodi_data_root is not None
-            else palace_dir
-            if palace_dir is not None
-            else DEFAULT_MOON_ZODI_DATA_ROOT
-        )
-        data_root = Path(candidate).expanduser().resolve()
-        validate_decomposition_data_root(str(data_root))
-        return data_root, data_root
-
-    if fit_model in SPLIT_ZODI_FIT_MODELS and (
-        moon_zodi_data_root is not None or palace_dir is None
-    ):
-        candidate = (
-            moon_zodi_data_root
-            if moon_zodi_data_root is not None
-            else DEFAULT_MOON_ZODI_DATA_ROOT
-        )
-        data_root = Path(candidate).expanduser().resolve()
-        validate_decomposition_data_root(str(data_root))
-        return data_root, data_root
-
-    if fit_model in SPLIT_ZODI_FIT_MODELS and palace_dir is not None:
-        candidate = Path(palace_dir).expanduser().resolve()
-        if (candidate / "bundle_manifest.json").is_file():
-            validate_decomposition_data_root(str(candidate))
-            return candidate, candidate
-
-    if palace_dir is None:
-        raise ValueError(
-            "palace_dir is required for baseline and non-split "
-            "lsf-surface-iterative fits"
-        )
-    return resolve_base_dir(palace_dir), None
+def resolve_data_root(data_root=None):
+    """The bundled decomposition data root (PALACE, Moon/Zodi, solar assets)."""
+    root = Path(DEFAULT_MOON_ZODI_DATA_ROOT if data_root is None else data_root)
+    root = root.expanduser().resolve()
+    validate_decomposition_data_root(str(root))
+    return root
 
 
 def _iter_chunk_tasks(n_rows, chunk_size, kinds=("sci", "sky1", "sky2")):
@@ -2441,7 +1992,7 @@ def _iter_chunk_tasks(n_rows, chunk_size, kinds=("sci", "sky1", "sky2")):
             yield (kind, i0, i1)
 
 
-def _compact_run_provenance(data_file, wave, fit_model, base_dir, parameters):
+def _compact_run_provenance(data_file, wave, base_dir, parameters):
     source_dir = Path(__file__).resolve().parent / "sky_decomp"
     payload = {
         "schema_version": 1,
@@ -2450,7 +2001,7 @@ def _compact_run_provenance(data_file, wave, fit_model, base_dir, parameters):
         "input_sha256": file_sha256(data_file),
         "native_wave_pixels": int(np.asarray(wave).size),
         "wave_sha256": wave_sha256(wave),
-        "fit_model": fit_model,
+        "fit_model": FIT_MODEL,
         "parameters": parameters,
         "bundle_manifest_sha256": file_sha256(Path(base_dir) / "bundle_manifest.json"),
         "source_sha256": {"decompose_parallel.py": file_sha256(Path(__file__))}
@@ -2460,10 +2011,10 @@ def _compact_run_provenance(data_file, wave, fit_model, base_dir, parameters):
                 "fit.py",
                 "lsf_spline2d.py",
                 "lsf_surface_iterative.py",
-                "residual_pca.py",
                 "telluric_corrected_lines.py",
-            ) + (("solar_lsf.py", "lsf_reference.py")
-                 if fit_model == PALACECORR_SOLARBLUE_FIT_MODEL else ())
+                "solar_lsf.py",
+                "lsf_reference.py",
+            )
         },
     }
     fingerprint = hashlib.sha256(
@@ -2473,15 +2024,10 @@ def _compact_run_provenance(data_file, wave, fit_model, base_dir, parameters):
 
 
 def _worker_initargs(
-    *, wave, lsf_sigma, base_dir, factor, data_file, progress_queue, fit_model,
+    *, wave, lsf_sigma, base_dir, factor, data_file, progress_queue,
     n_refinement_cycles, worker_counter, pin_workers, diagnose_threads,
-    palace_suffix, palace_oh_suffix, palace_diffuse_suffix, exposure_seconds,
-    moon_zodi_data_root, n_spline_knots, n_zodi_spline_knots, zodi_smooth_lambda,
-    moon_smooth_lambda, mask_science_lines, centre_on_halpha, fit_pixel_weights,
-    fit_pixel_weight_clip, reversal_retry_bound, diffuse_ratio_bound_dex,
-    diffuse_ratio_nominal, diffuse_oh_centre_log10, diffuse_oh_bound_dex,
-    compact_cache_root, run_fingerprint, kinds=("sci", "sky1", "sky2"),
-    lsf_reference_file=None,
+    exposure_seconds, compact_cache_root, run_fingerprint,
+    kinds=("sci", "sky1", "sky2"), lsf_reference_file=None,
 ):
     """The positional `init_worker` arguments of a run -- one definition.
 
@@ -2496,29 +2042,11 @@ def _worker_initargs(
         float(factor),
         data_file if isinstance(data_file, fits.HDUList) else str(data_file),
         progress_queue,
-        fit_model,
-        n_refinement_cycles,
+        int(n_refinement_cycles),
         worker_counter,
         bool(pin_workers),
         bool(diagnose_threads),
-        palace_suffix,
-        palace_oh_suffix,
-        palace_diffuse_suffix,
         exposure_seconds,
-        None if moon_zodi_data_root is None else str(moon_zodi_data_root),
-        int(n_spline_knots),
-        int(n_zodi_spline_knots),
-        float(zodi_smooth_lambda),
-        float(moon_smooth_lambda),
-        bool(mask_science_lines),
-        bool(centre_on_halpha),
-        bool(fit_pixel_weights),
-        None if fit_pixel_weight_clip is None else float(fit_pixel_weight_clip),
-        None if reversal_retry_bound is None else float(reversal_retry_bound),
-        float(diffuse_ratio_bound_dex),
-        diffuse_ratio_nominal,
-        diffuse_oh_centre_log10,
-        float(diffuse_oh_bound_dex),
         None if compact_cache_root is None else str(compact_cache_root),
         run_fingerprint,
         tuple(kinds),
@@ -2528,54 +2056,39 @@ def _worker_initargs(
 
 def run(
     data_file,
-    palace_dir,
-    n_workers,
-    lsf_sigma,
-    factor,
-    output_dir,
-    chunk_size,
-    max_in_flight,
-    fit_model="baseline",
-    n_refinement_cycles=5,
+    palace_dir=None,
+    n_workers=4,
+    lsf_sigma=0.5,
+    factor=1e14,
+    output_dir=".",
+    chunk_size=64,
+    max_in_flight=None,
+    fit_model=FIT_MODEL,
+    n_refinement_cycles=N_REFINEMENT_CYCLES,
     limit=None,
     pin_workers=False,
     diagnose_threads=False,
-    palace_suffix=None,
-    palace_oh_suffix=None,
-    palace_diffuse_suffix=None,
     exposure_seconds=900.0,
-    moon_zodi_data_root=None,
-    n_spline_knots=MOON_N_KNOTS_DEFAULT,
-    n_zodi_spline_knots=SPLIT_ZODI_N_KNOTS_DEFAULT,
-    zodi_smooth_lambda=SPLIT_ZODI_SMOOTH_LAMBDA_DEFAULT,
-    moon_smooth_lambda=MOON_SMOOTH_LAMBDA_DEFAULT,
-    diffuse_ratio_bound_dex=SPLIT_ZODI_DIFFUSE_RATIO_BOUND_DEX,
-    diffuse_ratio_nominal=SPLIT_ZODI_DIFFUSE_RATIO_NOMINAL,
-    diffuse_oh_centre_log10=SPLIT_ZODI_DIFFUSE_OH_CENTRE_LOG10,
-    diffuse_oh_bound_dex=SPLIT_ZODI_DIFFUSE_OH_BOUND_DEX,
-    mask_science_lines=SCIENCE_LINE_MASK_ENABLED,
-    centre_on_halpha=SCIENCE_LINE_MASK_CENTRE_ON_HALPHA,
-    fit_pixel_weights=FIT_PIXEL_WEIGHTS,
-    fit_pixel_weight_clip=FIT_PIXEL_WEIGHT_CLIP,
-    reversal_retry_bound=(
-        SPLIT_ZODI_REVERSAL_RETRY_BOUND if SPLIT_ZODI_REVERSAL_RETRY else None
-    ),
     compact_only=False,
     kinds=("sci", "sky1", "sky2"),
     start_method="spawn",
     blue_lsf="solar",
     lsf_calibration=None,
 ):
+    """Decompose every row of `data_file` and write the products to `output_dir`.
+
+    ``palace_dir`` is the bundled data root (None = the packaged
+    ``sky_decomp/data``).  ``fit_model`` is accepted for the callers that name
+    it; it must be `FIT_MODEL`.
+    """
+    if fit_model != FIT_MODEL:
+        raise ValueError(f"Unsupported fit model {fit_model!r}; only {FIT_MODEL!r} is available")
     kinds = tuple(kinds)
-    lsf_reference_file = _survey_lsf_reference_file(fit_model, blue_lsf, lsf_calibration)
     if not kinds or not set(kinds) <= {"sci", "sky1", "sky2"}:
         raise ValueError(f"Unsupported decomposition kinds: {kinds}")
-    palace_oh_suffix = _resolved_palace_oh_suffix(fit_model, palace_oh_suffix)
-    base_dir, resolved_moon_zodi_data_root = resolve_runtime_data_roots(
-        fit_model,
-        palace_dir=palace_dir,
-        moon_zodi_data_root=moon_zodi_data_root,
-    )
+    max_in_flight = n_workers if max_in_flight is None else max_in_flight
+    lsf_reference_file = _survey_lsf_reference_file(blue_lsf, lsf_calibration)
+    base_dir = resolve_data_root(palace_dir)
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -2593,21 +2106,16 @@ def run(
             "factor": factor,
             "lsf_sigma": lsf_sigma,
             "n_refinement_cycles": n_refinement_cycles,
-            "n_spline_knots": n_spline_knots,
-            "n_zodi_spline_knots": n_zodi_spline_knots,
-            "zodi_smooth_lambda": zodi_smooth_lambda,
-            "diffuse_ratio_bound_dex": diffuse_ratio_bound_dex,
-            "diffuse_ratio_nominal": diffuse_ratio_nominal,
-            "diffuse_oh_centre_log10": diffuse_oh_centre_log10,
-            "diffuse_oh_bound_dex": diffuse_oh_bound_dex,
-            "mask_science_lines": mask_science_lines,
-            "centre_on_halpha": centre_on_halpha,
-            "fit_pixel_weights": fit_pixel_weights,
-            "fit_pixel_weight_clip": fit_pixel_weight_clip,
-            "reversal_retry_bound": reversal_retry_bound,
-            "palace_suffix": palace_suffix,
-            "palace_oh_suffix": palace_oh_suffix,
-            "palace_diffuse_suffix": palace_diffuse_suffix,
+            "n_spline_knots": MOON_N_KNOTS_DEFAULT,
+            "n_zodi_spline_knots": SPLIT_ZODI_N_KNOTS_DEFAULT,
+            "zodi_smooth_lambda": SPLIT_ZODI_SMOOTH_LAMBDA_DEFAULT,
+            "moon_smooth_lambda": MOON_SMOOTH_LAMBDA_DEFAULT,
+            "diffuse_ratio_bound_dex": SPLIT_ZODI_DIFFUSE_RATIO_BOUND_DEX,
+            "diffuse_ratio_nominal": SPLIT_ZODI_DIFFUSE_RATIO_NOMINAL,
+            "diffuse_oh_centre_log10": SPLIT_ZODI_DIFFUSE_OH_CENTRE_LOG10,
+            "diffuse_oh_bound_dex": SPLIT_ZODI_DIFFUSE_OH_BOUND_DEX,
+            "reversal_retry_bound": SPLIT_ZODI_REVERSAL_RETRY_BOUND,
+            "palace_oh_suffix": PALACE_OH_SUFFIX,
             "kinds": kinds,
             "blue_lsf": blue_lsf,
             "blue_lsf_reference_sha256": (
@@ -2616,13 +2124,10 @@ def run(
             # A resumed run must not mix rows anchored to different zodi models.
             "zodi_correction": SPLIT_ZODI_ZODI_CORRECTION,
         }
-        compact_provenance = _compact_run_provenance(
-            data_file, wave, fit_model, base_dir, parameters
-        )
+        compact_provenance = _compact_run_provenance(data_file, wave, base_dir, parameters)
         run_fingerprint = compact_provenance["run_fingerprint"]
         stem = Path(data_file).stem
-        suffix = FIT_MODEL_SUFFIXES[fit_model]
-        compact_cache_root = output_dir / f".{stem}{suffix}_compact_cache"
+        compact_cache_root = output_dir / f".{stem}{FIT_MODEL_SUFFIX}_compact_cache"
         compact_cache_root.mkdir(parents=True, exist_ok=True)
         (compact_cache_root / "run_provenance.json").write_text(
             json.dumps(compact_provenance, indent=2, sort_keys=True) + "\n",
@@ -2636,34 +2141,16 @@ def run(
     print(f"  n_workers={n_workers}, lsf_sigma={lsf_sigma}, factor={factor}")
     print(f"  chunk_size={chunk_size}, max_in_flight={max_in_flight}")
     print(f"  start_method={start_method}")
-    print(f"  fit_model={fit_model}, n_refinement_cycles={n_refinement_cycles}")
-    if fit_model == PALACECORR_SOLARBLUE_FIT_MODEL:
-        print(f"  blue_lsf={blue_lsf}"
-              + ("" if lsf_reference_file is None else
-                 f" ({lsf_reference_file}; {'FIBER_ROLE' if fiber_role else 'telescope'} means)"))
-    print(f"  palace_suffix={palace_suffix!r}")
-    print(f"  palace_oh_suffix={palace_oh_suffix!r}")
-    print(f"  palace_diffuse_suffix={palace_diffuse_suffix!r}")
+    print(f"  fit_model={FIT_MODEL}, n_refinement_cycles={n_refinement_cycles}")
+    print(f"  blue_lsf={blue_lsf}"
+          + ("" if lsf_reference_file is None else
+             f" ({lsf_reference_file}; {'FIBER_ROLE' if fiber_role else 'telescope'} means)"))
     print(f"  exposure_seconds_fallback={exposure_seconds}")
-    if resolved_moon_zodi_data_root is not None:
-        print(f"  bundled_data_root={str(resolved_moon_zodi_data_root)!r}")
-    if fit_model in (
-        "lsf-surface-iterative",
-        *SPLIT_ZODI_FIT_MODELS,
-        *TELLURIC_FIT_MODELS,
-    ):
-        print(f"  n_spline_knots={n_spline_knots} "
-              f"(Moon_bs basis = {int(n_spline_knots) + 4})")
-    if fit_model in SPLIT_ZODI_FIT_MODELS:
-        print(f"  n_zodi_spline_knots={n_zodi_spline_knots}, "
-              f"zodi_smooth_lambda={zodi_smooth_lambda}")
-    # Printed unconditionally: these two together decide the smoothing every
-    # row actually receives, and the pair is what a later A/B has to match.
-    print(f"  moon_smooth_lambda={moon_smooth_lambda}")
     print(f"  pin_workers={pin_workers}, diagnose_threads={diagnose_threads}")
-    print(f"  base_dir={base_dir}")
+    print(f"  data_root={base_dir}")
 
-    if start_method == "fork" and fit_model == PALACECORR_SOLARBLUE_FIT_MODEL:
+    if start_method == "fork":
+        # Build the solar operator once in the parent so forked workers share it.
         from skysub.sky_decomp.fit import LSF_CHANNELS
         from skysub.sky_decomp.lsf_surface_iterative import (
             LSFChannelSplineConfig,
@@ -2687,8 +2174,7 @@ def run(
         )
         print(f"  prewarmed shared SolarBlue tensor in {time.perf_counter() - started:.1f}s")
 
-    primary_meta = _fit_model_primary_meta(
-        fit_model, palace_oh_suffix, blue_lsf, lsf_reference_file)
+    primary_meta = _fit_model_primary_meta(blue_lsf, lsf_reference_file)
     if lsf_reference_file is not None:
         primary_meta["LSFROLE"] = (fiber_role, "blue reference averaged over FIBER_ROLE fibers")
     n_tasks = int(np.ceil(n_rows / chunk_size)) * len(kinds)
@@ -2721,26 +2207,10 @@ def run(
         initargs=_worker_initargs(
             wave=wave, lsf_sigma=lsf_sigma, base_dir=base_dir, factor=factor,
             data_file=data_file, progress_queue=progress_queue,
-            fit_model=fit_model, n_refinement_cycles=n_refinement_cycles,
+            n_refinement_cycles=n_refinement_cycles,
             worker_counter=worker_counter, pin_workers=pin_workers,
-            diagnose_threads=diagnose_threads, palace_suffix=palace_suffix,
-            palace_oh_suffix=palace_oh_suffix,
-            palace_diffuse_suffix=palace_diffuse_suffix,
+            diagnose_threads=diagnose_threads,
             exposure_seconds=exposure_seconds,
-            moon_zodi_data_root=resolved_moon_zodi_data_root,
-            n_spline_knots=n_spline_knots,
-            n_zodi_spline_knots=n_zodi_spline_knots,
-            zodi_smooth_lambda=zodi_smooth_lambda,
-            moon_smooth_lambda=moon_smooth_lambda,
-            mask_science_lines=mask_science_lines,
-            centre_on_halpha=centre_on_halpha,
-            fit_pixel_weights=fit_pixel_weights,
-            fit_pixel_weight_clip=fit_pixel_weight_clip,
-            reversal_retry_bound=reversal_retry_bound,
-            diffuse_ratio_bound_dex=diffuse_ratio_bound_dex,
-            diffuse_ratio_nominal=diffuse_ratio_nominal,
-            diffuse_oh_centre_log10=diffuse_oh_centre_log10,
-            diffuse_oh_bound_dex=diffuse_oh_bound_dex,
             compact_cache_root=compact_cache_root,
             run_fingerprint=run_fingerprint,
             kinds=kinds,
@@ -2792,7 +2262,6 @@ def run(
     print(f"Fitting done in {elapsed:.1f}s ({elapsed / n_rows:.2f}s per spectrum)")
 
     stem = Path(data_file).stem
-    suffix = FIT_MODEL_SUFFIXES[fit_model]
     for kind in kinds:
         if compact_only:
             _write_compact_fits(
@@ -2800,14 +2269,14 @@ def run(
                 kind,
                 n_rows,
                 run_fingerprint,
-                fit_model,
-                output_dir / f"{stem}_{kind}_meta_coef{suffix}.fits",
+                FIT_MODEL,
+                output_dir / f"{stem}_{kind}_meta_coef{FIT_MODEL_SUFFIX}.fits",
                 primary_meta=primary_meta,
             )
         else:
             results_to_fits(
                 results[kind],
-                output_dir / f"{stem}_decomp_{kind}{suffix}.fits",
+                output_dir / f"{stem}_decomp_{kind}{FIT_MODEL_SUFFIX}.fits",
                 extra_meta=_reliability_extra_meta(reliability[kind], n_rows),
                 primary_meta=primary_meta,
             )
@@ -2870,18 +2339,8 @@ def extract_meta_and_coef_products(
         label = _infer_decomp_label(decomp_path, index)
         out_path = decomp_outputs[index - 1]
         if out_path is None:
-            stem_lower = Path(decomp_path).stem.lower()
-            if "lsf_spline2d_split_zodi" in stem_lower:
-                variant = "_lsf_spline2d_split_zodi"
-            elif "moon_zodi_lsf_surface_iterative" in stem_lower:
-                variant = "_moon_zodi_lsf_surface_iterative"
-            elif "lsf_surface_iterative" in stem_lower:
-                variant = "_lsf_surface_iterative"
-            else:
-                variant = ""
-            out_path = str(
-                cwd / (f"{input_path.stem}_{label.lower()}_meta_coef{variant}{input_path.suffix}")
-            )
+            out_path = str(cwd / (f"{input_path.stem}_{label.lower()}_meta_coef"
+                                  f"{FIT_MODEL_SUFFIX}{input_path.suffix}"))
         with fits.open(decomp_path) as hdul_dec:
             for extname in ("META", "COEF"):
                 if extname not in hdul_dec:
@@ -2903,15 +2362,6 @@ def extract_meta_and_coef_products(
             if all(present):
                 compact_hdus.extend(
                     _copy_hdu_with_name(hdul_dec[name], name) for name in lsf_extensions
-                )
-            moon_zodi_extensions = ("MZ_MODEL", "MZ_ASSETS", "MZ_KNOTS", "MZ_META")
-            moon_zodi_present = [name in hdul_dec for name in moon_zodi_extensions]
-            if any(moon_zodi_present) and not all(moon_zodi_present):
-                raise KeyError(f"Incomplete Moon/Zodi extensions in {decomp_path}")
-            if all(moon_zodi_present):
-                compact_hdus.extend(
-                    _copy_hdu_with_name(hdul_dec[name], name)
-                    for name in moon_zodi_extensions
                 )
             fits.HDUList(compact_hdus).writeto(out_path, overwrite=True)
         print(f"Wrote {label} META/COEF file -> {out_path}")
@@ -3012,17 +2462,18 @@ def build_arg_parser():
         "palace_dir",
         nargs="?",
         default=None,
+        metavar="data_root",
         help=(
-            "Legacy project/PALACE root, or a complete bundled data root containing "
-            "bundle_manifest.json. Required by baseline and non-split "
-            "lsf-surface-iterative; optional for bundled production modes."
+            "Bundled data root containing bundle_manifest.json, palace/PMD and "
+            "moon_zodi/ (default: the packaged skysub/sky_decomp/data)."
         ),
     )
     parser.add_argument(
         "--n-workers", type=int, default=4, help="Number of parallel worker processes (default: 4)"
     )
     parser.add_argument(
-        "--lsf-sigma", type=float, default=0.5, help="LSF Gaussian sigma in Å (default: 0.5)"
+        "--lsf-sigma", type=float, default=0.5,
+        help="Seed LSF Gaussian sigma in Å before the LSF is fitted (default: 0.5)"
     )
     parser.add_argument(
         "--factor", type=float, default=1e14, help="Flux scaling factor (default: 1e14)"
@@ -3041,36 +2492,20 @@ def build_arg_parser():
     )
     parser.add_argument(
         "--fit-model",
-        # 2026-09-18: the non-telluric fit models are no longer offered.  The
-        # telluric fit is the supported decomposition on this branch -- it fits
-        # ~30% better full-band and every downstream path (reconstruction,
-        # wavelength cache, diagnostics) now assumes it.  The implementations
-        # are still present because the telluric classes INHERIT from them
-        # (SkyDecompPalaceAijcVNFSplitZodiLSFSpline2D -> ... ->
-        # SkyDecompLSFSurfaceIterative -> SkyDecomp), so they are shared
-        # machinery rather than an alternative path; they are simply no longer
-        # reachable from the CLI.  To reproduce a pre-2026-09-17 corpus, check
-        # out a commit from before this change.
-        choices=tuple(TELLURIC_FIT_MODELS),
-        # 2026-09-24: the SkyFar ridge-corrected PALACE OH line strengths.
-        # Same 388 coefficients (OH coefs move <1% at p90); on a 1000-row A/B
-        # OH-pixel chi2 drops x0.03 (r) / x0.28 (z), full band x0.69, with the
-        # continuum partition and reliability flags unchanged.  Outputs carry
-        # the _palacecorr_ suffix.
-        default=PALACECORR_VNF_SPLIT_ZODI_FIT_MODEL,
-        help="Fit implementation (default: %(default)s)",
+        choices=(FIT_MODEL,),
+        default=FIT_MODEL,
+        help="Fit implementation; the only one available (default: %(default)s)",
     )
     parser.add_argument(
         "--blue-lsf",
         choices=BLUE_LSF_CHOICES,
         default="solar",
         help=(
-            "SolarBlue blue-channel LSF: 'solar' fits it from the solar lines in "
-            "the Moon/Zodi continuum; 'reference' holds it at the survey-wide "
+            "Blue-channel LSF: 'solar' fits it from the solar lines in the "
+            "Moon/Zodi continuum; 'reference' holds it at the survey-wide "
             "empirical reference (per fiber for individual-fiber rows, the mean "
-            "over the telescope's fibers for fiber-stacked rows).  r and z are "
-            "fitted in situ either way.  Requires the solarblue fit model "
-            "(default: %(default)s)"
+            "over the FIBER_ROLE fibers, or the telescope's, for fiber-stacked "
+            "rows).  r and z are fitted in situ either way (default: %(default)s)"
         ),
     )
     parser.add_argument(
@@ -3085,151 +2520,14 @@ def build_arg_parser():
     parser.add_argument(
         "--n-refinement-cycles",
         type=int,
-        default=5,
-        help="Refinement cycle limit (default: 5; solarblue maps 5 to a 30-cycle convergence limit)",
-    )
-    parser.add_argument(
-        "--palace-suffix",
-        default=None,
-        help=(
-            "Optional suffix for versioned pmd_popmodel_OH and pmd_refcont files. "
-            "The suffix is appended exactly; for example, '_adam_v1' selects "
-            "pmd_popmodel_OH_adam_v1.dat and "
-            "pmd_refcont_adam_v1.dat (legacy default: canonical unsuffixed "
-            "files; bundled Moon/Zodi modes use their manifest defaults)."
-        ),
-    )
-    parser.add_argument(
-        "--palace-oh-suffix",
-        default=None,
-        help="Optional exact suffix overriding --palace-suffix for pmd_popmodel_OH only.",
-    )
-    parser.add_argument(
-        "--palace-diffuse-suffix",
-        default=None,
-        help="Optional exact suffix overriding --palace-suffix for pmd_refcont only.",
+        default=N_REFINEMENT_CYCLES,
+        help="Refinement-cycle limit; the cycles stop earlier on convergence (default: %(default)s)",
     )
     parser.add_argument(
         "--exposure-seconds",
         type=float,
         default=900.0,
-        help=(
-            "Exposure duration used only when META has no exposure duration "
-            "(v1 provenance contract requires the default 900 s assumption)."
-        ),
-    )
-    parser.add_argument(
-        "--moon-zodi-data-root",
-        type=Path,
-        default=None,
-        help=(
-            "Complete data root containing moon_zodi/ and palace/PMD for the "
-            "Moon/Zodi, split-zodi, or telluric method (default: packaged "
-            "skysub/sky_decomp/data)."
-        ),
-    )
-    parser.add_argument(
-        "--n-spline-knots",
-        type=int,
-        default=MOON_N_KNOTS_DEFAULT,
-        help=(
-            f"Interior B-spline knots for Moon_bs when --fit-model is "
-            f"lsf-surface-iterative, split-zodi, or telluric "
-            f"(default: {MOON_N_KNOTS_DEFAULT}; Moon_bs basis = knots + 4)."
-        ),
-    )
-    parser.add_argument(
-        "--n-zodi-spline-knots",
-        type=int,
-        default=SPLIT_ZODI_N_KNOTS_DEFAULT,
-        help=(
-            f"Interior B-spline knots for Zodi_bs with a split-zodi method "
-            f"(default: {SPLIT_ZODI_N_KNOTS_DEFAULT})."
-        ),
-    )
-    parser.add_argument(
-        "--zodi-smooth-lambda",
-        type=float,
-        default=SPLIT_ZODI_SMOOTH_LAMBDA_DEFAULT,
-        help=(
-            f"Curvature penalty on Zodi_bs with a split-zodi method "
-            f"(default: {SPLIT_ZODI_SMOOTH_LAMBDA_DEFAULT})."
-        ),
-    )
-    parser.add_argument(
-        "--moon-smooth-lambda",
-        type=float,
-        default=MOON_SMOOTH_LAMBDA_DEFAULT,
-        help=(
-            f"Curvature penalty on Moon_bs (default: {MOON_SMOOTH_LAMBDA_DEFAULT}). "
-            "This is what EVERY row gets: the penalty is normalised by "
-            "data_scale**2, so it means the same thing on a bright row as on "
-            "a faint one. Before 2026-09-20 it acted as a per-row floor that "
-            "the brightest rows exceeded by up to ~3200x, so values tuned "
-            "against older corpora do not carry over."
-        ),
-    )
-    parser.add_argument(
-        "--diffuse-ratio-bound-dex",
-        type=float,
-        default=SPLIT_ZODI_DIFFUSE_RATIO_BOUND_DEX,
-        help=(
-            "Half-width in dex of the bracket on the diffuse species ratios "
-            "FeO/HO2 and O2Ac/HO2, about --diffuse-ratio-nominal. 0 disables. "
-            "The three species are individually unidentifiable in the LVM band "
-            "-- the three arms of one exposure disagree by 0.54 dex at the "
-            "median -- so this removes freedom the data cannot measure. "
-            "Requires --diffuse-ratio-nominal."
-        ),
-    )
-    parser.add_argument(
-        "--diffuse-oh-bound-dex",
-        type=float,
-        default=SPLIT_ZODI_DIFFUSE_OH_BOUND_DEX,
-        help=(
-            "Half-width in dex of the MOON-GATED upper bound on the WHOLE "
-            "diffuse block, (A_HO2 + A_FeO + A_O2Ac) / A_OH, above "
-            "--diffuse-oh-centre-log10. 0 disables. The species are mesospheric "
-            "and cannot depend on the moon, but the block's amplitude relative "
-            "to OH rises a factor 4.5 with moon_frac_po, so the templates are "
-            "absorbing scattered moonlight. One-sided and gated because the "
-            "dark-time scatter of the ratio is 0.306 dex and real. The block, "
-            "not FeO alone: an FeO-only cap left 195 of 415 gated rows above "
-            "their bound because the three species move together. Went 0.15 -> "
-            "0.30 -> 0.15 over 2026-09-11/12: the OH regression that motivated "
-            "0.30 was a degenerate-metric artefact (mesospheric COEFFICIENT "
-            "gain -3.9%% but the same errors in FLUX space +4.9%%), while 0.30 "
-            "gave back half the leak suppression (FeO/OH moon Q4/Q1 1.33x -> "
-            "2.16x against 3.44x uncapped). See the block comment at "
-            "SPLIT_ZODI_DIFFUSE_OH_BOUND_DEX."
-        ),
-    )
-    parser.add_argument(
-        "--diffuse-oh-centre-log10",
-        type=float,
-        default=SPLIT_ZODI_DIFFUSE_OH_CENTRE_LOG10,
-        help=(
-            "log10 of the (A_HO2 + A_FeO + A_O2Ac) / A_OH centre for the bound "
-            "above: the DARK-TIME median over diffuse-live rows, where there is "
-            "no moon to leak. Re-measure per corpus -- but note the stored OH "
-            "coefficients are on the convolved STICK basis, not matrix_oh, so "
-            "integrate the stored COMP_* planes rather than assembling the "
-            "ratio from matrix_*.sum(axis=1), which is 5.01x wrong on the OH "
-            "side. Confirmed -0.6489 against a measured -0.6616 on "
-            "gaia-stars-mask-cont."
-        ),
-    )
-    parser.add_argument(
-        "--diffuse-ratio-nominal",
-        type=str,
-        default=",".join(str(v) for v in SPLIT_ZODI_DIFFUSE_RATIO_NOMINAL),
-        help=(
-            "Comma-separated HO2,FeO,O2Ac FLUX shares giving the centre of the "
-            "ratio bracket, e.g. '0.0396,0.7026,0.2578'. MEASURE THIS ON THE "
-            "CORPUS BEING FITTED: centring on PALACE's own shares costs 25.7%% "
-            "of the blue chi2 against 0.67%% for the corpus median, because "
-            "PALACE is calibrated for Paranal and LVM observes from LCO."
-        ),
+        help="Exposure duration used only when META has no exposure duration (default: 900).",
     )
     parser.add_argument(
         "--limit",
@@ -3242,95 +2540,14 @@ def build_arg_parser():
         action="store_true",
         help=(
             "Pin each worker to a single CPU core via sched_setaffinity (Linux). "
-            "Nuclear option: hard-caps observed CPU usage per worker to 100%% even if a "
-            "library ignores thread-limit env vars."
+            "Hard-caps observed CPU usage per worker to 100%% even if a library "
+            "ignores thread-limit env vars."
         ),
     )
     parser.add_argument(
         "--diagnose-threads",
         action="store_true",
         help="Print per-library thread pool counts from worker 0 after all imports finish.",
-    )
-    parser.add_argument(
-        "--no-science-line-mask",
-        action="store_true",
-        help=(
-            "Fit the science emission-line windows instead of excluding them. "
-            "By default [OII]3727, Hbeta, [OIII]4959/5007, Halpha, [NII]6548/6583 "
-            "and [SII]6716/6731 are masked via IVAR=0 in every arm, because none "
-            "of them is in the basis and the fitted OH component absorbs them "
-            "(measured 6.7x the sideband OH level inside Halpha/[NII] on an "
-            "inner-plane H II region field).  Use this to A/B the mask."
-        ),
-    )
-    parser.add_argument(
-        "--no-fit-pixel-weights",
-        action="store_true",
-        help=(
-            "Fit with ivar = 1 on every pixel (the historical unweighted mask) "
-            "instead of the absolute photon model, which is now the DEFAULT. "
-            "The default weighting uses the same sensitivity curves and "
-            "variance floor as the ML loss, vendored in "
-            "sky_decomp/data/sensitivity, row-normalised to mean 1 so exptime, "
-            "the fibre count and FACTOR cancel and every tuned regularisation "
-            "constant keeps its meaning; measured on 1447 rows it improves the "
-            "absolute photon chi2 by 11-14%% full band and 2-4%% in the blue "
-            "for -0.62%% yield through the diffuse-collapse gate. Use this flag "
-            "to reproduce a pre-2026-09-18 corpus, remembering that "
-            "reduced_chi2 is a weighted chi2 with the weights on and an "
-            "unweighted residual-per-pixel with them off, so its values are "
-            "not comparable between the two. See FIT_PIXEL_WEIGHTS."
-        ),
-    )
-    parser.add_argument(
-        "--fit-pixel-weight-clip",
-        type=float,
-        default=FIT_PIXEL_WEIGHT_CLIP,
-        metavar="FACTOR",
-        help=(
-            "Bound the fit weights to [1/FACTOR, FACTOR] about the row mean "
-            "(ignored with --no-fit-pixel-weights). The raw photon weights span "
-            "~600x within a row, enough for the fit to abandon a faint blue "
-            "component: FACTOR 3 stopped the one diffuse collapse seen in 20 "
-            "rows and kept half the chi2 gain (-5.8%% full band). Default: "
-            "unclipped."
-        ),
-    )
-    parser.add_argument(
-        "--no-reversal-retry",
-        action="store_true",
-        help=(
-            "Do not refit moon/zodi role-reversed rows with a tighter spline "
-            "shape bound. A reversal is a shape-labelling artefact, not a "
-            "brightness error, and the corpus build has simply DROPPED such "
-            "rows (2.3%% of every10; ~220 on the full corpus) -- which "
-            "production cannot do. Measured on 18 reversed rows, all 18 "
-            "recover at bound 0.85 for +2.8%% median chi2 with the amplitudes "
-            "essentially unchanged. Retried rows are flagged in the "
-            "reliability column either way. See SPLIT_ZODI_REVERSAL_RETRY."
-        ),
-    )
-    parser.add_argument(
-        "--reversal-retry-bound",
-        type=float,
-        default=SPLIT_ZODI_REVERSAL_RETRY_BOUND,
-        metavar="BETA",
-        help=(
-            "Moon/zodi adjacent-knot ratio bound used for the reversal retry "
-            "only (default %(default)s); every row that is not reversed keeps "
-            "the deployed SPLIT_ZODI_MOON_RATIO_BOUND. 0.95 also un-reverses "
-            "all 18 measured rows but costs +8.4%% chi2 against +2.8%% at 0.85."
-        ),
-    )
-    parser.add_argument(
-        "--no-halpha-centring",
-        action="store_true",
-        help=(
-            "Keep the science-line windows at rest wavelength instead of "
-            "sliding them to the per-row Halpha velocity.  Centring lifts core "
-            "coverage on strong-Halpha rows from 89.0%% to 92.5%%; use this to "
-            "A/B it.  Ignored when --no-science-line-mask is given."
-        ),
     )
     parser.add_argument(
         "--only-thin",
@@ -3381,29 +2598,7 @@ def _run_kwargs_from_args(args):
         limit=args.limit,
         pin_workers=args.pin_workers,
         diagnose_threads=args.diagnose_threads,
-        palace_suffix=args.palace_suffix,
-        palace_oh_suffix=args.palace_oh_suffix,
-        palace_diffuse_suffix=args.palace_diffuse_suffix,
         exposure_seconds=args.exposure_seconds,
-        moon_zodi_data_root=args.moon_zodi_data_root,
-        n_spline_knots=args.n_spline_knots,
-        n_zodi_spline_knots=args.n_zodi_spline_knots,
-        zodi_smooth_lambda=args.zodi_smooth_lambda,
-        moon_smooth_lambda=args.moon_smooth_lambda,
-        diffuse_ratio_bound_dex=args.diffuse_ratio_bound_dex,
-        diffuse_oh_bound_dex=args.diffuse_oh_bound_dex,
-        diffuse_oh_centre_log10=args.diffuse_oh_centre_log10,
-        diffuse_ratio_nominal=(
-            None if not args.diffuse_ratio_nominal
-            else tuple(float(v) for v in args.diffuse_ratio_nominal.split(","))
-        ),
-        mask_science_lines=not args.no_science_line_mask,
-        centre_on_halpha=not args.no_halpha_centring,
-        fit_pixel_weights=not args.no_fit_pixel_weights,
-        fit_pixel_weight_clip=args.fit_pixel_weight_clip,
-        reversal_retry_bound=(
-            None if args.no_reversal_retry else args.reversal_retry_bound
-        ),
         compact_only=args.compact_only,
         kinds=tuple(args.kinds),
         start_method=args.start_method,
@@ -3416,14 +2611,12 @@ def decompose_in_process(data_file, rows=(0,), kinds=("sci", "sky1", "sky2"),
                          argv=(), fixed_lsf_state=None):
     """Decompose rows of a stack in THIS process, exactly as a CLI run would.
 
-    ``argv`` are extra command-line options; with none, every setting is the
-    parser default, i.e. what a bare ``python -m skysub.decompose_parallel
-    <data_file>`` -- a default cluster run -- uses: fit model, knots,
-    smoothing, all identifiability constraints, the zodi correction
-    (``LVMSKY_ZODI_CORRECTION``, read at import as for a run), photon pixel
-    weights, the science-line mask centred on the measured Halpha velocity,
-    the per-row telluric transmission, the geometry amplitude priors and the
-    reversal retry.  The worker is initialised through the same
+    ``argv`` are extra command-line options (e.g. ``("--blue-lsf",
+    "reference")``); with none, every setting is the parser default: the zodi
+    correction (``LVMSKY_ZODI_CORRECTION``, read at import as for a run),
+    photon pixel weights, the science-line mask centred on the measured Halpha
+    velocity, the per-row telluric transmission, the geometry amplitude priors
+    and the reversal retry.  The worker is initialised through the same
     `_worker_initargs` as `run`, and each row goes through the same
     `_fit_ivar_row` -> `_fit_worker_row` path as `fit_chunk_worker`.
 
@@ -3437,39 +2630,16 @@ def decompose_in_process(data_file, rows=(0,), kinds=("sci", "sky1", "sky2"),
     args = build_arg_parser().parse_args(
         ["<in-memory stack>" if in_memory else str(data_file), *map(str, argv)])
     kw = _run_kwargs_from_args(args)
-    fit_model = kw["fit_model"]
-    if fixed_lsf_state is not None and fit_model != PALACECORR_SOLARBLUE_FIT_MODEL:
-        raise ValueError('Fixed-source LSF currently requires the SolarBlue fit model')
-    lsf_reference_file = _survey_lsf_reference_file(
-        fit_model, kw["blue_lsf"], kw["lsf_calibration"])
-    palace_oh_suffix = _resolved_palace_oh_suffix(fit_model, kw["palace_oh_suffix"])
-    base_dir, moon_zodi_root = resolve_runtime_data_roots(
-        fit_model, palace_dir=kw["palace_dir"],
-        moon_zodi_data_root=kw["moon_zodi_data_root"])
+    lsf_reference_file = _survey_lsf_reference_file(kw["blue_lsf"], kw["lsf_calibration"])
+    base_dir = resolve_data_root(kw["palace_dir"])
     wave = (np.asarray(data_file["WAVE"].data) if in_memory
             else fits.getdata(str(data_file), "WAVE")).astype(np.float64)
     init_worker(*_worker_initargs(
         wave=wave, lsf_sigma=kw["lsf_sigma"], base_dir=base_dir,
         factor=kw["factor"], data_file=data_file, progress_queue=None,
-        fit_model=fit_model, n_refinement_cycles=kw["n_refinement_cycles"],
+        n_refinement_cycles=kw["n_refinement_cycles"],
         worker_counter=None, pin_workers=False, diagnose_threads=False,
-        palace_suffix=kw["palace_suffix"], palace_oh_suffix=palace_oh_suffix,
-        palace_diffuse_suffix=kw["palace_diffuse_suffix"],
         exposure_seconds=kw["exposure_seconds"],
-        moon_zodi_data_root=moon_zodi_root,
-        n_spline_knots=kw["n_spline_knots"],
-        n_zodi_spline_knots=kw["n_zodi_spline_knots"],
-        zodi_smooth_lambda=kw["zodi_smooth_lambda"],
-        moon_smooth_lambda=kw["moon_smooth_lambda"],
-        mask_science_lines=kw["mask_science_lines"],
-        centre_on_halpha=kw["centre_on_halpha"],
-        fit_pixel_weights=kw["fit_pixel_weights"],
-        fit_pixel_weight_clip=kw["fit_pixel_weight_clip"],
-        reversal_retry_bound=kw["reversal_retry_bound"],
-        diffuse_ratio_bound_dex=kw["diffuse_ratio_bound_dex"],
-        diffuse_ratio_nominal=kw["diffuse_ratio_nominal"],
-        diffuse_oh_centre_log10=kw["diffuse_oh_centre_log10"],
-        diffuse_oh_bound_dex=kw["diffuse_oh_bound_dex"],
         compact_cache_root=None, run_fingerprint=None, kinds=kinds,
         lsf_reference_file=lsf_reference_file))
     # init_worker clamps native threads for pool workers; that is harmless here.
@@ -3501,27 +2671,10 @@ def main():
         raise ValueError("--only-thin and --compact-only are mutually exclusive")
     if tuple(args.kinds) != ("sci", "sky1", "sky2") and not args.compact_only:
         raise ValueError("--kinds requires --compact-only")
-    if args.compact_only and args.fit_model not in TELLURIC_FIT_MODELS:
-        raise ValueError("--compact-only currently requires a telluric fit model")
     if not np.isfinite(args.exposure_seconds) or args.exposure_seconds <= 0.0:
         raise ValueError("--exposure-seconds must be positive and finite")
-    if args.fit_model == MOON_ZODI_FIT_MODEL and args.exposure_seconds != 900.0:
-        raise ValueError(
-            "Moon/Zodi v1 records missing META exposure time as 'assumed_900s'; "
-            "--exposure-seconds must therefore remain 900"
-        )
-    if (
-        not args.only_thin
-        and args.fit_model
-        not in (MOON_ZODI_FIT_MODEL, *SPLIT_ZODI_FIT_MODELS, *TELLURIC_FIT_MODELS)
-        and args.palace_dir is None
-    ):
-        parser.error(
-            "palace_dir is required for baseline and non-split "
-            "lsf-surface-iterative fits"
-        )
 
-    suffix = FIT_MODEL_SUFFIXES[args.fit_model]
+    suffix = FIT_MODEL_SUFFIX
     stem = Path(args.data_file).stem
     output_dir = Path(args.output_dir)
 

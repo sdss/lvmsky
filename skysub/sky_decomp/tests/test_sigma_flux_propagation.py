@@ -4,7 +4,6 @@ import pytest
 
 from skysub.sky_decomp.fit import (
     SkyDecomp,
-    reconstruct_component_spectra,
 )
 
 
@@ -67,39 +66,6 @@ def test_length_mismatch_raises(_model_setup):
     model, mats, _ = _model_setup
     with pytest.raises(ValueError, match="coef_err length mismatch"):
         model._components_sigma_from_coef_err(np.array([1.0, 2.0]), mats)
-
-
-def test_reconstruct_component_spectra_emits_sigma(_model_setup):
-    """The top-level reconstruction function returns sigma keys when coef_err is provided."""
-    model, mats, wave = _model_setup
-    n_par = sum(m.shape[0] for m in mats.values())
-    coef = np.zeros(n_par)
-    coef[0] = 1.0  # tiny non-zero coefficient so reconstruction is non-trivial
-    err = np.zeros(n_par)
-    err[0] = 0.1
-    out = reconstruct_component_spectra(
-        wave=wave, coef=coef, lsf_sigma=1.5, coef_err=err,
-    )
-    assert "sigma" in out
-    assert "sigma_total" in out
-    for k in ("oh", "moon", "diffuse", "atom", "orc", "o2"):
-        assert k in out["sigma"]
-        assert out["sigma"][k].shape == wave.shape
-    # Sigma_total should equal the quadrature sum of the six independent components.
-    expected_total = np.sqrt(sum(out["sigma"][k] ** 2 for k in
-                                  ("oh", "moon", "diffuse", "atom", "orc", "o2")))
-    np.testing.assert_allclose(out["sigma_total"], expected_total)
-
-
-def test_reconstruct_component_spectra_no_coef_err_backward_compat(_model_setup):
-    """Without coef_err the output has no sigma keys (existing callers stay clean)."""
-    _, mats, wave = _model_setup
-    n_par = sum(m.shape[0] for m in mats.values())
-    coef = np.zeros(n_par)
-    out = reconstruct_component_spectra(wave=wave, coef=coef, lsf_sigma=1.5)
-    assert "sigma" not in out
-    assert "sigma_total" not in out
-    assert "zodi" not in out
 
 
 def test_diffuse_sigma_is_quadrature_sum(_model_setup):

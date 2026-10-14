@@ -97,7 +97,6 @@ def test_real_fit_state_result_and_fits(real_result, tmp_path):
     restored = load_lsf_surface_state(output)
     assert restored.legacy_kernel_representation == LSF_SPLINE2D_REPRESENTATION
     with fits.open(output) as hdul:
-        assert hdul[0].header["DECOMPM"] == "lsf-spline2d-split-zodi"
         assert hdul["LSF_COEF"].header["BASIS"] == "M-spline"
         assert "ZODICORR" not in hdul[0].header
 
@@ -108,7 +107,6 @@ def test_real_fit_state_result_and_fits(real_result, tmp_path):
                     primary_meta={"ZODICORR": ("lvm-ecl-2026-09", "anchor correction")})
     with fits.open(tagged) as hdul:
         assert hdul[0].header["ZODICORR"] == "lvm-ecl-2026-09"
-        assert hdul[0].header["DECOMPM"] == "lsf-spline2d-split-zodi"
 
 
 def test_failed_input_keeps_mspline_contract(real_result):
@@ -124,85 +122,6 @@ def test_failed_input_keeps_mspline_contract(real_result):
         np.all(np.isnan(values))
         for values in failed.lsf_state.coefficients.values()
     )
-
-
-def test_vn_line_amplitude_pca_fits_header_keeps_compact_lsf(real_result, tmp_path):
-    _, _, result = real_result
-    candidate = copy.deepcopy(result)
-    candidate.design_names = [
-        name.replace("OH_", "OHVN_", 1) if name.startswith("OH_") else name
-        for name in candidate.design_names
-    ]
-    pca_names = ["LineAmplitudePCA_mean"] + [
-        f"LineAmplitudePCA_{index:02d}" for index in range(1, 31)
-    ]
-    candidate.design_names.extend(pca_names)
-    candidate.coef = np.concatenate((candidate.coef, np.zeros(len(pca_names))))
-    candidate.coef_err = np.concatenate(
-        (candidate.coef_err, np.zeros(len(pca_names)))
-    )
-    candidate.components["line_amplitude_pca"] = np.zeros_like(candidate.bestfit_lsf)
-
-    output = tmp_path / "vn-pca.fits"
-    results_to_fits([candidate], output)
-
-    with fits.open(output) as hdul:
-        assert hdul[0].header["DECOMPM"] == (
-            "telluric-corrected-lines-palace-aijc-vn-line-amplitude-pca"
-        )
-        assert hdul[0].header["LAPCAK"] == 30
-        assert hdul[0].header["OHGROUP"] == "v_upper,N_upper"
-        assert all(name in hdul for name in ("LSF_COEF", "LSF_KNOTS", "LSF_META"))
-
-
-def test_vnf_pca_fits_header_keeps_compact_lsf(real_result, tmp_path):
-    _, _, result = real_result
-    candidate = copy.deepcopy(result)
-    old_oh = sum(name.startswith("OH_") for name in candidate.design_names)
-    keep = np.arange(old_oh, len(candidate.design_names))
-    oh_names = ["OHVNFPCAPrep_mean", "OHVNFPCAPrep_001"]
-    candidate.design_names = oh_names + [candidate.design_names[index] for index in keep]
-    candidate.coef = np.concatenate((np.ones(2), candidate.coef[keep]))
-    candidate.coef_err = np.concatenate((np.ones(2), candidate.coef_err[keep]))
-    pca_names = ["LineAmplitudePCA_mean", "LineAmplitudePCA_001"]
-    candidate.design_names.extend(pca_names)
-    candidate.coef = np.concatenate((candidate.coef, np.zeros(2)))
-    candidate.coef_err = np.concatenate((candidate.coef_err, np.zeros(2)))
-    candidate.components["line_amplitude_pca"] = np.zeros_like(candidate.bestfit_lsf)
-
-    output = tmp_path / "vnf-pca.fits"
-    results_to_fits([candidate], output)
-
-    with fits.open(output) as hdul:
-        assert hdul[0].header["DECOMPM"] == (
-            "telluric-corrected-lines-palace-aijc-vnf-pca-line-pca"
-        )
-        assert hdul[0].header["OHPCAK"] == 1
-        assert hdul[0].header["LAPCAK"] == 1
-        assert hdul[0].header["OHGROUP"] == "v_upper,N_upper,F_upper"
-        assert all(name in hdul for name in ("LSF_COEF", "LSF_KNOTS", "LSF_META"))
-
-
-def test_vnf_line_adjoint_pca_fits_header_keeps_compact_lsf(real_result, tmp_path):
-    _, _, result = real_result
-    candidate = copy.deepcopy(result)
-    pca_names = ["LineAdjointPCA_mean", "LineAdjointPCA_001"]
-    candidate.design_names.extend(pca_names)
-    candidate.coef = np.concatenate((candidate.coef, np.zeros(2)))
-    candidate.coef_err = np.concatenate((candidate.coef_err, np.zeros(2)))
-    candidate.components["line_adjoint_pca"] = np.zeros_like(candidate.bestfit_lsf)
-
-    output = tmp_path / "vnf-adjoint-pca.fits"
-    results_to_fits([candidate], output)
-
-    with fits.open(output) as hdul:
-        assert hdul[0].header["DECOMPM"] == (
-            "telluric-corrected-lines-palace-aijc-vnf-line-adjoint-pca"
-        )
-        assert "OHPCAK" not in hdul[0].header
-        assert hdul[0].header["LADPCAK"] == 1
-        assert hdul[0].header["OHGROUP"] == "v_upper,N_upper,F_upper"
-        assert all(name in hdul for name in ("LSF_COEF", "LSF_KNOTS", "LSF_META"))
 
 
 def test_flexible_offset_support_roundtrip(real_result, tmp_path):

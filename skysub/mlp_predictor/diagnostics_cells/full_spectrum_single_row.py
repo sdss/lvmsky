@@ -2,7 +2,8 @@
 import plotly.graph_objects as go
 
 _e10_stem = f"{DECOMP_DATA_ROOT}/{DECOMP_STEM}_every10"
-_e10_suffix = _DECOMP_SUFFIX  # inherited from cell 6
+from mlp_predictor.data import DECOMP_SUFFIX
+_e10_suffix = DECOMP_SUFFIX
 EVERY10_INPUT = f"{_e10_stem}.fits"
 EVERY10_NEAR = f"{_e10_stem}_decomp_sky1{_e10_suffix}.fits"
 EVERY10_FAR = f"{_e10_stem}_decomp_sky2{_e10_suffix}.fits"
@@ -39,8 +40,8 @@ required = [
     "predict_sci_coefficients_default",
     "context_cols",
     "build_triplet_coef_dataset",
-    "reconstruct_component_spectra",
     "reconstruct_with_lsf",
+    "TELLURIC_ROW_FOR",
     "load_lsf_state_if_available",
     "load_o2_vector_if_available",
     "_infer_base_dir_for_reconstruction",
@@ -126,7 +127,6 @@ triplet_pos = int(triplet_pos[0])
 
 # Normalize WAVE/LSF arrays to per-row vectors, then select requested row.
 wave_row = wave_arr if wave_arr.ndim == 1 else wave_arr[idx_row]
-lsf_row = lsf_sci_arr if lsf_sci_arr.ndim == 1 else lsf_sci_arr[idx_row]
 
 flux_near_row = flux_near_all[idx_row]
 flux_far_row = flux_far_all[idx_row]
@@ -192,17 +192,13 @@ moon_true = coef_sci_row[moon_idx]
 # 4) Reconstruct this row for SCI prediction and near/far self-consistency checks.
 base_dir_guess = _infer_base_dir_for_reconstruction()
 
-# Prefer the fitted wavelength-dependent LSF surface from each decomp file's
-# LSF_COEF/LSF_KNOTS/LSF_META extensions (written by sky_decomp.lsf_surface_iterative);
-# fall back to the input FITS's Gaussian LSF_SCI if that isn't present.
+# The fitted wavelength-dependent LSF surface from each decomp file's
+# LSF_COEF/LSF_KNOTS/LSF_META extensions; every solarblue decomposition has one.
 _lsf_state_near = load_lsf_state_if_available(EVERY10_NEAR, idx_row)
 _lsf_state_far  = load_lsf_state_if_available(EVERY10_FAR,  idx_row)
 _lsf_state_sci  = load_lsf_state_if_available(EVERY10_SCI,  idx_row)
-_lsf_sigma_fallback = lsf_row / 2.35
-print(f"  LSF source per arm ({ROW_LABEL}): "
-      f"near={'surface' if _lsf_state_near is not None else 'gaussian (LSF_SCI)'}, "
-      f"far={'surface' if _lsf_state_far is not None else 'gaussian (LSF_SCI)'}, "
-      f"sci={'surface' if _lsf_state_sci is not None else 'gaussian (LSF_SCI)'}")
+if any(_s is None for _s in (_lsf_state_near, _lsf_state_far, _lsf_state_sci)):
+    raise RuntimeError(f"row {ROW_LABEL} has no fitted LSF surface in one of the arms")
 
 # Per-arm unit-integrated O2 templates from the decomposition FITS
 # (VECTOR_O2 extension). If absent (older decomp), the O2 basis stays at
@@ -218,16 +214,15 @@ print(f"  O2 template per arm ({ROW_LABEL}): "
       f"far={'VECTOR_O2' if _o2_vec_far is not None else 'zero'}, "
       f"sci={'VECTOR_O2' if _o2_vec_sci is not None else 'zero'}")
 
-# Telluric variant: per-row basis; see full_spectrum_batch_rmse for why.
-_telluric_for = globals().get('TELLURIC_ROW_FOR')
-_tel_sci  = None if _telluric_for is None else _telluric_for('sci',  int(idx_row))
-_tel_near = None if _telluric_for is None else _telluric_for('sky1', int(idx_row))
-_tel_far  = None if _telluric_for is None else _telluric_for('sky2', int(idx_row))
+# Per-row telluric basis; see full_spectrum_batch_rmse for why.
+_tel_sci  = TELLURIC_ROW_FOR('sci',  int(idx_row))
+_tel_near = TELLURIC_ROW_FOR('sky1', int(idx_row))
+_tel_far  = TELLURIC_ROW_FOR('sky2', int(idx_row))
 
 comps_sci = reconstruct_with_lsf(
     wave=wave_row,
     coef=coef_pred_row,
-    lsf=_lsf_state_sci if _lsf_state_sci is not None else _lsf_sigma_fallback,
+    lsf=_lsf_state_sci,
     n_spline_knots=N_MOON_KNOTS,
     n_zodi_spline_knots=N_ZODI_KNOTS,
     base_dir=base_dir_guess,
@@ -237,7 +232,7 @@ comps_sci = reconstruct_with_lsf(
 comps_near_from_near = reconstruct_with_lsf(
     wave=wave_row,
     coef=coef_near_row,
-    lsf=_lsf_state_near if _lsf_state_near is not None else _lsf_sigma_fallback,
+    lsf=_lsf_state_near,
     n_spline_knots=N_MOON_KNOTS,
     n_zodi_spline_knots=N_ZODI_KNOTS,
     base_dir=base_dir_guess,
@@ -248,7 +243,7 @@ comps_near_from_near = reconstruct_with_lsf(
 comps_far_from_far = reconstruct_with_lsf(
     wave=wave_row,
     coef=coef_far_row,
-    lsf=_lsf_state_far if _lsf_state_far is not None else _lsf_sigma_fallback,
+    lsf=_lsf_state_far,
     n_spline_knots=N_MOON_KNOTS,
     n_zodi_spline_knots=N_ZODI_KNOTS,
     base_dir=base_dir_guess,
@@ -262,7 +257,7 @@ comps_far_from_far = reconstruct_with_lsf(
 comps_sci_true = reconstruct_with_lsf(
     wave=wave_row,
     coef=coef_sci_row,
-    lsf=_lsf_state_sci if _lsf_state_sci is not None else _lsf_sigma_fallback,
+    lsf=_lsf_state_sci,
     n_spline_knots=N_MOON_KNOTS,
     n_zodi_spline_knots=N_ZODI_KNOTS,
     base_dir=base_dir_guess,
@@ -288,7 +283,7 @@ rmse_far_recon = float(np.sqrt(np.mean((flux_far_recon_row - flux_far_row) ** 2)
 # Pixel-space WRMSE for the same three arms.  Sigma source order:
 #   1. FLUX_SIGMA_TOTAL HDU in the decomposition FITS (future LSF-aware
 #      propagator output);
-#   2. sigma_total returned by `reconstruct_component_spectra(coef_err=...)`
+#   2. sigma_total returned by `reconstruct_with_lsf(coef_err=...)`
 #      when the corresponding COEF_ERR array is available on this row;
 #   3. None -> pixel_wrmse_per_row degrades to a per-row median-floor RMSE.
 def _sigma_for_single_row(fits_path, hdu_row_idx, comps_dict, comps_true_dict=None):
@@ -360,36 +355,33 @@ if RESIDUAL_CORRECTION:
 line_corr_row = np.zeros_like(flux_sci_pred_row)
 line_scales_row = None
 if LINE_SCALING:
-    if _lsf_state_sci is None:
-        print("  line_scaling: skipped (no fitted LSF surface for the sci arm)")
-    else:
-        from mlp_predictor.data import reconstruction_basis as _recon_basis, \
-            science_line_mask_rows as _sci_mask_rows_ls
-        from mlp_predictor.sky_arm_correction import arm_photon_variance as _arm_var_ls
-        from mlp_predictor.sky_line_scaling import (
-            line_templates as _line_templates, sky_line_scaling_correction as _line_scale,
-            NEBULAR_LINES_RED as _NEB_RED, UNMEASURED_VELOCITY_KM_S as _NEB_V)
-        _mdl_ls, _mats_ls = _recon_basis(
-            wave_row, _lsf_state_sci, n_spline_knots=N_MOON_KNOTS,
-            n_zodi_spline_knots=N_ZODI_KNOTS, base_dir=base_dir_guess,
-            o2_vector=_o2_vec_sci, telluric=_tel_sci)
-        _tpl_ls = {k: v / FACTOR for k, v in _line_templates(
-            _mdl_ls, _mats_ls, coef_pred_row, tilt=LINE_SCALING_TILT).items()}
-        line_corr_row, _ls_info = _line_scale(
-            wave_row, flux_sci_true_row, flux_sci_pred_row + sky_arm_corr_row, _tpl_ls,
-            variance=_arm_var_ls(flux_sci_true_row, wave_row, None),
-            mask=_sci_mask_rows_ls(EVERY10_INPUT, wave_row, flux_sci_true_row, flux_near_row,
-                                   extra_lines=_NEB_RED, widen_if_unmeasured_km_s=_NEB_V),
-            highpass_A=LINE_SCALING_HIGHPASS_A, prior_sigma=LINE_SCALING_PRIOR,
-            return_info=True)
-        line_scales_row = _ls_info["scales"]
-        print("  line_scaling: fitted scale per template (+- 1 sigma): "
-              + ", ".join(f"{k} {v:.3f}+-{_ls_info['sigma'][k]:.3f}"
-                          for k, v in line_scales_row.items() if not k.endswith("_tilt"))
-              + f"; {_ls_info['n_pix']} line pixels, "
-              f"{100 * _ls_info['downweighted']:.0f}% down-weighted"
-              + ("" if _ls_info["accepted"] else
-                 "; NOT APPLIED: the guard dropped it because it raised the chi2"))
+    from mlp_predictor.data import reconstruction_basis as _recon_basis, \
+        science_line_mask_rows as _sci_mask_rows_ls
+    from mlp_predictor.sky_arm_correction import arm_photon_variance as _arm_var_ls
+    from mlp_predictor.sky_line_scaling import (
+        line_templates as _line_templates, sky_line_scaling_correction as _line_scale,
+        NEBULAR_LINES_RED as _NEB_RED, UNMEASURED_VELOCITY_KM_S as _NEB_V)
+    _mdl_ls, _mats_ls = _recon_basis(
+        wave_row, _lsf_state_sci, n_spline_knots=N_MOON_KNOTS,
+        n_zodi_spline_knots=N_ZODI_KNOTS, base_dir=base_dir_guess,
+        o2_vector=_o2_vec_sci, telluric=_tel_sci)
+    _tpl_ls = {k: v / FACTOR for k, v in _line_templates(
+        _mdl_ls, _mats_ls, coef_pred_row, tilt=LINE_SCALING_TILT).items()}
+    line_corr_row, _ls_info = _line_scale(
+        wave_row, flux_sci_true_row, flux_sci_pred_row + sky_arm_corr_row, _tpl_ls,
+        variance=_arm_var_ls(flux_sci_true_row, wave_row, None),
+        mask=_sci_mask_rows_ls(EVERY10_INPUT, wave_row, flux_sci_true_row, flux_near_row,
+                               extra_lines=_NEB_RED, widen_if_unmeasured_km_s=_NEB_V),
+        highpass_A=LINE_SCALING_HIGHPASS_A, prior_sigma=LINE_SCALING_PRIOR,
+        return_info=True)
+    line_scales_row = _ls_info["scales"]
+    print("  line_scaling: fitted scale per template (+- 1 sigma): "
+          + ", ".join(f"{k} {v:.3f}+-{_ls_info['sigma'][k]:.3f}"
+                      for k, v in line_scales_row.items() if not k.endswith("_tilt"))
+          + f"; {_ls_info['n_pix']} line pixels, "
+          f"{100 * _ls_info['downweighted']:.0f}% down-weighted"
+          + ("" if _ls_info["accepted"] else
+             "; NOT APPLIED: the guard dropped it because it raised the chi2"))
 obs_minus_pred_uncorr_row = -resid_row
 obs_minus_pred_row = obs_minus_pred_uncorr_row - sky_arm_corr_row - line_corr_row
 
@@ -1256,7 +1248,7 @@ def _zodi_spectrum(comps):
         return np.zeros_like(comps["moon"])
     return np.asarray(comps["zodi"], dtype=np.float64)
 
-# Sanity: total is defined by reconstruct_component_spectra as
+# Sanity: total is defined by reconstruct_with_lsf as
 #   oh + moon + diffuse + atom + orc + o2
 # so lines + moon_spectrum + non_moon_continuum must equal it.
 _total_pred = np.asarray(comps_sci["total"], dtype=np.float64)

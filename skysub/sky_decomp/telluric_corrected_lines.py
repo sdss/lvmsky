@@ -1,4 +1,10 @@
-"""Telluric-corrected line strengths on the continuous 2-D LSF model."""
+"""Telluric-corrected PALACE line strengths on the continuous 2-D LSF model.
+
+These classes are the chain below `sky_decomp.solar_lsf.SkyDecompPalaceCorrSolarBlueLSF`:
+telluric line attenuation, PALACE ``Aijc`` OH ratios grouped by
+(v', N', F'), the production split-zodi continuum and the ridge-corrected OH
+line strengths.
+"""
 
 from __future__ import annotations
 
@@ -14,10 +20,11 @@ from .lsf_spline2d import SkyDecompLSFSpline2D
 from .moon_zodi_model import (
     DEFAULT_DATA_ROOT,
     DEFAULT_PALACE_OH_SUFFIX,
+    SKYFAR_LINEAR_RIDGE_LAMBDA,
+    SKYFAR_LINEAR_RIDGE_PALACE_OH_SUFFIX,
     validate_decomposition_asset_contract,
     validate_decomposition_data_root,
 )
-TELLURIC_CORRECTED_LINES_FIT_MODEL = "telluric-corrected-lines-lsf-spline2d"
 LINE_TELLURIC_ASSET = "palace/PMD/palace_line_telluric_r4m_v1.fits"
 LINE_TELLURIC_CONTRACT = "line_telluric_contract"
 PALACE_REFERENCE_PWV_MM = 2.5
@@ -281,48 +288,72 @@ class SkyDecompTelluricCorrectedLinesLSFSpline2D(
         self.o2_prefit_bestfit /= self.drp_transmission
 
 
-class SkyDecompAdam25kTelluricLSFSpline2D(
+class SkyDecompTelluricCorrectedLinesPalaceAijc(
     SkyDecompTelluricCorrectedLinesLSFSpline2D
 ):
-    """Fit Adam-25k OH ratios with tellurics and a continuous 2-D LSF."""
+    """Use ``Aijc`` OH ratios from the selected PALACE-format table."""
 
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
-        requested_suffix = kwargs.get("palace_oh_suffix")
-        if requested_suffix not in (None, DEFAULT_PALACE_OH_SUFFIX):
-            raise ValueError("Adam-25k requires its bundled OH source table")
-        kwargs["palace_oh_suffix"] = DEFAULT_PALACE_OH_SUFFIX
-        super().__init__(*args, **kwargs)
+    def __init__(self, wave: np.ndarray, *args: Any, **kwargs: Any) -> None:
+        if kwargs.get("palace_oh_suffix") is None:
+            kwargs["palace_oh_suffix"] = DEFAULT_PALACE_OH_SUFFIX
+        super().__init__(wave, *args, **kwargs)
+
+    @staticmethod
+    def _oh_amplitude(group) -> np.ndarray:
+        return np.asarray(group["Aijc"] * group["gi"], dtype=float)
 
 
-class SkyDecompAdam25kTelluricSplitZodiLSFSpline2D(
-    SkyDecompAdam25kTelluricLSFSpline2D
+class SkyDecompPalaceAijcVNFSplitZodiLSFSpline2D(
+    SkyDecompTelluricCorrectedLinesPalaceAijc
 ):
-    """Adam-25k lines with production split-zodi continuum and 2-D LSF."""
+    """PALACE VNF lines with the production split-zodi continuum."""
+
+    oh_group_keys = ("v_upper", "N_upper", "F_upper")
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **(SPLIT_ZODI_CONTINUUM_DEFAULTS | kwargs))
 
     def _finalize_result(self, *args: Any, **kwargs: Any):
         result = super()._finalize_result(*args, **kwargs)
-        result.fit_summary += " | continuum_profile=split-zodi-production-v1"
+        result.fit_summary += (
+            " | oh_grouping=v_upper,N_upper,F_upper"
+            " | continuum_profile=split-zodi-production-v1"
+        )
         self.fit_summary = result.fit_summary
         return result
 
 
-# Compatibility for executed notebooks and checkpoints created before the
-# production method received its physical name.
-SkyDecompAdam25kNivContinuumLSFSpline2D = (
-    SkyDecompAdam25kTelluricSplitZodiLSFSpline2D
-)
+class SkyDecompPalaceCorrAijcVNFSplitZodiLSFSpline2D(
+    SkyDecompPalaceAijcVNFSplitZodiLSFSpline2D
+):
+    """Use the validation-selected SkyFar linear-ridge OH coefficients."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        requested = kwargs.get("palace_oh_suffix")
+        if requested not in (None, SKYFAR_LINEAR_RIDGE_PALACE_OH_SUFFIX):
+            raise ValueError(
+                "palacecorr requires pmd_popmodel_OH"
+                f"{SKYFAR_LINEAR_RIDGE_PALACE_OH_SUFFIX}.dat"
+            )
+        kwargs["palace_oh_suffix"] = SKYFAR_LINEAR_RIDGE_PALACE_OH_SUFFIX
+        super().__init__(*args, **kwargs)
+
+    def _finalize_result(self, *args: Any, **kwargs: Any):
+        result = super()._finalize_result(*args, **kwargs)
+        result.fit_summary += (
+            " | oh_coefficients=skyfar-linear"
+            f" | oh_coefficient_ridge_lambda={SKYFAR_LINEAR_RIDGE_LAMBDA:g}"
+        )
+        self.fit_summary = result.fit_summary
+        return result
 
 
 __all__ = [
-    "SkyDecompAdam25kNivContinuumLSFSpline2D",
-    "SkyDecompAdam25kTelluricLSFSpline2D",
-    "SkyDecompAdam25kTelluricSplitZodiLSFSpline2D",
+    "SkyDecompPalaceAijcVNFSplitZodiLSFSpline2D",
+    "SkyDecompPalaceCorrAijcVNFSplitZodiLSFSpline2D",
     "SkyDecompTelluricCorrectedLinesLSFSpline2D",
+    "SkyDecompTelluricCorrectedLinesPalaceAijc",
     "SkyDecompTelluricLinesLSFSpline2D",
-    "TELLURIC_CORRECTED_LINES_FIT_MODEL",
     "calculate_drp_transmission",
     "calculate_line_transmission",
     "restore_drp_input",

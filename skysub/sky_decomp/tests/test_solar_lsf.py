@@ -315,7 +315,7 @@ def test_integration_smoke_fits_one_spectrum(tmp_path, monkeypatch):
     dp._save_compact_cache("sky1", 0, result=result)
     output = tmp_path / "solar.fits"
     dp._write_compact_fits(tmp_path / "cache", "sky1", 1, "solar-defaults",
-        dp.PALACECORR_SOLARBLUE_FIT_MODEL, output)
+        dp.FIT_MODEL, output)
     saved = load_lsf_surface_state(output, 0)
     assert saved.config["offset_roughness_fraction"] == 0.01
     assert saved.config["offset_half_width_angstrom"] == 2.5
