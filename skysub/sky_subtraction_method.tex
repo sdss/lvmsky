@@ -29,10 +29,12 @@ the native pixel grid and subtracted from the science spectrum.
 The natural yardstick for the result is the photon noise of a single fiber,
 because the sky model is subtracted from individual fibers. On observations
 not used in training, the predicted sky reaches a median reduced $\chi^2$ of
-1.27 against that noise, where the decomposition's own fit to the same
-spectra reaches 0.92; the prediction thus adds an error of about 0.6 times
+1.12 against that noise, where the decomposition's own fit to the same
+spectra reaches 0.77; the prediction thus adds an error of about 0.6 times
 the single-fiber noise, or about 5\% of the sky per pixel
-(Section~\ref{sec:evaluation}).
+(Section~\ref{sec:evaluation}). Two empirical corrections, measured on the
+same exposure, then lower the median to 0.31, below the decomposition's own
+fit (Section~\ref{sec:postcorr}).
 
 %======================================================================
 \section{Input data}
@@ -1783,7 +1785,7 @@ which a sky error no longer matters. The third is the sky itself. All
 numbers below are for the 2852 held-out observations.
 
 Figure~\ref{fig:chi2-heldout} compares the prediction with the first two
-references, before the corrections of Section~\ref{sec:postcorr}. Over the
+references. Before the corrections of Section~\ref{sec:postcorr}, over the
 full band the median $\chi^2$ of the prediction is 1.12 against the
 single-fiber noise, and that of the decomposition's own fit is 0.77, a ratio
 of 1.46. In the blue the medians are 0.54 and 0.40, a ratio of 1.34. The
@@ -1795,43 +1797,54 @@ error adds in quadrature to the decomposition residual, it amounts to about
 about 5\% and 3.5\% of the sky per pixel. 42\% of the observations have a
 prediction $\chi^2$ below 1 over the full band, and 78\% in the blue.
 
-The upper panels of Figure~\ref{fig:chi2-heldout} show that both
-distributions peak below $\chi^2=1$, and that the prediction's is shifted
-to higher values with a longer tail. The lower panels pair the two numbers
-observation by observation. Most observations lie just above the diagonal,
-at a median ratio of 1.28 over the full band and 1.21 in the blue: the
-prediction stays close to the floor whatever the absolute $\chi^2$. The
-observations well above the diagonal are transfer failures, the only kind
-the transfer can reduce; 18\% of observations exceed twice their
-decomposition $\chi^2$ over the full band, and 16\% in the blue, against
-13\% and 9\% on the previous decomposition. Its floor is lower now (the
-decomposition with the reference blue LSF fits the blue about 40\% better),
-and a ratio to the floor grows when the floor falls, so these fractions are
-not comparable across decompositions. The
-observations far to the right are those the decomposition itself fits
-poorly, so their truth is not reliable either.
+Both distributions in Figure~\ref{fig:chi2-heldout} peak below $\chi^2=1$;
+that of the uncorrected prediction is shifted to higher values and has a
+longer tail, with an 84th percentile of 2.32 over the full band and 1.22 in
+the blue. The observations in the far tail are mostly those the
+decomposition itself fits poorly, so their truth is not reliable either.
+The figure also shows the prediction after the two corrections of
+Section~\ref{sec:postcorr}. Its distribution moves below the
+decomposition's: the median falls to 0.31 over the full band and 0.21 in the
+blue, and 83\% and 87\% of the observations end below $\chi^2=1$. This is
+discussed in Section~\ref{sec:postcorr}.
 
 Figure~\ref{fig:residual-heldout} shows where in wavelength the error lies,
-now relative to the sky. The top panel is the sky-subtracted science
-spectrum. Its large spikes, at H$\alpha$, H$\beta$, [O\,\textsc{iii}] and
-[O\,\textsc{ii}], are the nebular emission of the science fields that sky
-subtraction exists to reveal, not sky residual. Away from them, the
-residual scatters around zero with the largest excursions at the brightest
-OH lines and in the far blue, and the median residual of an observation is
-typically 2.0\% of its sky level (5.8\% at the 84th percentile). Integrated
-over the band, the predicted sky matches the observed flux to 1.5\% at the
-median, 3.9\% at the 84th percentile. The three lower panels isolate the
-transfer by comparing the predicted continuum components with the
-decomposition of the science spectrum. The moonlight error dominates: it
-grows toward the blue, where scattered moonlight is brightest. Its RMS over
-the observations is 0.3 in these units near 4000\,\AA, where the median
-continuum with the Moon up is 5, and 0.5 at the blue end. The RMS of the
-zodiacal and diffuse errors is below 0.1 and 0.15, respectively. For all three components the median error of an
-observation is narrowly distributed around zero, within or near the
-single-fiber noise.
+as percentile bands over the held-out observations at each pixel. The
+second and third panels are the sky-subtracted science spectrum, observed
+minus predicted, with and without the corrections; the top row enlarges two
+windows of the corrected one. The science-line windows of the decomposition
+(Section~\ref{sec:noise}) are left out, since the residual there is the
+nebular emission of the science fields that sky subtraction exists to
+reveal. The narrow peaks at H$\epsilon$ and H$\delta$, which the windows do
+not cover, are the same. Without the corrections, the median residual
+departs from zero by 0.31 times the single-fiber noise at a typical pixel.
+It is structured in the blue, where it is the solar-line pattern of
+Section~\ref{sec:armcorr}, and along the OH bands, and the 68\% range lies
+within the single-fiber noise on only 33\% of the pixels. With the
+corrections the median is within 0.04 times the noise of zero at a typical
+pixel, and the 68\% range lies within the noise on 96\% of the pixels (98\%
+below 5000\,\AA). The 95\% range is wider than the noise everywhere; it is
+widest in the far blue, a half-width of 0.6 below 4000\,\AA{} against 0.2
+in the red. The corrections act on narrow features and change the broad
+level of a spectrum very little, so the per-observation numbers before them
+still apply: the median residual of an observation is typically 2.0\% of
+its sky level (5.8\% at the 84th percentile), and integrated over the band
+the predicted sky matches the observed flux to 1.5\% at the median, 3.9\%
+at the 84th percentile.
 
-Figure~\ref{fig:atlas} condenses the comparison into percentile bands at
-each wavelength, separately for the Moon down (1101 observations,
+The three lower panels isolate the transfer by comparing the predicted
+continuum components with the decomposition of the science spectrum. For
+all three the median is zero to within 2\% of the single-fiber noise, and
+the 68\% range lies within the noise at every wavelength. The moonlight
+error dominates and grows toward the blue, where scattered moonlight is
+brightest. Near 4000\,\AA, where the median continuum with the Moon up is 5
+in these units, its 68\% range is $\pm0.10$ and its 95\% range $-0.54$ to
+$+0.68$, against a single-fiber noise of 0.22. The 68\% ranges of the
+zodiacal and diffuse errors are typically $\pm0.02$ and $\pm0.01$, and their
+95\% ranges $\pm0.09$ and $\pm0.035$.
+
+Figure~\ref{fig:atlas} shows the transfer error as the same kind of
+percentile bands, separately for the Moon down (1101 observations,
 $f_{\rm pred}\le1/150$) and the Moon up (1751). Here the whole predicted sky
 is compared with the full decomposition of the science spectrum. The
 residual is therefore the transfer error alone: it contains neither the
@@ -1853,36 +1866,44 @@ under-predictions of the sky.
 
 \begin{figure*}
 \centering
-\includegraphics[width=0.75\textwidth]{figures/batch_chi2_panels.pdf}
-\caption{Reduced $\chi^2$ of the predicted science sky on the held-out
+\includegraphics[width=\textwidth]{figures/batch_chi2_panels.pdf}
+\caption{Reduced $\chi^2$ of the predicted science sky on the 2852 held-out
 observations, against the photon noise of a single 900\,s fiber
 (Section~\ref{sec:noise}), with the nebular-line windows excluded. Left:
-full band; right: the blue ($\lambda<6000$\,\AA). Top: distribution of the
-$\chi^2$ of the prediction (colour) and of the decomposition's own fit to
-the same spectra (gray); the dashed line marks $\chi^2=1$. The range is cut
-at $q_{75}+3\,\mathrm{IQR}$ of the two distributions, or at their 99th
-percentile if smaller; the annotation gives the medians, their ratio and the
-number of observations beyond the cut. Bottom: the two values paired for
-each observation; the solid line is equality. A lower $\chi^2$ in the blue
-does not mean a better prediction there: the sky is fainter, so the
-single-fiber noise is a larger fraction of the flux.}
+full band; right: the blue ($\lambda<6000$\,\AA). Gray: the decomposition's
+own fit to the same spectra. Red outline: the prediction as it comes from
+the transfer. Blue: the prediction after the sky-arm residual correction
+and the sky-line scaling of Section~\ref{sec:postcorr}, both over the full
+band. The dashed line marks $\chi^2=1$. The range is cut at
+$q_{75}+3\,\mathrm{IQR}$ of the distributions, or at their 99th percentile
+if smaller; the annotation gives the medians, the ratio of the corrected
+prediction's median to the decomposition's, and the number of observations
+beyond the cut. A lower $\chi^2$ in the blue does not mean a better
+prediction there: the sky is fainter, so the single-fiber noise is a larger
+fraction of the flux.}
 \label{fig:chi2-heldout}
 \end{figure*}
 
 \begin{figure*}
 \centering
 \includegraphics[height=0.72\textheight]{figures/batch_residual_panels.pdf}
-\caption{Residuals of the predicted science sky on the held-out
+\caption{Residuals of the predicted science sky on the 2852 held-out
 observations, in units of $10^{-14}$\,erg\,s$^{-1}$\,cm$^{-2}$\,\AA$^{-1}$.
-Top: the sky-subtracted science spectrum, observed minus predicted. Below:
-decomposed minus predicted moonlight, zodiacal light and diffuse continuum
-of the science spectrum. Gray lines are 200 observations spaced evenly
-through the sample; the gray envelope is the RMS over all held-out
-observations at each wavelength, and the red band is the $\pm1\sigma$
-photon noise of a single 900\,s fiber (median over observations). Right:
-distribution of the median residual of each observation, with the
-two-tailed 68.3, 95.5 and 99.7\% ranges (solid, dashed, dotted), the median
-(dash-dotted) and the single-fiber noise (red).}
+Second panel: the sky-subtracted science spectrum, observed minus predicted,
+after the two corrections of Section~\ref{sec:postcorr}. Third panel: the
+same without the corrections, on the same scale. Top row: the second panel
+enlarged on the windows shaded in it, 3900--4200\,\AA{} (Ca\,\textsc{ii}~H
+and~K and the solar continuum) and 8400--8700\,\AA{} (OH). Lower three
+panels: decomposed minus predicted moonlight, zodiacal light and diffuse
+continuum of the science spectrum, the transfer error alone. At each pixel
+the black line is the median over observations, and the dark and light gray
+bands are the 68\% and 95\% ranges (the 16th--84th and 2.5th--97.5th
+percentiles). The red band is the $\pm1\sigma$ photon noise of a single
+900\,s fiber (median over observations). In the sky-subtracted panels each
+observation's science-line windows are left out, and pixels where more than
+half of the observations are masked are left blank; the peaks at
+H$\epsilon$ and H$\delta$, outside the windows, are nebular emission of the
+science fields. Note the different vertical scales.}
 \label{fig:residual-heldout}
 \end{figure*}
 
@@ -2043,6 +2064,14 @@ the floor of Section~\ref{sec:evaluation}. This is not a contradiction. The
 floor is the best the basis of Section~\ref{sec:model} can do, and both
 corrections bring in information from outside the basis: the simultaneous
 residuals of the sky arms, and the science spectrum itself.
+Figures~\ref{fig:chi2-heldout} and~\ref{fig:residual-heldout} show the
+combined effect on the 2852 held-out observations, with both corrections
+applied over the full band. The median $\chi^2$ falls from 1.12 to 0.31
+over the full band and from 0.54 to 0.21 in the blue
+($\lambda<6000$\,\AA). The corrected prediction fits 80\% of the
+observations better than their own decomposition over the full band and
+74\% in the blue. It is worse than the uncorrected prediction on 0.3\% of
+the observations over the full band and 1.2\% in the blue.
 
 \subsection{Sky-arm residual correction}
 \label{sec:armcorr}
