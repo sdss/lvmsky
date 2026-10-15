@@ -96,3 +96,9 @@ analysis/sky_subtraction_validation/*.html
 analysis/sky_subtraction_validation/*.png
 analysis/sky_subtraction_validation/*.log
 analysis/sky_subtraction_validation/plotly.min.js
+# Browser profiles used for report screenshots
+analysis/**/.firefox-*/
+
+# Local environment: data symlink and agent settings
+/data
+.kiro/
