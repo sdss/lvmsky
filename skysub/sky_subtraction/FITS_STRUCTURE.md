@@ -100,6 +100,20 @@ The auxiliary fit uses saved iteration LSF/amplitudes/spline; the delivered sky 
 
 Robust fit weights are reconstructed from native CFrame IVAR, the stored pre-LSF variance-continuum spline, the iteration residual and the saved Huber scale. This preserves the original 3% continuum-dependent variance floor. These weights are not input IVAR; plotted normalized residuals use native flux errors.
 
+## Sky-only block LSF variant
+
+`skysub.sky_subtraction_block` writes `lvmSFrame-skyml-block-<exposure>.fits` with the same schema, except that individual Science fits are replaced. `CAND_LSF_*` and `FIT_LSF_HISTORY` are absent. `LSF_COEF/KNOTS/META` hold the B survey LSF and the R/Z block surfaces evaluated at each Science fiber, so `SkyMLReconstructor.sky()` applies unchanged. `LSF_QA` has only `input_row`, `fiberid`, `channel`, `accepted` and `reason` (`survey_fixed` for B, `sky_block_centered` for R/Z). Measured on exposure 59750:
+
+| Extension | Type / shape | MiB | Meaning |
+|---|---|---:|---|
+| `BLOCK_LSF_META` | table; 6 | 0.008 | Spectrograph, channel, wavelength/slit degree, offset half-width, solver status, fiber/pixel counts, chi-square, slit rank, selected fiberid range, normalization/centroid errors, minimum coefficient, timing. |
+| `BLOCK_LSF_COEF` | f8; 6 × 11 × 4 × 4 | 0.011 | Block × offset basis × wavelength basis × slit basis; rows follow `BLOCK_LSF_META`. |
+| `BLOCK_SLIT_KNOTS` | f8; 6 × 8 | 0.005 | Cubic slit knots over the spectrograph's full fiberid range. |
+| `BLOCK_WAVE_KNOTS` | f8; 6 × 8 | 0.005 | Wavelength knots the block was fitted on; R/Z `LSF_KNOTS` of every Science fiber equal these. |
+| `SKY_FIBER_COEF` | table; 106 | 0.321 | Selected Sky fibers: input_row, fiberid, spectrograph, telescope, frozen component vector (internal 1e14 scaling) and QP status. |
+
+`SKYML_META` adds `method`, `preparation` path/SHA256, `block_settings`, `block_timing` and `block_code_sha256`. `SkyBlockReconstructor.global_state(fiberid)` evaluates the block surfaces at any fiber; `.sky_fiber(fiberid)` renders a selected Sky fiber's fit in memory.
+
 ## Storage boundary
 
 The compact file contains no OBSFLUX copy, zero-filled SKY_IVAR, per-pixel SKYML_VALID, intermediate full sky images, individual full fit images, or median model/component/residual images. Validity is represented by SLITMAP.skyml_applied, MASK, IVAR and finite final SKY. Coefficients and observed median data reconstruct the model curves and additive corrections. Invalid final pixels require the original CFrame to recover actual observed values.
