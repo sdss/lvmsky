@@ -1,0 +1,13 @@
+line-length = 120
+
+[lint]
+select = ["E", "F", "W", "B", "I", "C901"]
+
+[lint.mccabe]
+max-complexity = 12
+
+[format]
+quote-style = "preserve"
+
+[lint.isort]
+known-first-party = ["skysub", "mlp_predictor"]
