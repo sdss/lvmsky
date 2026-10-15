@@ -16,7 +16,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
-from fiber_decomposition_test import reference_file, EXPOSURES, FIT, CHANNEL_INDEX  # noqa: E402
+from fiber_decomposition_test import reference_file, EXPOSURES, FIT, CHANNEL_INDEX, gaia_status  # noqa: E402
 
 WAVE_FRACTIONS = (.15, .5, .85)
 HALF_WIDTH = 2.5
@@ -36,7 +36,7 @@ def reference_profiles(expnum):
         config = {str(c['channel']).strip(): c for c in h['LSF_CONFIG'].data}
         for row in rows:
             f = int(meta['fiberid'][row])
-            spectrograph[f], clean[f] = int(meta['spectrographid'][row]), bool(meta['gaia_clean_1pct'][row])
+            spectrograph[f], clean[f] = int(meta['spectrographid'][row]), gaia_status(expnum)[f][0]
             profiles[f] = {ch: (np.asarray(h['LSF_COEF'].data[row, CHANNEL_INDEX[ch]], float),
                                 np.asarray(h['LSF_KNOTS'].data[row, CHANNEL_INDEX[ch], :int(config[ch]['n_knots'])], float), int(config[ch]['degree'])) for ch in FIT}
     chosen = sorted((spectrograph[f], f) for f in profiles)
@@ -198,7 +198,7 @@ def table_rows(items):
 
 def section(frame, names, selection):
     body = '''<div id="fiber-profiles"><h2>R and Z: per-fiber Sky Decomposition versus the global block LSF</h2>
-<p>The same nine reference Science fibers as in the spectral test above (three per spectrograph; the fibers listed below) in each of the five exposures. <b>Per-fiber Sky Decomposition</b>: the LSF of the SolarBlue decomposition of that fiber's own spectrum in that exposure, taken from the reference model that produced the displayed fit. <b>Global block</b>: the sky-only surface of the spectrograph evaluated at that fiber; these Science fibers were not used in the block fit. W50 = q75 − q25 and W90 = q95 − q05 of the profile; FWHM is the literal full width at half maximum; asymmetry = (q95 + q05 − 2·q50)/W90. B is not fitted. LSF density is in Å⁻¹ with unit integral over the ±2.5 Å offset support; both surfaces keep their own centroid (the block centroid is zero by construction). The Gaia column of the selection table flags fibers whose Gaia-to-observed flux ratio exceeds 1%: for those, stellar flux contaminates the Science spectrum and the per-fiber LSF is less reliable.</p>'''
+<p>The same nine reference Science fibers as in the spectral test above (three per spectrograph; the fibers listed below) in each of the five exposures. <b>Per-fiber Sky Decomposition</b>: the LSF of the SolarBlue decomposition of that fiber's own spectrum in that exposure, taken from the reference model that produced the displayed fit. <b>Global block</b>: the sky-only surface of the spectrograph evaluated at that fiber; these Science fibers were not used in the block fit. W50 = q75 − q25 and W90 = q95 − q05 of the profile; FWHM is the literal full width at half maximum; asymmetry = (q95 + q05 − 2·q50)/W90. B is not fitted. LSF density is in Å⁻¹ with unit integral over the ±2.5 Å offset support; both surfaces keep their own centroid (the block centroid is zero by construction). The Gaia column of the selection table flags fibers whose Gaia-to-observed flux ratio exceeds 1% (verified Gaia matching): for those, stellar flux contaminates the Science spectrum and the per-fiber LSF is less reliable.</p>'''
     body += '<h3>Selected fibers</h3><table><tr><th>Exposure</th><th>Spectrograph</th><th>Physical fibers (low / middle / high)</th><th>Gaia-clean (&lt;1%) flags</th></tr>'
     for (e, sp), ids in selection.items():
         body += f'<tr><td>{e}</td><td>SP{sp}</td><td>{" / ".join(str(i) for i in ids)}</td><td>{" / ".join("clean" if CLEAN[(e, i)] else "Gaia-contaminated" for i in ids)}</td></tr>'

@@ -14,6 +14,7 @@ from concurrent.futures import ProcessPoolExecutor
 from copy import deepcopy
 from pathlib import Path
 import glob
+from functools import lru_cache
 import json
 import multiprocessing as mp
 import sys
@@ -46,6 +47,15 @@ def reference_file(expnum):
             if len(rows):
                 return path, rows
     raise ValueError(f'No reference model for exposure {expnum}')
+
+
+@lru_cache(maxsize=None)
+def gaia_status(expnum):
+    """{fiberid: (clean_1pct, gaia_ratio)} from the Gaia-verified fiber table; the reference-model INPUT_META carries no Gaia values."""
+    table = pd.read_parquet('/data/sas/sdsswork/users/u6058164/lvm_lsf_epoch_coverage_drp132/fiber_exposure_channel.parquet',
+                            columns=['expnum', 'fiberid', 'telescope', 'channel', 'gaia_ratio', 'gaia_clean_1pct'])
+    table = table[(table.expnum == expnum) & (table.telescope == 'Sci') & (table.channel == 'Z')]
+    return {int(f): (bool(c), float(r)) for f, c, r in zip(table.fiberid, table.gaia_clean_1pct, table.gaia_ratio)}
 
 
 def selected_record(expnum):

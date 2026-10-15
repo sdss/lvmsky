@@ -21,7 +21,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(ROOT / 'analysis/sky_subtraction_validation'))
 from report_fibers import trace, finish, page, UNIT  # noqa: E402
-from fiber_decomposition_test import EXPOSURES, VARIANTS, GROUPS, WORK, SOLARBLUE, EXTRA, selected_record, reference_file  # noqa: E402
+from fiber_decomposition_test import EXPOSURES, VARIANTS, GROUPS, WORK, SOLARBLUE, EXTRA, selected_record, reference_file, gaia_status  # noqa: E402
 
 LABEL = {'fiber': 'Per-fiber fit (own LSF, stored)', 'block_same': 'Block LSF, same coefficients', 'fiber_refit': 'Per-fiber LSF, coefficients refit',
          'block_refit': 'Block LSF, coefficients refit'}
@@ -35,11 +35,12 @@ FLUX_NOTE = 'Units: 10⁻¹⁴ erg s⁻¹ cm⁻² Å⁻¹.'
 def clean_flags():
     flags = {}
     for e in EXPOSURES:
+        status = gaia_status(e)
         path, rows = reference_file(e)
         with fits.open(path, memmap=True) as h:
-            meta = h['INPUT_META'].data
             for row in rows:
-                flags[(e, int(meta['fiberid'][row]))] = (bool(meta['gaia_clean_1pct'][row]), float(meta['gaia_ratio'][row]))
+                f = int(h['INPUT_META'].data['fiberid'][row])
+                flags[(e, f)] = status[f]
     return flags
 
 
@@ -192,7 +193,7 @@ def section(metrics, categories, pages, flags, checks):
             within = sel.groupby('variant').within_1sigma.median()
             diff = sel[sel.variant == 'block_refit'].rms_model_difference_sigma.median()
             body += f'<tr><td>{e}</td><td>{ch}</td><td>{n_clean} / 9</td>' + ''.join(f'<td>{med[v]:.2f}</td>' for v in VARIANTS) + f'<td>{diff:.2f}</td><td>{within["fiber"]:.0%} / {within["block_refit"]:.0%}</td></tr>'
-    body += '</table><p>Medians over the nine fibers. Stellar contamination (Gaia flux above 1% of the observed flux) is flagged in the fiber table; 16819 and 44808 have few clean fibers, so conclusions there are limited.</p>'
+    body += '</table><p>Medians over the nine fibers. Stellar contamination means Gaia stellar flux above 1% of the observed flux. In 16819 and 44808 all nine fibers are contaminated, so conclusions there are limited; in 40620 fiber 714 is contaminated (Gaia flux 128% of the observed flux) and its χ² per pixel is above 10⁴ in every variant, including the stored fit.</p>'
     body += '<h3>χ² per pixel for every fiber</h3><img src="fiber_decomp_chi2.png" alt="Chi-square per pixel of four model variants for nine fibers in each exposure, R and Z"><p>Log scale; vertical lines separate spectrographs; each point is one fiber and variant on identical pixels.</p>'
     body += '<h3>Where the residual sits</h3><img src="fiber_decomp_categories.png" alt="Chi-square per pixel by pixel category for four model variants"><p>Categories are exclusive: OH and other-line cores (&lt;1 Å from a line carrying at least 1% of the strongest line flux), wings (1–2.5 Å), the zone beyond the LSF support (2.5–4 Å), and continuum/solar structure (&gt;4 Å). Pooled over the nine fibers.</p>'
     body += '<h3>Interactive spectra</h3><p>Each page covers B, R and Z: components, observed spectrum, models, flux residuals at −5 RMS (per-fiber) and −10 RMS (block refit) with thin ±σ curves, normalized residuals, and each block model’s difference from the per-fiber model in σ.</p>'

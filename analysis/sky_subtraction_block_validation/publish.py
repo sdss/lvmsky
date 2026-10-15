@@ -17,6 +17,7 @@ class Links(HTMLParser):
 def destination(name):
     if name==MAIN:return Path(name)
     suffix=Path(name).suffix
+    if name.startswith('summary_') and suffix=='.html':return Path('docs')/name
     if suffix=='.html':return Path('spectra')/name
     if suffix in ('.js','.css'):return Path('assets')/name
     if suffix in ('.png','.pdf','.svg'):return Path('figures')/name
@@ -26,9 +27,9 @@ def destination(name):
 
 def publish():
     OUT.mkdir(parents=True,exist_ok=True)
-    files=[HERE/MAIN,*HERE.glob('sky_fit_*.html'),*HERE.glob('science_*.html'),*HERE.glob('median_*.html'),*HERE.glob('sky_fibers_*.html'),HERE/'plotly.min.js',
+    files=[HERE/MAIN,*HERE.glob('sky_fit_*.html'),*[x for x in HERE.glob('science_*.html')],*HERE.glob('median_*.html'),*HERE.glob('sky_fibers_*.html'),HERE/'plotly.min.js',
         *HERE.glob('flux_maps_*.png'),*HERE.glob('global_lsf_maps_*.png'),*HERE.glob('lsf_comparison_*.png'),*HERE.glob('lsf_profiles_*.png'),*HERE.glob('residual_budget_*.png'),*HERE.glob('individual_flux_maps_*.png'),*HERE.glob('fiber_lsf_*.png'),*HERE.glob('fiber_decomp_*.png'),*HERE.glob('fiber_decomp_spectrum_*.html'),
-        *HERE.glob('*.csv'),*HERE.glob('*.json'),HERE/'README_method.md',HERE/'reviews.md']
+        *HERE.glob('*.csv'),*HERE.glob('*.json'),HERE/'README_method.md',HERE/'reviews.md',HERE/'summary_plain_english.html']
     contract=HERE.parents[1]/'skysub/sky_subtraction/FITS_STRUCTURE.md';files.append(contract)
     names={p.name for p in files}
     for source in files:
@@ -56,7 +57,7 @@ def publish():
     for directory in [OUT,*[x for x in OUT.rglob('*') if x.is_dir()]]:directory.chmod(0o755)
     assert sorted(p.name for p in OUT.glob('*.html'))==[MAIN]
     checked=0
-    for target in [OUT/MAIN,*list((OUT/'spectra').glob('*.html'))]:
+    for target in [OUT/MAIN,*list((OUT/'spectra').glob('*.html')),*list((OUT/'docs').glob('*.html'))]:
         text=target.read_text();assert '<details' not in text and '<summary' not in text
         for link in Links(text).links:
             parts=urlsplit(link)
