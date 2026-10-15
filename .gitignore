@@ -99,6 +99,27 @@ analysis/sky_subtraction_validation/plotly.min.js
 # Browser profiles used for report screenshots
 analysis/**/.firefox-*/
 
+# Generated block-LSF validation pages and large intermediates (published with publish.py)
+analysis/sky_subtraction_block_validation/*.html
+analysis/sky_subtraction_block_validation/*.png
+analysis/sky_subtraction_block_validation/*.log
+analysis/sky_subtraction_block_validation/plotly.min.js
+analysis/sky_subtraction_block_validation/chain_done.txt
+analysis/sky_subtraction_block_validation/README_method.md
+analysis/sky_subtraction_block_validation/budget_parts/
+analysis/sky_subtraction_block_validation/metrics_*.json
+analysis/sky_subtraction_block_validation/sky_refit_coefficients_*.json
+analysis/sky_subtraction_block_validation/lsf_differences.csv
+analysis/sky_subtraction_block_validation/residual_category_metrics.csv
+analysis/sky_subtraction_block_validation/fiber_lsf_metric_curves.csv
+analysis/sky_subtraction_block_validation/sky_fiber_residual_metrics.csv
+# Publication copies of skysub/sky_subtraction documentation
+analysis/sky_subtraction_validation/FITS_STRUCTURE.md
+analysis/sky_subtraction_validation/pipeline_README.md
+# Large generated method-discussion figures and tables
+analysis/sky_multifiber_method_discussion/*.png
+analysis/sky_multifiber_method_discussion/59750_median_lsf_coefficient_metrics.csv
+
 # Local environment: data symlink and agent settings
 /data
 .kiro/
