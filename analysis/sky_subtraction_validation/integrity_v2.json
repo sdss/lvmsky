@@ -1,0 +1,117 @@
+[
+  {
+    "expnum": 3469,
+    "checks": {
+      "all_hdu_checksums_valid": true,
+      "compact_storage_contract": true,
+      "flux_preserved": true,
+      "sky_preserved": true,
+      "ivar_preserved": true,
+      "mask_preserved": true,
+      "lsf_preserved": true,
+      "lsf_coef_preserved": true,
+      "cand_lsf_coef_preserved": true,
+      "med_coef_preserved": true,
+      "med_flux_preserved": true,
+      "accepted_lsf_has_full_channel_line_evidence": true,
+      "history_parameters_complete": true,
+      "history_covers_recorded_iterations": true
+    },
+    "all_passed": true,
+    "extensions": 41,
+    "history_rows": 10482,
+    "size_mib": 445.023193359375
+  },
+  {
+    "expnum": 12630,
+    "checks": {
+      "all_hdu_checksums_valid": true,
+      "compact_storage_contract": true,
+      "flux_preserved": true,
+      "sky_preserved": true,
+      "ivar_preserved": true,
+      "mask_preserved": true,
+      "lsf_preserved": true,
+      "lsf_coef_preserved": true,
+      "cand_lsf_coef_preserved": true,
+      "med_coef_preserved": true,
+      "med_flux_preserved": true,
+      "accepted_lsf_has_full_channel_line_evidence": true,
+      "history_parameters_complete": true,
+      "history_covers_recorded_iterations": true
+    },
+    "all_passed": true,
+    "extensions": 41,
+    "history_rows": 7517,
+    "size_mib": 434.8223876953125
+  },
+  {
+    "expnum": 16819,
+    "checks": {
+      "all_hdu_checksums_valid": true,
+      "compact_storage_contract": true,
+      "flux_preserved": true,
+      "sky_preserved": true,
+      "ivar_preserved": true,
+      "mask_preserved": true,
+      "lsf_preserved": true,
+      "lsf_coef_preserved": true,
+      "cand_lsf_coef_preserved": true,
+      "med_coef_preserved": true,
+      "med_flux_preserved": true,
+      "accepted_lsf_has_full_channel_line_evidence": true,
+      "history_parameters_complete": true,
+      "history_covers_recorded_iterations": true
+    },
+    "all_passed": true,
+    "extensions": 41,
+    "history_rows": 13149,
+    "size_mib": 454.16656494140625
+  },
+  {
+    "expnum": 44808,
+    "checks": {
+      "all_hdu_checksums_valid": true,
+      "compact_storage_contract": true,
+      "flux_preserved": true,
+      "sky_preserved": true,
+      "ivar_preserved": true,
+      "mask_preserved": true,
+      "lsf_preserved": true,
+      "lsf_coef_preserved": true,
+      "cand_lsf_coef_preserved": true,
+      "med_coef_preserved": true,
+      "med_flux_preserved": true,
+      "accepted_lsf_has_full_channel_line_evidence": true,
+      "history_parameters_complete": true,
+      "history_covers_recorded_iterations": true
+    },
+    "all_passed": true,
+    "extensions": 41,
+    "history_rows": 8581,
+    "size_mib": 438.50830078125
+  },
+  {
+    "expnum": 59750,
+    "checks": {
+      "all_hdu_checksums_valid": true,
+      "compact_storage_contract": true,
+      "flux_preserved": true,
+      "sky_preserved": true,
+      "ivar_preserved": true,
+      "mask_preserved": true,
+      "lsf_preserved": true,
+      "lsf_coef_preserved": true,
+      "cand_lsf_coef_preserved": true,
+      "med_coef_preserved": true,
+      "med_flux_preserved": true,
+      "accepted_lsf_has_full_channel_line_evidence": true,
+      "history_parameters_complete": true,
+      "history_covers_recorded_iterations": true
+    },
+    "all_passed": true,
+    "extensions": 41,
+    "history_rows": 9735,
+    "size_mib": 442.45513916015625
+  }
+]

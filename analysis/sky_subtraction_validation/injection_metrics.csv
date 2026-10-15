@@ -1,0 +1,13 @@
+kind,contrast,channel,accepted,reason,max_w50_error
+known_broader,0.0,R,True,insitu,0.006325135368605905
+known_broader,1.0,R,True,insitu,0.009338285257744272
+known_broader,10.0,R,True,insitu,0.03140468632842208
+empirical_M5V,0.3,R,True,insitu,0.0018774003521498939
+empirical_M5V,3.0,R,True,insitu,0.0020632901077929366
+empirical_M5V,10.0,R,True,insitu,0.002665215217569572
+known_broader,0.0,Z,True,insitu,0.003961551722160395
+known_broader,1.0,Z,True,insitu,0.004637254487533604
+known_broader,10.0,Z,True,insitu,0.015975548664658445
+empirical_M5V,0.3,Z,True,insitu,0.001157985555530927
+empirical_M5V,3.0,Z,True,insitu,0.001544239443000306
+empirical_M5V,10.0,Z,True,insitu,0.0023411395203004615

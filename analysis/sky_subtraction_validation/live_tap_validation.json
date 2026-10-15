@@ -1,0 +1,9 @@
+{
+  "expnum": 12630,
+  "service": "https://gaia.ari.uni-heidelberg.de/tap",
+  "n_source_matches": 23497,
+  "fiber_count": 1944,
+  "source_counts_match_cache": true,
+  "gaia_flux_matches_cache": true,
+  "query": "SELECT f.expnum, f.fiberid, g.source_id, g.ra, g.dec,\n       g.phot_g_mean_mag, g.phot_g_mean_flux_over_error\nFROM TAP_UPLOAD.fibers AS f\nJOIN gaiadr3.gaia_source AS g\n  ON 1=CONTAINS(\n      POINT('ICRS', g.ra, g.dec),\n      CIRCLE('ICRS', f.ra, f.dec, 0.004902777778))"
+}

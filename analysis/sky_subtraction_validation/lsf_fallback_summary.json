@@ -1,0 +1,124 @@
+[
+  {
+    "expnum": 3469,
+    "science": 1801,
+    "processed": 1754,
+    "channels": {
+      "R": {
+        "insitu": 0,
+        "survey": 1754,
+        "invalid": 0,
+        "reasons": {
+          "line_information": 1754
+        }
+      },
+      "Z": {
+        "insitu": 1503,
+        "survey": 251,
+        "invalid": 0,
+        "reasons": {
+          "line_information": 15,
+          "profile_guard": 236
+        }
+      }
+    },
+    "survey_either_channel": 1754
+  },
+  {
+    "expnum": 12630,
+    "science": 1801,
+    "processed": 1754,
+    "channels": {
+      "R": {
+        "insitu": 1341,
+        "survey": 413,
+        "invalid": 0,
+        "reasons": {
+          "line_information": 412,
+          "profile_guard": 1
+        }
+      },
+      "Z": {
+        "insitu": 1744,
+        "survey": 10,
+        "invalid": 0,
+        "reasons": {
+          "line_information": 10
+        }
+      }
+    },
+    "survey_either_channel": 413
+  },
+  {
+    "expnum": 16819,
+    "science": 1801,
+    "processed": 1754,
+    "channels": {
+      "R": {
+        "insitu": 0,
+        "survey": 1754,
+        "invalid": 0,
+        "reasons": {
+          "line_information": 1754
+        }
+      },
+      "Z": {
+        "insitu": 1746,
+        "survey": 8,
+        "invalid": 0,
+        "reasons": {
+          "line_information": 8
+        }
+      }
+    },
+    "survey_either_channel": 1754
+  },
+  {
+    "expnum": 44808,
+    "science": 1801,
+    "processed": 1754,
+    "channels": {
+      "R": {
+        "insitu": 0,
+        "survey": 1754,
+        "invalid": 0,
+        "reasons": {
+          "line_information": 1754
+        }
+      },
+      "Z": {
+        "insitu": 1746,
+        "survey": 8,
+        "invalid": 0,
+        "reasons": {
+          "line_information": 8
+        }
+      }
+    },
+    "survey_either_channel": 1754
+  },
+  {
+    "expnum": 59750,
+    "science": 1801,
+    "processed": 1754,
+    "channels": {
+      "R": {
+        "insitu": 0,
+        "survey": 1754,
+        "invalid": 0,
+        "reasons": {
+          "line_information": 1754
+        }
+      },
+      "Z": {
+        "insitu": 1743,
+        "survey": 11,
+        "invalid": 0,
+        "reasons": {
+          "line_information": 11
+        }
+      }
+    },
+    "survey_either_channel": 1754
+  }
+]

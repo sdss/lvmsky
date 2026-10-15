@@ -1,0 +1,162 @@
+[
+  {
+    "expnum": 3469,
+    "purpose": "Stellar Milky Way field (M24)",
+    "input": "/data/sas/sdsswork/lvm/spectro/redux/1.3.2/0011XX/11111/60177/lvmCFrame-00003469.fits",
+    "output": "/data/sas/sdsswork/lvm/spectro/redux/1.3.2/0011XX/11111/60177/lvmSFrame-skyml-00003469.fits",
+    "drp": "/data/sas/sdsswork/lvm/spectro/redux/1.3.2/0011XX/11111/60177/lvmSFrame-00003469.fits",
+    "n_science_fibers": 1754,
+    "selected_counts": {
+      "Sci": 50,
+      "SkyE": 33,
+      "SkyW": 30
+    },
+    "runtime_seconds": 342.77152058808133,
+    "roundtrip_max_abs": 4.336808689942018e-19,
+    "component_max_abs": 1.09364857508086e-19,
+    "ml_reliability": 0,
+    "oh_accepted": true,
+    "oh_reason": "",
+    "input_sha256": "8033305f2bc8b7db8220c8d2245c0722bc2f2609962dd4eabe6669488be2526d",
+    "model_sha256": "0e7d94f0daa8cd63379e1611c087c6e430e2d75f3fba7f79ad90f1e4b29014a0",
+    "code_sha256": {
+      "skysub/sky_subtraction/io.py": "e81b3bcb3957ff30b2567c16abf83fd3cd800fc4a0f183acdbd49ba99f32acef",
+      "skysub/sky_subtraction/fiber_lsf.py": "6f6ffb7ac372e582b7ad8ae8b8bb8fa9e1efd6fb248785fcda030a1813b00b32",
+      "skysub/sky_subtraction/__main__.py": "f88c2c508738a82be5c7da2584f1bc22b8a23806202259f5fb154aa104dfe6b8",
+      "skysub/sky_subtraction/pipeline.py": "c3440357ee1d989fd7c0bca3509d586bbe5070ea9a7c9794fc9f0769c4ae7e04",
+      "skysub/sky_subtraction/__init__.py": "595fb1978a84dc094a3a2e62c1098581b5f1bd2710d67a5ed9f73c0440378d80",
+      "skysub/decompose_parallel.py": "bb376cb9b9c9112093ed1705076ba4499dc6e1a6fc762e92f53dd6dabe2aecaf"
+    },
+    "gaia_mode": "aggregate cache",
+    "moon_alt": -11.1825,
+    "moon_fli": 0.1856
+  },
+  {
+    "expnum": 12630,
+    "purpose": "Moon-down comparison field",
+    "input": "/data/sas/sdsswork/lvm/spectro/redux/1.3.2/1046XX/1046750/60356/lvmCFrame-00012630.fits",
+    "output": "/data/sas/sdsswork/lvm/spectro/redux/1.3.2/1046XX/1046750/60356/lvmSFrame-skyml-00012630.fits",
+    "drp": "/data/sas/sdsswork/lvm/spectro/redux/1.3.2/1046XX/1046750/60356/lvmSFrame-00012630.fits",
+    "n_science_fibers": 1754,
+    "selected_counts": {
+      "Sci": 50,
+      "SkyE": 43,
+      "SkyW": 57
+    },
+    "runtime_seconds": 292.52136107510887,
+    "roundtrip_max_abs": 1.7338764430295528e-18,
+    "component_max_abs": 8.555032767268433e-20,
+    "ml_reliability": 0,
+    "oh_accepted": true,
+    "oh_reason": "",
+    "input_sha256": "298f3bf53a5954d6e21f922023d89f293828beda49c0f146257354b920fd6a98",
+    "model_sha256": "0e7d94f0daa8cd63379e1611c087c6e430e2d75f3fba7f79ad90f1e4b29014a0",
+    "code_sha256": {
+      "skysub/sky_subtraction/io.py": "e81b3bcb3957ff30b2567c16abf83fd3cd800fc4a0f183acdbd49ba99f32acef",
+      "skysub/sky_subtraction/fiber_lsf.py": "6f6ffb7ac372e582b7ad8ae8b8bb8fa9e1efd6fb248785fcda030a1813b00b32",
+      "skysub/sky_subtraction/__main__.py": "f88c2c508738a82be5c7da2584f1bc22b8a23806202259f5fb154aa104dfe6b8",
+      "skysub/sky_subtraction/pipeline.py": "9ede6dc5d782a4ce2739330cd1e92c931cc91724b478047ed14b32a8a0d4ffaf",
+      "skysub/sky_subtraction/__init__.py": "595fb1978a84dc094a3a2e62c1098581b5f1bd2710d67a5ed9f73c0440378d80",
+      "skysub/decompose_parallel.py": "bb376cb9b9c9112093ed1705076ba4499dc6e1a6fc762e92f53dd6dabe2aecaf"
+    },
+    "gaia_mode": "aggregate cache",
+    "moon_alt": -33.0039,
+    "moon_fli": 0.4551
+  },
+  {
+    "expnum": 16819,
+    "purpose": "Nearly full moon; known unmasked artifact",
+    "input": "/data/sas/sdsswork/lvm/spectro/redux/1.3.2/1050XX/1050184/60423/lvmCFrame-00016819.fits",
+    "output": "/data/sas/sdsswork/lvm/spectro/redux/1.3.2/1050XX/1050184/60423/lvmSFrame-skyml-00016819.fits",
+    "drp": "/data/sas/sdsswork/lvm/spectro/redux/1.3.2/1050XX/1050184/60423/lvmSFrame-00016819.fits",
+    "n_science_fibers": 1754,
+    "selected_counts": {
+      "Sci": 295,
+      "SkyE": 57,
+      "SkyW": 50
+    },
+    "runtime_seconds": 300.98800366185606,
+    "roundtrip_max_abs": 2.168404344971009e-19,
+    "component_max_abs": 2.836981346873119e-19,
+    "ml_reliability": 0,
+    "oh_accepted": true,
+    "oh_reason": "",
+    "input_sha256": "c0e5360c96ab225dae3636e9962f6f5817e5830cc7f4a645c9f05323a4d6cd6d",
+    "model_sha256": "0e7d94f0daa8cd63379e1611c087c6e430e2d75f3fba7f79ad90f1e4b29014a0",
+    "code_sha256": {
+      "skysub/sky_subtraction/io.py": "e81b3bcb3957ff30b2567c16abf83fd3cd800fc4a0f183acdbd49ba99f32acef",
+      "skysub/sky_subtraction/fiber_lsf.py": "6f6ffb7ac372e582b7ad8ae8b8bb8fa9e1efd6fb248785fcda030a1813b00b32",
+      "skysub/sky_subtraction/__main__.py": "f88c2c508738a82be5c7da2584f1bc22b8a23806202259f5fb154aa104dfe6b8",
+      "skysub/sky_subtraction/pipeline.py": "c3440357ee1d989fd7c0bca3509d586bbe5070ea9a7c9794fc9f0769c4ae7e04",
+      "skysub/sky_subtraction/__init__.py": "595fb1978a84dc094a3a2e62c1098581b5f1bd2710d67a5ed9f73c0440378d80",
+      "skysub/decompose_parallel.py": "bb376cb9b9c9112093ed1705076ba4499dc6e1a6fc762e92f53dd6dabe2aecaf"
+    },
+    "gaia_mode": "aggregate cache",
+    "moon_alt": 67.9582,
+    "moon_fli": 0.9938
+  },
+  {
+    "expnum": 44808,
+    "purpose": "Nearly full moon; known contaminated fiber",
+    "input": "/data/sas/sdsswork/lvm/spectro/redux/1.3.2/1030XX/1030046/60898/lvmCFrame-00044808.fits",
+    "output": "/data/sas/sdsswork/lvm/spectro/redux/1.3.2/1030XX/1030046/60898/lvmSFrame-skyml-00044808.fits",
+    "drp": "/data/sas/sdsswork/lvm/spectro/redux/1.3.2/1030XX/1030046/60898/lvmSFrame-00044808.fits",
+    "n_science_fibers": 1754,
+    "selected_counts": {
+      "Sci": 50,
+      "SkyE": 46,
+      "SkyW": 21
+    },
+    "runtime_seconds": 308.19720062916167,
+    "roundtrip_max_abs": 1.7313353441877899e-18,
+    "component_max_abs": 1.1011428314305904e-19,
+    "ml_reliability": 0,
+    "oh_accepted": true,
+    "oh_reason": "",
+    "input_sha256": "2ce6cae079fc7a25783394c1373f79733202f5855ad915d4bac9c234323ab23b",
+    "model_sha256": "0e7d94f0daa8cd63379e1611c087c6e430e2d75f3fba7f79ad90f1e4b29014a0",
+    "code_sha256": {
+      "skysub/sky_subtraction/io.py": "e81b3bcb3957ff30b2567c16abf83fd3cd800fc4a0f183acdbd49ba99f32acef",
+      "skysub/sky_subtraction/fiber_lsf.py": "6f6ffb7ac372e582b7ad8ae8b8bb8fa9e1efd6fb248785fcda030a1813b00b32",
+      "skysub/sky_subtraction/__main__.py": "f88c2c508738a82be5c7da2584f1bc22b8a23806202259f5fb154aa104dfe6b8",
+      "skysub/sky_subtraction/pipeline.py": "c3440357ee1d989fd7c0bca3509d586bbe5070ea9a7c9794fc9f0769c4ae7e04",
+      "skysub/sky_subtraction/__init__.py": "595fb1978a84dc094a3a2e62c1098581b5f1bd2710d67a5ed9f73c0440378d80",
+      "skysub/decompose_parallel.py": "bb376cb9b9c9112093ed1705076ba4499dc6e1a6fc762e92f53dd6dabe2aecaf"
+    },
+    "gaia_mode": "aggregate cache",
+    "moon_alt": 65.3094,
+    "moon_fli": 0.9548
+  },
+  {
+    "expnum": 59750,
+    "purpose": "Later nearly full-moon exposure",
+    "input": "/data/sas/sdsswork/lvm/spectro/redux/1.3.2/1038XX/1038686/61192/lvmCFrame-00059750.fits",
+    "output": "/data/sas/sdsswork/lvm/spectro/redux/1.3.2/1038XX/1038686/61192/lvmSFrame-skyml-00059750.fits",
+    "drp": "/data/sas/sdsswork/lvm/spectro/redux/1.3.2/1038XX/1038686/61192/lvmSFrame-00059750.fits",
+    "n_science_fibers": 1754,
+    "selected_counts": {
+      "Sci": 1071,
+      "SkyE": 57,
+      "SkyW": 49
+    },
+    "runtime_seconds": 312.3906361940317,
+    "roundtrip_max_abs": 3.3203691532368573e-19,
+    "component_max_abs": 1.0842021724855044e-19,
+    "ml_reliability": 0,
+    "oh_accepted": false,
+    "oh_reason": "Median OH correction produces invalid line populations",
+    "input_sha256": "410dd7b3b29f56557e4f6bc85dfbf7202221ea7771f93d2317ef82193fbb096d",
+    "model_sha256": "0e7d94f0daa8cd63379e1611c087c6e430e2d75f3fba7f79ad90f1e4b29014a0",
+    "code_sha256": {
+      "skysub/sky_subtraction/io.py": "e81b3bcb3957ff30b2567c16abf83fd3cd800fc4a0f183acdbd49ba99f32acef",
+      "skysub/sky_subtraction/fiber_lsf.py": "6f6ffb7ac372e582b7ad8ae8b8bb8fa9e1efd6fb248785fcda030a1813b00b32",
+      "skysub/sky_subtraction/__main__.py": "f88c2c508738a82be5c7da2584f1bc22b8a23806202259f5fb154aa104dfe6b8",
+      "skysub/sky_subtraction/pipeline.py": "c0c29af655b4c5c6ad43b74f3b8705b3eb7f524acde891a6b56972f85c2da69c",
+      "skysub/sky_subtraction/__init__.py": "595fb1978a84dc094a3a2e62c1098581b5f1bd2710d67a5ed9f73c0440378d80",
+      "skysub/decompose_parallel.py": "bb376cb9b9c9112093ed1705076ba4499dc6e1a6fc762e92f53dd6dabe2aecaf"
+    },
+    "gaia_mode": "aggregate cache",
+    "moon_alt": 37.6085,
+    "moon_fli": 0.9934
+  }
+]

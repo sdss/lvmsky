@@ -1,0 +1,1802 @@
+[
+  {
+    "expnum": 3469,
+    "fiberid": 719,
+    "input_row": 718,
+    "selection": "Lowest available fit residual",
+    "ratio": 0.23149290389663035,
+    "gaia_g_flux": 2.9792144132537074e-15,
+    "fit_rms": {
+      "R": 0.8407840770115299,
+      "Z": 0.893333538555819
+    },
+    "sharpness": 11.119477359206622,
+    "sharp_wave": 5577.5,
+    "source_contrast": {
+      "R": 37.750610847183054,
+      "Z": 98.18933065936122
+    },
+    "observed_contrast": {
+      "R": 11.775124460581583,
+      "Z": 33.51356471157881
+    },
+    "qa": {
+      "R": {
+        "accepted": false,
+        "reason": "line_information",
+        "counts": [
+          1,
+          0,
+          1,
+          5
+        ]
+      },
+      "Z": {
+        "accepted": true,
+        "reason": "insitu",
+        "counts": [
+          16,
+          15,
+          18,
+          20
+        ]
+      }
+    },
+    "page": "insitu_fit_3469_719.html"
+  },
+  {
+    "expnum": 3469,
+    "fiberid": 168,
+    "input_row": 167,
+    "selection": "Highest summed Gaia stellar flux",
+    "ratio": 76.41211328903229,
+    "gaia_g_flux": 2.406011033217362e-12,
+    "fit_rms": {
+      "R": 0.9780593480738636,
+      "Z": 1.2445516548028297
+    },
+    "sharpness": 12.733190088516196,
+    "sharp_wave": 5577.5,
+    "source_contrast": {
+      "R": 6.025381267084339,
+      "Z": 7.7125130465319165
+    },
+    "observed_contrast": {
+      "R": 3.622871339365683,
+      "Z": 6.365412904448404
+    },
+    "qa": {
+      "R": {
+        "accepted": false,
+        "reason": "line_information",
+        "counts": [
+          1,
+          0,
+          3,
+          6
+        ]
+      },
+      "Z": {
+        "accepted": true,
+        "reason": "insitu",
+        "counts": [
+          15,
+          11,
+          12,
+          13
+        ]
+      }
+    },
+    "page": "insitu_fit_3469_168.html"
+  },
+  {
+    "expnum": 3469,
+    "fiberid": 383,
+    "input_row": 382,
+    "selection": "Sharp-input-feature stress test",
+    "ratio": 0.1338227399237647,
+    "gaia_g_flux": 1.8174719176780415e-15,
+    "fit_rms": {
+      "R": 1.0394888150850112,
+      "Z": 1.0150764129455077
+    },
+    "sharpness": 69.9246378046376,
+    "sharp_wave": 3998.5,
+    "source_contrast": {
+      "R": 10.883715492977716,
+      "Z": 67.72957342223759
+    },
+    "observed_contrast": {
+      "R": 6.797397773935914,
+      "Z": 35.58197683668646
+    },
+    "qa": {
+      "R": {
+        "accepted": false,
+        "reason": "line_information",
+        "counts": [
+          1,
+          0,
+          4,
+          6
+        ]
+      },
+      "Z": {
+        "accepted": false,
+        "reason": "profile_guard",
+        "counts": [
+          17,
+          16,
+          20,
+          21
+        ]
+      }
+    },
+    "page": "insitu_fit_3469_383.html"
+  },
+  {
+    "expnum": 3469,
+    "fiberid": 169,
+    "input_row": 168,
+    "selection": "Large-fit-residual stress test",
+    "ratio": 0.0022511525013392364,
+    "gaia_g_flux": 5.118162592161217e-15,
+    "fit_rms": {
+      "R": 2.468402450407955,
+      "Z": 8.188157626822173
+    },
+    "sharpness": 9.20480853962616,
+    "sharp_wave": 5577.5,
+    "source_contrast": {
+      "R": null,
+      "Z": 0.12509893461555202
+    },
+    "observed_contrast": {
+      "R": null,
+      "Z": 0.13891220179706104
+    },
+    "qa": {
+      "R": {
+        "accepted": false,
+        "reason": "line_information",
+        "counts": [
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "Z": {
+        "accepted": false,
+        "reason": "line_information",
+        "counts": [
+          0,
+          0,
+          0,
+          0
+        ]
+      }
+    },
+    "page": "insitu_fit_3469_169.html"
+  },
+  {
+    "expnum": 3469,
+    "fiberid": 1855,
+    "input_row": 1854,
+    "selection": "Survey-fallback example",
+    "ratio": 1.004798153962071,
+    "gaia_g_flux": 4.686914888134227e-13,
+    "fit_rms": {
+      "R": 1.3922179669382144,
+      "Z": 2.5043187944622436
+    },
+    "sharpness": 10.585555423327287,
+    "sharp_wave": 5577.0,
+    "source_contrast": {
+      "R": 0.14522273170866476,
+      "Z": 0.9764342420883159
+    },
+    "observed_contrast": {
+      "R": 0.13766301740810144,
+      "Z": 0.9403286406244104
+    },
+    "qa": {
+      "R": {
+        "accepted": false,
+        "reason": "line_information",
+        "counts": [
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "Z": {
+        "accepted": false,
+        "reason": "line_information",
+        "counts": [
+          0,
+          0,
+          0,
+          2
+        ]
+      }
+    },
+    "page": "insitu_fit_3469_1855.html"
+  },
+  {
+    "expnum": 3469,
+    "fiberid": 102,
+    "input_row": 101,
+    "selection": "Additional adopted in-situ example",
+    "ratio": 0.04129365145399074,
+    "gaia_g_flux": 5.101750684241613e-16,
+    "fit_rms": {
+      "R": 0.8937709692340434,
+      "Z": 0.8650121068354526
+    },
+    "sharpness": 10.708132844471393,
+    "sharp_wave": 5577.0,
+    "source_contrast": {
+      "R": 18.63605882519556,
+      "Z": 75.72705030706503
+    },
+    "observed_contrast": {
+      "R": 8.36842948386677,
+      "Z": 37.33276763718009
+    },
+    "qa": {
+      "R": {
+        "accepted": false,
+        "reason": "line_information",
+        "counts": [
+          1,
+          0,
+          1,
+          6
+        ]
+      },
+      "Z": {
+        "accepted": true,
+        "reason": "insitu",
+        "counts": [
+          16,
+          13,
+          18,
+          18
+        ]
+      }
+    },
+    "page": "insitu_fit_3469_102.html"
+  },
+  {
+    "expnum": 3469,
+    "fiberid": 717,
+    "input_row": 716,
+    "selection": "Additional adopted in-situ example",
+    "ratio": 0.06688379785005565,
+    "gaia_g_flux": 9.930332102675874e-16,
+    "fit_rms": {
+      "R": 0.8776751797598477,
+      "Z": 0.8943311006540657
+    },
+    "sharpness": 11.803683892925404,
+    "sharp_wave": 5577.5,
+    "source_contrast": {
+      "R": 18.832985341687408,
+      "Z": 89.47329860226282
+    },
+    "observed_contrast": {
+      "R": 11.534273560071767,
+      "Z": 31.642719158893055
+    },
+    "qa": {
+      "R": {
+        "accepted": false,
+        "reason": "line_information",
+        "counts": [
+          1,
+          0,
+          2,
+          5
+        ]
+      },
+      "Z": {
+        "accepted": true,
+        "reason": "insitu",
+        "counts": [
+          17,
+          15,
+          18,
+          21
+        ]
+      }
+    },
+    "page": "insitu_fit_3469_717.html"
+  },
+  {
+    "expnum": 3469,
+    "fiberid": 769,
+    "input_row": 768,
+    "selection": "Additional adopted in-situ example",
+    "ratio": 0.06931653106051942,
+    "gaia_g_flux": 8.023896412696405e-16,
+    "fit_rms": {
+      "R": 0.8629409733814543,
+      "Z": 0.9008508323296636
+    },
+    "sharpness": 7.459277245684939,
+    "sharp_wave": 5578.0,
+    "source_contrast": {
+      "R": 29.317685976450203,
+      "Z": 205.33926945448218
+    },
+    "observed_contrast": {
+      "R": 13.843158879644301,
+      "Z": 45.24948649099187
+    },
+    "qa": {
+      "R": {
+        "accepted": false,
+        "reason": "line_information",
+        "counts": [
+          1,
+          0,
+          2,
+          6
+        ]
+      },
+      "Z": {
+        "accepted": true,
+        "reason": "insitu",
+        "counts": [
+          17,
+          15,
+          17,
+          21
+        ]
+      }
+    },
+    "page": "insitu_fit_3469_769.html"
+  },
+  {
+    "expnum": 12630,
+    "fiberid": 1177,
+    "input_row": 1176,
+    "selection": "Low-residual control",
+    "ratio": 0.005844883885728528,
+    "gaia_g_flux": 5.1954268433167126e-17,
+    "fit_rms": {
+      "R": 1.0170692328809705,
+      "Z": 1.1461664743602995
+    },
+    "sharpness": 44.99129690300637,
+    "sharp_wave": 5577.5,
+    "source_contrast": {
+      "R": 59.45146521296773,
+      "Z": 214.99689843293137
+    },
+    "observed_contrast": {
+      "R": 8.400143088019853,
+      "Z": 51.029446395133164
+    },
+    "qa": {
+      "R": {
+        "accepted": true,
+        "reason": "insitu",
+        "counts": [
+          6,
+          10,
+          8,
+          8
+        ]
+      },
+      "Z": {
+        "accepted": true,
+        "reason": "insitu",
+        "counts": [
+          29,
+          17,
+          19,
+          23
+        ]
+      }
+    },
+    "page": "insitu_fit_12630_1177.html"
+  },
+  {
+    "expnum": 12630,
+    "fiberid": 549,
+    "input_row": 548,
+    "selection": "Highest summed Gaia stellar flux",
+    "ratio": 1.6185237346479417,
+    "gaia_g_flux": 9.095273370821653e-12,
+    "fit_rms": {
+      "R": 2.21518328090769,
+      "Z": 3.1162093593324944
+    },
+    "sharpness": 9.383374286164164,
+    "sharp_wave": 4723.0,
+    "source_contrast": {
+      "R": 0.018121861333378685,
+      "Z": 0.43001696201644285
+    },
+    "observed_contrast": {
+      "R": 0.018135528909196307,
+      "Z": 0.4211436080422824
+    },
+    "qa": {
+      "R": {
+        "accepted": false,
+        "reason": "line_information",
+        "counts": [
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "Z": {
+        "accepted": false,
+        "reason": "line_information",
+        "counts": [
+          0,
+          0,
+          0,
+          0
+        ]
+      }
+    },
+    "page": "insitu_fit_12630_549.html"
+  },
+  {
+    "expnum": 12630,
+    "fiberid": 20,
+    "input_row": 19,
+    "selection": "Sharp-input-feature stress test",
+    "ratio": 0.1112107834573835,
+    "gaia_g_flux": 1.059169102347572e-15,
+    "fit_rms": {
+      "R": 1.0113291471495613,
+      "Z": 1.0814644505879711
+    },
+    "sharpness": 52.46570362817843,
+    "sharp_wave": 5577.5,
+    "source_contrast": {
+      "R": 45.18813889318399,
+      "Z": 151.10942780511888
+    },
+    "observed_contrast": {
+      "R": 9.682292341396446,
+      "Z": 51.1742443850558
+    },
+    "qa": {
+      "R": {
+        "accepted": true,
+        "reason": "insitu",
+        "counts": [
+          4,
+          9,
+          9,
+          8
+        ]
+      },
+      "Z": {
+        "accepted": true,
+        "reason": "insitu",
+        "counts": [
+          30,
+          17,
+          19,
+          23
+        ]
+      }
+    },
+    "page": "insitu_fit_12630_20.html"
+  },
+  {
+    "expnum": 12630,
+    "fiberid": 85,
+    "input_row": 84,
+    "selection": "Large-fit-residual stress test",
+    "ratio": 0.3151749127732335,
+    "gaia_g_flux": 3.97851223305447e-15,
+    "fit_rms": {
+      "R": 1.0155913188360988,
+      "Z": 3.6862965891536605
+    },
+    "sharpness": 48.546268080040775,
+    "sharp_wave": 5577.5,
+    "source_contrast": {
+      "R": 28.482075176441494,
+      "Z": 207.58889003086603
+    },
+    "observed_contrast": {
+      "R": 5.581820300734327,
+      "Z": 31.75132344934431
+    },
+    "qa": {
+      "R": {
+        "accepted": false,
+        "reason": "line_information",
+        "counts": [
+          1,
+          8,
+          8,
+          8
+        ]
+      },
+      "Z": {
+        "accepted": true,
+        "reason": "insitu",
+        "counts": [
+          26,
+          15,
+          18,
+          19
+        ]
+      }
+    },
+    "page": "insitu_fit_12630_85.html"
+  },
+  {
+    "expnum": 12630,
+    "fiberid": 102,
+    "input_row": 101,
+    "selection": "Survey-fallback example",
+    "ratio": 0.005209781009699154,
+    "gaia_g_flux": 1.5755019486238082e-15,
+    "fit_rms": {
+      "R": 3.047249919010053,
+      "Z": 3.4796555626753425
+    },
+    "sharpness": 32.28831647072251,
+    "sharp_wave": 5577.5,
+    "source_contrast": {
+      "R": 0.15020363009920787,
+      "Z": 0.9481940729183977
+    },
+    "observed_contrast": {
+      "R": 0.14575331587652524,
+      "Z": 0.9356034661702001
+    },
+    "qa": {
+      "R": {
+        "accepted": false,
+        "reason": "line_information",
+        "counts": [
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "Z": {
+        "accepted": false,
+        "reason": "line_information",
+        "counts": [
+          0,
+          0,
+          0,
+          2
+        ]
+      }
+    },
+    "page": "insitu_fit_12630_102.html"
+  },
+  {
+    "expnum": 12630,
+    "fiberid": 657,
+    "input_row": 656,
+    "selection": "Additional adopted in-situ example",
+    "ratio": 0.18905528035056302,
+    "gaia_g_flux": 1.8521066642469023e-15,
+    "fit_rms": {
+      "R": 0.9603755116287382,
+      "Z": 0.9978909489556812
+    },
+    "sharpness": 37.19731567424537,
+    "sharp_wave": 5577.5,
+    "source_contrast": {
+      "R": 30.348938371952404,
+      "Z": 171.99384310846673
+    },
+    "observed_contrast": {
+      "R": 7.119223899938532,
+      "Z": 51.896942306788816
+    },
+    "qa": {
+      "R": {
+        "accepted": true,
+        "reason": "insitu",
+        "counts": [
+          2,
+          8,
+          9,
+          8
+        ]
+      },
+      "Z": {
+        "accepted": true,
+        "reason": "insitu",
+        "counts": [
+          27,
+          17,
+          19,
+          23
+        ]
+      }
+    },
+    "page": "insitu_fit_12630_657.html"
+  },
+  {
+    "expnum": 12630,
+    "fiberid": 667,
+    "input_row": 666,
+    "selection": "Additional adopted in-situ example",
+    "ratio": 0.05374890769844206,
+    "gaia_g_flux": 5.129582318652724e-16,
+    "fit_rms": {
+      "R": 0.9444205927218936,
+      "Z": 1.0131209773545558
+    },
+    "sharpness": 37.47108185104,
+    "sharp_wave": 5577.5,
+    "source_contrast": {
+      "R": 69.88125508857217,
+      "Z": 163.10168185850017
+    },
+    "observed_contrast": {
+      "R": 8.014939055901067,
+      "Z": 50.87004138068908
+    },
+    "qa": {
+      "R": {
+        "accepted": true,
+        "reason": "insitu",
+        "counts": [
+          3,
+          9,
+          9,
+          7
+        ]
+      },
+      "Z": {
+        "accepted": true,
+        "reason": "insitu",
+        "counts": [
+          29,
+          17,
+          18,
+          23
+        ]
+      }
+    },
+    "page": "insitu_fit_12630_667.html"
+  },
+  {
+    "expnum": 12630,
+    "fiberid": 674,
+    "input_row": 673,
+    "selection": "Additional adopted in-situ example",
+    "ratio": 0.39802625469022257,
+    "gaia_g_flux": 4.622717134543225e-15,
+    "fit_rms": {
+      "R": 0.9565766238633034,
+      "Z": 1.0177302250968538
+    },
+    "sharpness": 36.871438606953504,
+    "sharp_wave": 5577.5,
+    "source_contrast": {
+      "R": 37.23740735756213,
+      "Z": 133.41235548995232
+    },
+    "observed_contrast": {
+      "R": 5.9311603263405415,
+      "Z": 38.185808208558406
+    },
+    "qa": {
+      "R": {
+        "accepted": true,
+        "reason": "insitu",
+        "counts": [
+          2,
+          8,
+          8,
+          8
+        ]
+      },
+      "Z": {
+        "accepted": true,
+        "reason": "insitu",
+        "counts": [
+          27,
+          16,
+          19,
+          21
+        ]
+      }
+    },
+    "page": "insitu_fit_12630_674.html"
+  },
+  {
+    "expnum": 16819,
+    "fiberid": 102,
+    "input_row": 101,
+    "selection": "Lowest available fit residual",
+    "ratio": 0.01408263868297421,
+    "gaia_g_flux": 1.2853600424688558e-15,
+    "fit_rms": {
+      "R": 1.4830826669681165,
+      "Z": 2.4847598418803556
+    },
+    "sharpness": 64.70291013089019,
+    "sharp_wave": 5577.5,
+    "source_contrast": {
+      "R": 6.711816962710931,
+      "Z": 39.85123413261406
+    },
+    "observed_contrast": {
+      "R": 1.8888420688158254,
+      "Z": 19.854518458748103
+    },
+    "qa": {
+      "R": {
+        "accepted": false,
+        "reason": "line_information",
+        "counts": [
+          1,
+          0,
+          2,
+          6
+        ]
+      },
+      "Z": {
+        "accepted": true,
+        "reason": "insitu",
+        "counts": [
+          19,
+          14,
+          17,
+          23
+        ]
+      }
+    },
+    "page": "insitu_fit_16819_102.html"
+  },
+  {
+    "expnum": 16819,
+    "fiberid": 1435,
+    "input_row": 1434,
+    "selection": "Highest summed Gaia stellar flux",
+    "ratio": 1.2199993873645314,
+    "gaia_g_flux": 4.156520852582681e-12,
+    "fit_rms": {
+      "R": 7.1457530607265305,
+      "Z": 18.560906478556905
+    },
+    "sharpness": 36.886918571769684,
+    "sharp_wave": 5577.5,
+    "source_contrast": {
+      "R": null,
+      "Z": 0.3942445305387832
+    },
+    "observed_contrast": {
+      "R": null,
+      "Z": 0.38353901314900757
+    },
+    "qa": {
+      "R": {
+        "accepted": false,
+        "reason": "line_information",
+        "counts": [
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "Z": {
+        "accepted": false,
+        "reason": "line_information",
+        "counts": [
+          0,
+          0,
+          0,
+          0
+        ]
+      }
+    },
+    "page": "insitu_fit_16819_1435.html"
+  },
+  {
+    "expnum": 16819,
+    "fiberid": 220,
+    "input_row": 219,
+    "selection": "Sharp-input-feature stress test",
+    "ratio": 0.018605727572862808,
+    "gaia_g_flux": 1.6738585505615086e-15,
+    "fit_rms": {
+      "R": 1.7306377853054196,
+      "Z": 3.075936016345878
+    },
+    "sharpness": 87.09137624947277,
+    "sharp_wave": 5577.5,
+    "source_contrast": {
+      "R": 6.288701306604307,
+      "Z": 47.44150643842793
+    },
+    "observed_contrast": {
+      "R": 1.888260068326878,
+      "Z": 20.59081946614295
+    },
+    "qa": {
+      "R": {
+        "accepted": false,
+        "reason": "line_information",
+        "counts": [
+          1,
+          0,
+          1,
+          5
+        ]
+      },
+      "Z": {
+        "accepted": true,
+        "reason": "insitu",
+        "counts": [
+          19,
+          14,
+          17,
+          23
+        ]
+      }
+    },
+    "page": "insitu_fit_16819_220.html"
+  },
+  {
+    "expnum": 16819,
+    "fiberid": 46,
+    "input_row": 45,
+    "selection": "Large-fit-residual stress test",
+    "ratio": 0.9567737885936657,
+    "gaia_g_flux": 5.13514518048739e-13,
+    "fit_rms": {
+      "R": 4.917111394273112,
+      "Z": 11.662342249293756
+    },
+    "sharpness": 73.23653966819268,
+    "sharp_wave": 5577.5,
+    "source_contrast": {
+      "R": 0.01715774476465227,
+      "Z": 1.3256495268428172
+    },
+    "observed_contrast": {
+      "R": 0.010584131123762055,
+      "Z": 1.2391623406499948
+    },
+    "qa": {
+      "R": {
+        "accepted": false,
+        "reason": "line_information",
+        "counts": [
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "Z": {
+        "accepted": false,
+        "reason": "line_information",
+        "counts": [
+          0,
+          0,
+          0,
+          5
+        ]
+      }
+    },
+    "page": "insitu_fit_16819_46.html"
+  },
+  {
+    "expnum": 16819,
+    "fiberid": 1204,
+    "input_row": 1203,
+    "selection": "Survey-fallback example",
+    "ratio": 0.0017344049504929475,
+    "gaia_g_flux": 1.7487002603675632e-15,
+    "fit_rms": {
+      "R": 4.454141963248164,
+      "Z": 11.27496016359029
+    },
+    "sharpness": 54.721099491850076,
+    "sharp_wave": 5577.5,
+    "source_contrast": {
+      "R": 0.07121396890669886,
+      "Z": 1.0987999382611668
+    },
+    "observed_contrast": {
+      "R": 0.0592229006127547,
+      "Z": 1.0898681775603678
+    },
+    "qa": {
+      "R": {
+        "accepted": false,
+        "reason": "line_information",
+        "counts": [
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "Z": {
+        "accepted": false,
+        "reason": "line_information",
+        "counts": [
+          0,
+          0,
+          0,
+          2
+        ]
+      }
+    },
+    "page": "insitu_fit_16819_1204.html"
+  },
+  {
+    "expnum": 16819,
+    "fiberid": 1939,
+    "input_row": 1938,
+    "selection": "Additional adopted in-situ example",
+    "ratio": 0.0027820111004539586,
+    "gaia_g_flux": 2.340061783322444e-16,
+    "fit_rms": {
+      "R": 1.7078120864063715,
+      "Z": 2.5936687938197815
+    },
+    "sharpness": 69.87117114351764,
+    "sharp_wave": 5577.5,
+    "source_contrast": {
+      "R": 5.989714004789715,
+      "Z": 47.07602294635392
+    },
+    "observed_contrast": {
+      "R": 1.8439195244002597,
+      "Z": 21.529899115841427
+    },
+    "qa": {
+      "R": {
+        "accepted": false,
+        "reason": "line_information",
+        "counts": [
+          1,
+          0,
+          2,
+          6
+        ]
+      },
+      "Z": {
+        "accepted": true,
+        "reason": "insitu",
+        "counts": [
+          19,
+          14,
+          16,
+          23
+        ]
+      }
+    },
+    "page": "insitu_fit_16819_1939.html"
+  },
+  {
+    "expnum": 16819,
+    "fiberid": 1935,
+    "input_row": 1934,
+    "selection": "Additional adopted in-situ example",
+    "ratio": 0.014106228358069541,
+    "gaia_g_flux": 1.2012572879766653e-15,
+    "fit_rms": {
+      "R": 1.6254531372612553,
+      "Z": 2.6097768354627187
+    },
+    "sharpness": 69.95088066765321,
+    "sharp_wave": 5577.5,
+    "source_contrast": {
+      "R": 5.952183964726761,
+      "Z": 47.86595759598809
+    },
+    "observed_contrast": {
+      "R": 1.8169810629112486,
+      "Z": 22.326237012727695
+    },
+    "qa": {
+      "R": {
+        "accepted": false,
+        "reason": "line_information",
+        "counts": [
+          1,
+          0,
+          2,
+          6
+        ]
+      },
+      "Z": {
+        "accepted": true,
+        "reason": "insitu",
+        "counts": [
+          18,
+          13,
+          16,
+          23
+        ]
+      }
+    },
+    "page": "insitu_fit_16819_1935.html"
+  },
+  {
+    "expnum": 16819,
+    "fiberid": 1923,
+    "input_row": 1922,
+    "selection": "Additional adopted in-situ example",
+    "ratio": 0.004439806759639921,
+    "gaia_g_flux": 3.7731770632809743e-16,
+    "fit_rms": {
+      "R": 1.6315911268783783,
+      "Z": 2.627313751487179
+    },
+    "sharpness": 70.02356009144026,
+    "sharp_wave": 5577.5,
+    "source_contrast": {
+      "R": 5.983528526770225,
+      "Z": 50.3567100260537
+    },
+    "observed_contrast": {
+      "R": 1.8496498914604034,
+      "Z": 22.433196023414027
+    },
+    "qa": {
+      "R": {
+        "accepted": false,
+        "reason": "line_information",
+        "counts": [
+          1,
+          0,
+          2,
+          5
+        ]
+      },
+      "Z": {
+        "accepted": true,
+        "reason": "insitu",
+        "counts": [
+          18,
+          13,
+          17,
+          22
+        ]
+      }
+    },
+    "page": "insitu_fit_16819_1923.html"
+  },
+  {
+    "expnum": 44808,
+    "fiberid": 1318,
+    "input_row": 1317,
+    "selection": "Lowest available fit residual",
+    "ratio": 0.07037758943564262,
+    "gaia_g_flux": 4.526229518211836e-15,
+    "fit_rms": {
+      "R": 0.971826919592951,
+      "Z": 0.9767907188870454
+    },
+    "sharpness": 39.859445000910064,
+    "sharp_wave": 5577.5,
+    "source_contrast": {
+      "R": 3.9659239882941923,
+      "Z": 108.76293191090937
+    },
+    "observed_contrast": {
+      "R": 1.621977448771948,
+      "Z": 19.4993190652915
+    },
+    "qa": {
+      "R": {
+        "accepted": false,
+        "reason": "line_information",
+        "counts": [
+          0,
+          0,
+          1,
+          4
+        ]
+      },
+      "Z": {
+        "accepted": true,
+        "reason": "insitu",
+        "counts": [
+          19,
+          13,
+          16,
+          19
+        ]
+      }
+    },
+    "page": "insitu_fit_44808_1318.html"
+  },
+  {
+    "expnum": 44808,
+    "fiberid": 402,
+    "input_row": 401,
+    "selection": "Highest summed Gaia stellar flux",
+    "ratio": 1.36925803518061,
+    "gaia_g_flux": 3.2927095943291134e-11,
+    "fit_rms": {
+      "R": 14.650133544987767,
+      "Z": 14.645659613181438
+    },
+    "sharpness": 52.839136767636624,
+    "sharp_wave": 4402.5,
+    "source_contrast": {
+      "R": 0.0031616759801924564,
+      "Z": 0.0351110086257375
+    },
+    "observed_contrast": {
+      "R": 0.00310850799174146,
+      "Z": 0.03502242750053888
+    },
+    "qa": {
+      "R": {
+        "accepted": false,
+        "reason": "line_information",
+        "counts": [
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "Z": {
+        "accepted": false,
+        "reason": "line_information",
+        "counts": [
+          0,
+          0,
+          0,
+          0
+        ]
+      }
+    },
+    "page": "insitu_fit_44808_402.html"
+  },
+  {
+    "expnum": 44808,
+    "fiberid": 908,
+    "input_row": 907,
+    "selection": "Sharp-input-feature stress test",
+    "ratio": 0.010321707516244184,
+    "gaia_g_flux": 6.594587133188375e-16,
+    "fit_rms": {
+      "R": 0.9836026500642606,
+      "Z": 1.0387290376892158
+    },
+    "sharpness": 53.03262532488992,
+    "sharp_wave": 4317.0,
+    "source_contrast": {
+      "R": 5.034202762046568,
+      "Z": 138.1100921730647
+    },
+    "observed_contrast": {
+      "R": 1.754721649830735,
+      "Z": 22.062884189239583
+    },
+    "qa": {
+      "R": {
+        "accepted": false,
+        "reason": "line_information",
+        "counts": [
+          0,
+          0,
+          1,
+          5
+        ]
+      },
+      "Z": {
+        "accepted": true,
+        "reason": "insitu",
+        "counts": [
+          19,
+          13,
+          16,
+          21
+        ]
+      }
+    },
+    "page": "insitu_fit_44808_908.html"
+  },
+  {
+    "expnum": 44808,
+    "fiberid": 1070,
+    "input_row": 1069,
+    "selection": "Large-fit-residual stress test",
+    "ratio": 0.8126810798061721,
+    "gaia_g_flux": 3.014403981959235e-13,
+    "fit_rms": {
+      "R": 3.429489587988079,
+      "Z": 4.4351436104638315
+    },
+    "sharpness": 34.76543624647606,
+    "sharp_wave": 5577.5,
+    "source_contrast": {
+      "R": 0.24489825956748063,
+      "Z": 0.9192569073772363
+    },
+    "observed_contrast": {
+      "R": 0.17831842258028718,
+      "Z": 0.8239738024268978
+    },
+    "qa": {
+      "R": {
+        "accepted": false,
+        "reason": "line_information",
+        "counts": [
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "Z": {
+        "accepted": false,
+        "reason": "line_information",
+        "counts": [
+          0,
+          0,
+          0,
+          2
+        ]
+      }
+    },
+    "page": "insitu_fit_44808_1070.html"
+  },
+  {
+    "expnum": 44808,
+    "fiberid": 1187,
+    "input_row": 1186,
+    "selection": "Survey-fallback example",
+    "ratio": 0.8476099836834995,
+    "gaia_g_flux": 2.5841865644856203e-13,
+    "fit_rms": {
+      "R": 2.982685307904426,
+      "Z": 4.041156280291219
+    },
+    "sharpness": 35.08676971743765,
+    "sharp_wave": 5577.5,
+    "source_contrast": {
+      "R": 0.3275405001957424,
+      "Z": 0.9299375778928219
+    },
+    "observed_contrast": {
+      "R": 0.26685357123881137,
+      "Z": 0.8910657941203884
+    },
+    "qa": {
+      "R": {
+        "accepted": false,
+        "reason": "line_information",
+        "counts": [
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "Z": {
+        "accepted": false,
+        "reason": "line_information",
+        "counts": [
+          0,
+          0,
+          0,
+          2
+        ]
+      }
+    },
+    "page": "insitu_fit_44808_1187.html"
+  },
+  {
+    "expnum": 44808,
+    "fiberid": 712,
+    "input_row": 711,
+    "selection": "Additional adopted in-situ example",
+    "ratio": 0.04980116862090793,
+    "gaia_g_flux": 3.2452308167537967e-15,
+    "fit_rms": {
+      "R": 0.9660549329893423,
+      "Z": 0.9897684988702017
+    },
+    "sharpness": 34.274367633261434,
+    "sharp_wave": 5577.5,
+    "source_contrast": {
+      "R": 4.036755280580561,
+      "Z": 99.23409748820409
+    },
+    "observed_contrast": {
+      "R": 1.6072111690482715,
+      "Z": 20.327598999328288
+    },
+    "qa": {
+      "R": {
+        "accepted": false,
+        "reason": "line_information",
+        "counts": [
+          0,
+          0,
+          1,
+          5
+        ]
+      },
+      "Z": {
+        "accepted": true,
+        "reason": "insitu",
+        "counts": [
+          20,
+          13,
+          15,
+          21
+        ]
+      }
+    },
+    "page": "insitu_fit_44808_712.html"
+  },
+  {
+    "expnum": 44808,
+    "fiberid": 670,
+    "input_row": 669,
+    "selection": "Additional adopted in-situ example",
+    "ratio": 0.010608463995150419,
+    "gaia_g_flux": 6.719689486445233e-16,
+    "fit_rms": {
+      "R": 0.9785312477412571,
+      "Z": 0.9928274586702462
+    },
+    "sharpness": 34.25850247742677,
+    "sharp_wave": 5577.5,
+    "source_contrast": {
+      "R": 5.18461751129244,
+      "Z": 155.9829549206727
+    },
+    "observed_contrast": {
+      "R": 1.7849732172341506,
+      "Z": 21.962443676577394
+    },
+    "qa": {
+      "R": {
+        "accepted": false,
+        "reason": "line_information",
+        "counts": [
+          0,
+          0,
+          1,
+          5
+        ]
+      },
+      "Z": {
+        "accepted": true,
+        "reason": "insitu",
+        "counts": [
+          19,
+          13,
+          17,
+          20
+        ]
+      }
+    },
+    "page": "insitu_fit_44808_670.html"
+  },
+  {
+    "expnum": 44808,
+    "fiberid": 1319,
+    "input_row": 1318,
+    "selection": "Additional adopted in-situ example",
+    "ratio": 0.19691452876968635,
+    "gaia_g_flux": 1.4198475022421275e-14,
+    "fit_rms": {
+      "R": 0.9929279699452934,
+      "Z": 0.9903590756334111
+    },
+    "sharpness": 39.409672427150234,
+    "sharp_wave": 5577.5,
+    "source_contrast": {
+      "R": 2.914915805980871,
+      "Z": 56.704229894516764
+    },
+    "observed_contrast": {
+      "R": 1.3206357489202154,
+      "Z": 16.825258267189948
+    },
+    "qa": {
+      "R": {
+        "accepted": false,
+        "reason": "line_information",
+        "counts": [
+          0,
+          0,
+          1,
+          4
+        ]
+      },
+      "Z": {
+        "accepted": true,
+        "reason": "insitu",
+        "counts": [
+          14,
+          13,
+          15,
+          20
+        ]
+      }
+    },
+    "page": "insitu_fit_44808_1319.html"
+  },
+  {
+    "expnum": 59750,
+    "fiberid": 1752,
+    "input_row": 1751,
+    "selection": "Lowest available fit residual",
+    "ratio": 0.0078092946821244034,
+    "gaia_g_flux": 9.848845140218033e-16,
+    "fit_rms": {
+      "R": 1.1025314406799105,
+      "Z": 1.1505898669266732
+    },
+    "sharpness": 38.224095935265,
+    "sharp_wave": 5577.5,
+    "source_contrast": {
+      "R": 1.2819914950390703,
+      "Z": 52.58142948214762
+    },
+    "observed_contrast": {
+      "R": 0.6023103673934714,
+      "Z": 7.902135527572579
+    },
+    "qa": {
+      "R": {
+        "accepted": false,
+        "reason": "line_information",
+        "counts": [
+          0,
+          0,
+          0,
+          1
+        ]
+      },
+      "Z": {
+        "accepted": true,
+        "reason": "insitu",
+        "counts": [
+          7,
+          8,
+          12,
+          20
+        ]
+      }
+    },
+    "page": "insitu_fit_59750_1752.html"
+  },
+  {
+    "expnum": 59750,
+    "fiberid": 1447,
+    "input_row": 1446,
+    "selection": "Highest summed Gaia stellar flux",
+    "ratio": 0.8700217037356143,
+    "gaia_g_flux": 6.212351467342233e-13,
+    "fit_rms": {
+      "R": 1.274615271382881,
+      "Z": 1.5153758850813766
+    },
+    "sharpness": 32.48101722900297,
+    "sharp_wave": 5577.5,
+    "source_contrast": {
+      "R": 0.15169393707872358,
+      "Z": 2.762907017040981
+    },
+    "observed_contrast": {
+      "R": 0.12266994770570859,
+      "Z": 2.0446015308296013
+    },
+    "qa": {
+      "R": {
+        "accepted": false,
+        "reason": "line_information",
+        "counts": [
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "Z": {
+        "accepted": false,
+        "reason": "line_information",
+        "counts": [
+          0,
+          0,
+          3,
+          6
+        ]
+      }
+    },
+    "page": "insitu_fit_59750_1447.html"
+  },
+  {
+    "expnum": 59750,
+    "fiberid": 46,
+    "input_row": 45,
+    "selection": "Sharp-input-feature stress test",
+    "ratio": 0.0041807739463913226,
+    "gaia_g_flux": 5.843416336001744e-16,
+    "fit_rms": {
+      "R": 1.100569459676888,
+      "Z": 1.3295020623227465
+    },
+    "sharpness": 52.365968609467195,
+    "sharp_wave": 5577.5,
+    "source_contrast": {
+      "R": 1.3743331831760635,
+      "Z": 45.18417712323159
+    },
+    "observed_contrast": {
+      "R": 0.6227779522012479,
+      "Z": 8.087093268340965
+    },
+    "qa": {
+      "R": {
+        "accepted": false,
+        "reason": "line_information",
+        "counts": [
+          0,
+          0,
+          0,
+          1
+        ]
+      },
+      "Z": {
+        "accepted": true,
+        "reason": "insitu",
+        "counts": [
+          8,
+          8,
+          12,
+          20
+        ]
+      }
+    },
+    "page": "insitu_fit_59750_46.html"
+  },
+  {
+    "expnum": 59750,
+    "fiberid": 522,
+    "input_row": 521,
+    "selection": "Large-fit-residual stress test",
+    "ratio": 0.3021178266787418,
+    "gaia_g_flux": 4.5729205651025103e-14,
+    "fit_rms": {
+      "R": 1.1019600344448668,
+      "Z": 5.463182164557459
+    },
+    "sharpness": 47.799251967560544,
+    "sharp_wave": 5577.5,
+    "source_contrast": {
+      "R": 1.1889235460674976,
+      "Z": 47.30286826018186
+    },
+    "observed_contrast": {
+      "R": 0.5592229885901524,
+      "Z": 7.869157568864284
+    },
+    "qa": {
+      "R": {
+        "accepted": false,
+        "reason": "line_information",
+        "counts": [
+          0,
+          0,
+          0,
+          1
+        ]
+      },
+      "Z": {
+        "accepted": true,
+        "reason": "insitu",
+        "counts": [
+          7,
+          6,
+          10,
+          20
+        ]
+      }
+    },
+    "page": "insitu_fit_59750_522.html"
+  },
+  {
+    "expnum": 59750,
+    "fiberid": 1569,
+    "input_row": 1568,
+    "selection": "Survey-fallback example",
+    "ratio": 0.04406903453057509,
+    "gaia_g_flux": 5.869417245430074e-15,
+    "fit_rms": {
+      "R": 5.258663919407614,
+      "Z": 1.2218405442171594
+    },
+    "sharpness": 44.663223573883776,
+    "sharp_wave": 5577.5,
+    "source_contrast": {
+      "R": 1.3611533538720024,
+      "Z": 51.39840957259429
+    },
+    "observed_contrast": {
+      "R": 0.582656816193659,
+      "Z": 8.082299571420723
+    },
+    "qa": {
+      "R": {
+        "accepted": false,
+        "reason": "line_information",
+        "counts": [
+          0,
+          0,
+          0,
+          1
+        ]
+      },
+      "Z": {
+        "accepted": true,
+        "reason": "insitu",
+        "counts": [
+          7,
+          7,
+          12,
+          20
+        ]
+      }
+    },
+    "page": "insitu_fit_59750_1569.html"
+  },
+  {
+    "expnum": 59750,
+    "fiberid": 102,
+    "input_row": 101,
+    "selection": "Additional adopted in-situ example",
+    "ratio": 0.0032284796452217357,
+    "gaia_g_flux": 4.466889353487519e-16,
+    "fit_rms": {
+      "R": 1.052861136998917,
+      "Z": 1.159615201840862
+    },
+    "sharpness": 40.57608724443889,
+    "sharp_wave": 5577.5,
+    "source_contrast": {
+      "R": 1.6784981034002555,
+      "Z": 51.85213196024421
+    },
+    "observed_contrast": {
+      "R": 0.598129836012869,
+      "Z": 8.290604993067424
+    },
+    "qa": {
+      "R": {
+        "accepted": false,
+        "reason": "line_information",
+        "counts": [
+          0,
+          0,
+          0,
+          1
+        ]
+      },
+      "Z": {
+        "accepted": true,
+        "reason": "insitu",
+        "counts": [
+          7,
+          7,
+          12,
+          20
+        ]
+      }
+    },
+    "page": "insitu_fit_59750_102.html"
+  },
+  {
+    "expnum": 59750,
+    "fiberid": 1324,
+    "input_row": 1323,
+    "selection": "Additional adopted in-situ example",
+    "ratio": 0.121007646892412,
+    "gaia_g_flux": 1.649833182723135e-14,
+    "fit_rms": {
+      "R": 1.0914043312759174,
+      "Z": 1.1601647256818812
+    },
+    "sharpness": 44.59823559948879,
+    "sharp_wave": 5577.5,
+    "source_contrast": {
+      "R": 1.2900562646440006,
+      "Z": 59.31600516361897
+    },
+    "observed_contrast": {
+      "R": 0.5519764892257175,
+      "Z": 7.588443510523668
+    },
+    "qa": {
+      "R": {
+        "accepted": false,
+        "reason": "line_information",
+        "counts": [
+          0,
+          0,
+          0,
+          1
+        ]
+      },
+      "Z": {
+        "accepted": true,
+        "reason": "insitu",
+        "counts": [
+          6,
+          6,
+          12,
+          20
+        ]
+      }
+    },
+    "page": "insitu_fit_59750_1324.html"
+  },
+  {
+    "expnum": 59750,
+    "fiberid": 1299,
+    "input_row": 1298,
+    "selection": "Additional adopted in-situ example",
+    "ratio": 0.009743699377058913,
+    "gaia_g_flux": 1.2869578498743935e-15,
+    "fit_rms": {
+      "R": 1.0825399573632064,
+      "Z": 1.1762158555100655
+    },
+    "sharpness": 45.01376227059616,
+    "sharp_wave": 5577.5,
+    "source_contrast": {
+      "R": 1.3797233172863304,
+      "Z": 53.00263569259721
+    },
+    "observed_contrast": {
+      "R": 0.6169188035725166,
+      "Z": 7.689064358453588
+    },
+    "qa": {
+      "R": {
+        "accepted": false,
+        "reason": "line_information",
+        "counts": [
+          0,
+          0,
+          0,
+          1
+        ]
+      },
+      "Z": {
+        "accepted": true,
+        "reason": "insitu",
+        "counts": [
+          7,
+          6,
+          12,
+          20
+        ]
+      }
+    },
+    "page": "insitu_fit_59750_1299.html"
+  }
+]

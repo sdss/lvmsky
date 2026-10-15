@@ -1,0 +1,150 @@
+[
+  {
+    "expnum": 3469,
+    "purpose": "Stellar Milky Way field (M24)",
+    "output": "/data/sas/sdsswork/lvm/spectro/redux/1.3.2/0011XX/11111/60177/lvmSFrame-skyml-00003469.fits",
+    "old_output": "/data/sas/sdsswork/lvm/spectro/redux/1.3.2/0011XX/11111/60177/archive/lvmSFrame-skyml-00003469.fits",
+    "accepted": {
+      "R": 0.0,
+      "Z": 0.8568985176738882
+    },
+    "seconds": 261.8979342340026,
+    "line_information_rule": {
+      "wavelength_bins": 4,
+      "min_lines_per_bin": 2,
+      "min_observed_peak_snr": 5.0,
+      "min_peak_to_continuum": 1.0,
+      "min_peak_separation_angstrom": 10.0,
+      "status": "conservative_operating_point"
+    },
+    "reason_counts": {
+      "R": {
+        "line_information": 1754
+      },
+      "Z": {
+        "insitu": 1503,
+        "line_information": 15,
+        "profile_guard": 236
+      }
+    },
+    "previous_output": "/data/sas/sdsswork/lvm/spectro/redux/1.3.2/0011XX/11111/60177/archive/before-compact/lvmSFrame-skyml-00003469.fits"
+  },
+  {
+    "expnum": 12630,
+    "purpose": "Moon-down comparison field",
+    "output": "/data/sas/sdsswork/lvm/spectro/redux/1.3.2/1046XX/1046750/60356/lvmSFrame-skyml-00012630.fits",
+    "old_output": "/data/sas/sdsswork/lvm/spectro/redux/1.3.2/1046XX/1046750/60356/archive/lvmSFrame-skyml-00012630.fits",
+    "accepted": {
+      "R": 0.7645381984036488,
+      "Z": 0.9942987457240593
+    },
+    "seconds": 196.37024874892086,
+    "line_information_rule": {
+      "wavelength_bins": 4,
+      "min_lines_per_bin": 2,
+      "min_observed_peak_snr": 5.0,
+      "min_peak_to_continuum": 1.0,
+      "min_peak_separation_angstrom": 10.0,
+      "status": "conservative_operating_point"
+    },
+    "reason_counts": {
+      "R": {
+        "insitu": 1341,
+        "line_information": 412,
+        "profile_guard": 1
+      },
+      "Z": {
+        "insitu": 1744,
+        "line_information": 10
+      }
+    },
+    "previous_output": "/data/sas/sdsswork/lvm/spectro/redux/1.3.2/1046XX/1046750/60356/archive/before-compact/lvmSFrame-skyml-00012630.fits"
+  },
+  {
+    "expnum": 16819,
+    "purpose": "Nearly full Moon",
+    "output": "/data/sas/sdsswork/lvm/spectro/redux/1.3.2/1050XX/1050184/60423/lvmSFrame-skyml-00016819.fits",
+    "old_output": "/data/sas/sdsswork/lvm/spectro/redux/1.3.2/1050XX/1050184/60423/archive/lvmSFrame-skyml-00016819.fits",
+    "accepted": {
+      "R": 0.0,
+      "Z": 0.9954389965792474
+    },
+    "seconds": 225.28954226197675,
+    "line_information_rule": {
+      "wavelength_bins": 4,
+      "min_lines_per_bin": 2,
+      "min_observed_peak_snr": 5.0,
+      "min_peak_to_continuum": 1.0,
+      "min_peak_separation_angstrom": 10.0,
+      "status": "conservative_operating_point"
+    },
+    "reason_counts": {
+      "R": {
+        "line_information": 1754
+      },
+      "Z": {
+        "insitu": 1746,
+        "line_information": 8
+      }
+    },
+    "previous_output": "/data/sas/sdsswork/lvm/spectro/redux/1.3.2/1050XX/1050184/60423/archive/before-compact/lvmSFrame-skyml-00016819.fits"
+  },
+  {
+    "expnum": 44808,
+    "purpose": "Nearly full Moon",
+    "output": "/data/sas/sdsswork/lvm/spectro/redux/1.3.2/1030XX/1030046/60898/lvmSFrame-skyml-00044808.fits",
+    "old_output": "/data/sas/sdsswork/lvm/spectro/redux/1.3.2/1030XX/1030046/60898/archive/lvmSFrame-skyml-00044808.fits",
+    "accepted": {
+      "R": 0.0,
+      "Z": 0.9954389965792474
+    },
+    "seconds": 143.3595184709411,
+    "line_information_rule": {
+      "wavelength_bins": 4,
+      "min_lines_per_bin": 2,
+      "min_observed_peak_snr": 5.0,
+      "min_peak_to_continuum": 1.0,
+      "min_peak_separation_angstrom": 10.0,
+      "status": "conservative_operating_point"
+    },
+    "reason_counts": {
+      "R": {
+        "line_information": 1754
+      },
+      "Z": {
+        "insitu": 1746,
+        "line_information": 8
+      }
+    },
+    "previous_output": "/data/sas/sdsswork/lvm/spectro/redux/1.3.2/1030XX/1030046/60898/archive/before-compact/lvmSFrame-skyml-00044808.fits"
+  },
+  {
+    "expnum": 59750,
+    "purpose": "Later nearly full-moon exposure",
+    "output": "/data/sas/sdsswork/lvm/spectro/redux/1.3.2/1038XX/1038686/61192/lvmSFrame-skyml-00059750.fits",
+    "old_output": "/data/sas/sdsswork/lvm/spectro/redux/1.3.2/1038XX/1038686/61192/archive/lvmSFrame-skyml-00059750.fits",
+    "accepted": {
+      "R": 0.0,
+      "Z": 0.9937286202964652
+    },
+    "seconds": 151.69357321085408,
+    "line_information_rule": {
+      "wavelength_bins": 4,
+      "min_lines_per_bin": 2,
+      "min_observed_peak_snr": 5.0,
+      "min_peak_to_continuum": 1.0,
+      "min_peak_separation_angstrom": 10.0,
+      "status": "conservative_operating_point"
+    },
+    "reason_counts": {
+      "R": {
+        "line_information": 1754
+      },
+      "Z": {
+        "insitu": 1743,
+        "line_information": 11
+      }
+    },
+    "previous_output": "/data/sas/sdsswork/lvm/spectro/redux/1.3.2/1038XX/1038686/61192/archive/before-compact/lvmSFrame-skyml-00059750.fits"
+  }
+]

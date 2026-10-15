@@ -1,0 +1,12 @@
+{
+  "source_commit": "fe943a7",
+  "source_directory": "/home/ik52/.codex/worktrees/blue-lsf-quality/lvmsky/skysub/sky_decomp/data/lsf",
+  "files_sha256": {
+    "manifest.json": "82c7ea617b8bd946ec2670ff66640d623bfaddc3f03f8cc3c12f0de14d3643c9",
+    "survey_lsf_B.csv": "d2964f13268830047950f151761f9d3584feb5f3ba65338d57bf57aae6cbbd0e",
+    "survey_lsf_R.csv": "a90f0b8e9fb60b957e8022b72d5df3f28f08a375ca09c3952be7f56c62b908d1",
+    "survey_lsf_Z.csv": "6973c56c55e71ef3ed5a720043ea63ec845190ff9fed8abf33e8ec6d65e5e849",
+    "wavelength_knots.csv": "8be2850bb5bf60feea733230440804e5748f510f9dc791ea8058bf6d413c3df0",
+    "coverage.csv": "be40713d93e7fcbbaf9ceedb23da27ad6e0e940931bf7747b408c6e181c8930b"
+  }
+}

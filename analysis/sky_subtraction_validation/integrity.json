@@ -1,0 +1,47 @@
+[
+  {
+    "expnum": 3469,
+    "hdu_checksums_valid": true,
+    "original_flux_preserved": true,
+    "non_science_rows_preserved": true,
+    "observational_ivar_preserved": true,
+    "validity_flag_consistent": true,
+    "extensions": 45
+  },
+  {
+    "expnum": 12630,
+    "hdu_checksums_valid": true,
+    "original_flux_preserved": true,
+    "non_science_rows_preserved": true,
+    "observational_ivar_preserved": true,
+    "validity_flag_consistent": true,
+    "extensions": 45
+  },
+  {
+    "expnum": 16819,
+    "hdu_checksums_valid": true,
+    "original_flux_preserved": true,
+    "non_science_rows_preserved": true,
+    "observational_ivar_preserved": true,
+    "validity_flag_consistent": true,
+    "extensions": 45
+  },
+  {
+    "expnum": 44808,
+    "hdu_checksums_valid": true,
+    "original_flux_preserved": true,
+    "non_science_rows_preserved": true,
+    "observational_ivar_preserved": true,
+    "validity_flag_consistent": true,
+    "extensions": 45
+  },
+  {
+    "expnum": 59750,
+    "hdu_checksums_valid": true,
+    "original_flux_preserved": true,
+    "non_science_rows_preserved": true,
+    "observational_ivar_preserved": true,
+    "validity_flag_consistent": true,
+    "extensions": 45
+  }
+]
