@@ -1917,7 +1917,7 @@ def _blue_reference_lsf(kind, row_index):
     return _WORKER_BLUE_REFERENCE[telescope]
 
 
-def _fit_worker_row(kind, idx, flux_row, ivar_row, fixed_lsf_state=None):
+def _fit_worker_row(kind, idx, flux_row, ivar_row, fixed_lsf_state=None, initial_lsf_state=None):
     """Fit one row.  Returns ``(result, reliability_columns)``."""
     ivar_row[_science_line_mask_for_row(idx)] = 0.0
     try:
@@ -1929,6 +1929,8 @@ def _fit_worker_row(kind, idx, flux_row, ivar_row, fixed_lsf_state=None):
     decomposer._measure_peak_memory = _WORKER_COMPACT_CACHE_DIR is None
     if _WORKER_BLUE_REFERENCE_FILE is not None:
         decomposer.blue_reference_lsf = _blue_reference_lsf(kind, idx)
+    if initial_lsf_state is not None:
+        decomposer.blue_reference_lsf = initial_lsf_state
     _install_split_zodi_amplitude_prior(decomposer, kind, idx)
     result, retried, bound, was_reversed = _fit_split_zodi_with_reversal_retry(
         decomposer, flux_row, ivar_row, fixed_lsf_state=fixed_lsf_state)
@@ -2608,7 +2610,7 @@ def _run_kwargs_from_args(args):
 
 
 def decompose_in_process(data_file, rows=(0,), kinds=("sci", "sky1", "sky2"),
-                         argv=(), fixed_lsf_state=None):
+                         argv=(), fixed_lsf_state=None, initial_lsf_states=None):
     """Decompose rows of a stack in THIS process, exactly as a CLI run would.
 
     ``argv`` are extra command-line options (e.g. ``("--blue-lsf",
@@ -2649,7 +2651,8 @@ def decompose_in_process(data_file, rows=(0,), kinds=("sci", "sky1", "sky2"),
             flux_row = np.asarray(_WORKER_FLUX[kind][int(idx)], dtype=np.float64) * _WORKER_FACTOR
             out[(kind, int(idx))] = _fit_worker_row(
                 kind, int(idx), flux_row, _fit_ivar_row(kind, int(idx), flux_row),
-                fixed_lsf_state=fixed_lsf_state)
+                fixed_lsf_state=fixed_lsf_state,
+                initial_lsf_state=None if initial_lsf_states is None else initial_lsf_states[kind])
     return out
 
 

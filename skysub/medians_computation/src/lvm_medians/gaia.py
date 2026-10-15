@@ -117,7 +117,7 @@ def _fiber_cache_valid(path: Path, expnum: int, fiberids: np.ndarray) -> bool:
 
 
 def _passband(path: Path | None) -> tuple[np.ndarray, np.ndarray, float, float]:
-    source = path or Path(str(files("lvm_medians").joinpath("data/GAIA3_G.vot")))
+    source = path or Path(str(files(__package__).joinpath("data/GAIA3_G.vot")))
     resource = parse(source).get_first_table()
     params = {parameter.name: parameter.value for parameter in resource.params}
     table = resource.to_table()
@@ -186,6 +186,7 @@ def derive_fiber_table(
     sframe: Path,
     sources: Table,
     passband: Path | None = None,
+    *, observed_total: bool = False,
 ) -> tuple[Table, fits.Header]:
     with fits.open(sframe, memmap=True) as hdul:
         primary = hdul[0].header
@@ -193,9 +194,9 @@ def derive_fiber_table(
         wave = np.asarray(hdul["WAVE"].data, dtype=float)
         scale = _flux_scale(primary, hdul["FLUX"])
         flux = np.asarray(hdul["FLUX"].data, dtype=float) * scale
-        sky = np.asarray(hdul["SKY"].data, dtype=float) * scale
+        sky = np.zeros_like(flux) if observed_total else np.asarray(hdul["SKY"].data, dtype=float) * scale
         ivar = np.asarray(hdul["IVAR"].data, dtype=float) / scale**2
-        sky_ivar = np.asarray(hdul["SKY_IVAR"].data, dtype=float) / scale**2
+        sky_ivar = np.full_like(ivar, np.inf) if observed_total else np.asarray(hdul["SKY_IVAR"].data, dtype=float) / scale**2
         mask = np.asarray(hdul["MASK"].data) if "MASK" in hdul else np.zeros_like(flux)
         slitmap = Table.read(hdul, hdu="SLITMAP")
     if len({array.shape for array in (flux, sky, ivar, sky_ivar, mask)}) != 1:

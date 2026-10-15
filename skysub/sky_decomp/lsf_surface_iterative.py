@@ -688,6 +688,7 @@ def _kernel_constraint_system(
     n_basis: int,
     n_nuisance: int,
     free_amplitude: bool,
+    background_nonnegative: bool = False,
 ) -> tuple[sp.csc_matrix, np.ndarray, list[object]]:
     n_kernel = kernel_size * n_basis
     nonnegative = sp.hstack(
@@ -713,6 +714,10 @@ def _kernel_constraint_system(
         constraints.insert(0, equality)
         rhs.insert(0, np.ones(n_basis))
         cones.insert(0, clarabel.ZeroConeT(n_basis))
+    if background_nonnegative:
+        constraints.append(sp.hstack([sp.csc_matrix((n_nuisance, n_kernel)), -sp.eye(n_nuisance)], format="csc"))
+        rhs.append(np.zeros(n_nuisance))
+        cones.append(clarabel.NonnegativeConeT(n_nuisance))
     return sp.vstack(constraints, format="csc"), np.concatenate(rhs), cones
 
 
@@ -735,6 +740,9 @@ def _fit_bspline_channel(
     offset_roughness_fraction: float = 0.0,
     center_offsets: bool = False,
     numerical_ridge: float = 1.0e-10,
+    background_design: np.ndarray | None = None,
+    background_nonnegative: bool = False,
+    return_background: bool = False,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict[str, float | str]]:
     """Fit one normalized, central-peak B-spline kernel surface.
 
@@ -803,6 +811,10 @@ def _fit_bspline_channel(
         np.polynomial.legendre.legvander(scaled_wave, background_degree)
         * target_scale
     )
+    if background_design is not None:
+        background = np.asarray(background_design, dtype=float)
+        if background.ndim != 2 or background.shape[0] != wave.size or not np.isfinite(background).all():
+            raise ValueError("background_design must be a finite matrix on the channel grid")
     design = np.column_stack([kernel_design, background])
     valid = (
         np.isfinite(target)
@@ -868,6 +880,7 @@ def _fit_bspline_channel(
         n_basis,
         n_nuisance,
         free_amplitude,
+        background_nonnegative,
     )
 
     settings = clarabel.DefaultSettings()
@@ -918,6 +931,8 @@ def _fit_bspline_channel(
         "fitted_amplitude_scale": float(np.median(amplitude_scale)),
         "runtime_sec": runtime,
     }
+    if return_background:
+        metrics["background_coef"] = vector[n_kernel:].copy()
     return surface, coefficient, knots, metrics
 
 
