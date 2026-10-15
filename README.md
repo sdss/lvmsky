@@ -1,6 +1,11 @@
 # lvmsky
 This code is for LVM sky subtraction
 
+## Plotting and report rules
+
+Figure styling, spectral residuals, interactive plots, and report publication layout are defined in [PLOTTING_AND_REPORT_RULES.md](PLOTTING_AND_REPORT_RULES.md). Read it before creating or updating a scientific report.
+
+
 
 ## Solar-constrained blue LSF
 
@@ -47,3 +52,7 @@ The default CLI cycle value 5 maps to 30 for solarblue; any other positive
 
 Python entry point: `skysub.sky_decomp.solar_lsf.SkyDecompPalaceCorrSolarBlueLSF`.
 An explicit `offset_roughness_fraction=0.0` disables the offset penalty.
+
+## SkyML SFrame
+
+The compact output contract and measured extension sizes are in [skysub/sky_subtraction/FITS_STRUCTURE.md](skysub/sky_subtraction/FITS_STRUCTURE.md). Model/fit diagnostics are reconstructed from recorded coefficients by [reconstruction.py](skysub/sky_subtraction/reconstruction.py); full diagnostic spectral images are transient report data. The working output filename is `lvmSFrame-skyml-<exposure>.fits`.
