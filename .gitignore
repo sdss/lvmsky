@@ -90,3 +90,9 @@ scratch/*
 
 # Local scientific experiments
 /skysub/experiments*/
+
+# Generated SkyML validation report pages (published to SAS with publish_report.py)
+analysis/sky_subtraction_validation/*.html
+analysis/sky_subtraction_validation/*.png
+analysis/sky_subtraction_validation/*.log
+analysis/sky_subtraction_validation/plotly.min.js
