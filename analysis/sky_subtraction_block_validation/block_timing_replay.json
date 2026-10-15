@@ -1,0 +1,43 @@
+{
+  "expnum": 59750,
+  "tensor_seconds": 16.541998150525615,
+  "blocks": [
+    {
+      "spectrograph": 1,
+      "channel": "R",
+      "normal_seconds": 0.055543791968375444,
+      "solve_seconds": 0.03270369884558022
+    },
+    {
+      "spectrograph": 1,
+      "channel": "Z",
+      "normal_seconds": 0.07439326401799917,
+      "solve_seconds": 0.028535453835502267
+    },
+    {
+      "spectrograph": 2,
+      "channel": "R",
+      "normal_seconds": 0.041987661039456725,
+      "solve_seconds": 0.032393621979281306
+    },
+    {
+      "spectrograph": 2,
+      "channel": "Z",
+      "normal_seconds": 0.06218170397914946,
+      "solve_seconds": 0.028872111113741994
+    },
+    {
+      "spectrograph": 3,
+      "channel": "R",
+      "normal_seconds": 0.04269106802530587,
+      "solve_seconds": 0.03231847006827593
+    },
+    {
+      "spectrograph": 3,
+      "channel": "Z",
+      "normal_seconds": 0.0658343571703881,
+      "solve_seconds": 0.02850623312406242
+    }
+  ],
+  "description": "Replay with saved individual coefficients, one native thread; concurrent exposure diagnostic processes"
+}

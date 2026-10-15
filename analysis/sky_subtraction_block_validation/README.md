@@ -1,0 +1,5 @@
+# Independent block-method validation
+
+Code and run logs live here; published products and diagnostic reports live in the separate Lumen directory `/data/sas/sdsswork/users/u6058164/lvm_sky_subtraction_block_validation_drp132/`. The main report is `00_MAIN_sky_block_report.html`. Existing in-situ products and reports are read-only comparison inputs.
+
+`run_batch.py` runs the five previous exposures. `fetch_corpus.py` retrieves three selected native CFrames through the same wget/netrc SAS workflow as getsas; `run_batch.py --corpus` additionally runs these exposures. The corpus selection ranks available accepted Science channel measurements and takes different observed lunations. A count of channel measurements is three times the fiber count when every channel is accepted. The individual measurement catalog and original parameter FITS are comparison evidence, not injected truth. Exposure/night overlap with the trained ML archive is inherited from preparation and is not an independent ML generalization test.

@@ -1,0 +1,32 @@
+[
+  {
+    "fiberid": 1,
+    "channel": "B",
+    "max_internal_flux_error": 8.526512829121202e-14
+  },
+  {
+    "fiberid": 1,
+    "channel": "R",
+    "max_internal_flux_error": 2.842170943040401e-14
+  },
+  {
+    "fiberid": 1,
+    "channel": "Z",
+    "max_internal_flux_error": 2.842170943040401e-14
+  },
+  {
+    "fiberid": 1944,
+    "channel": "B",
+    "max_internal_flux_error": 1.7763568394002505e-14
+  },
+  {
+    "fiberid": 1944,
+    "channel": "R",
+    "max_internal_flux_error": 4.263256414560601e-14
+  },
+  {
+    "fiberid": 1944,
+    "channel": "Z",
+    "max_internal_flux_error": 2.842170943040401e-14
+  }
+]

@@ -1,0 +1,66 @@
+[
+  {
+    "expnum": 3469,
+    "input": "/data/sas/sdsswork/lvm/spectro/redux/1.3.2/0011XX/11111/60177/lvmCFrame-00003469.fits",
+    "drp": "/data/sas/sdsswork/lvm/spectro/redux/1.3.2/0011XX/11111/60177/lvmSFrame-00003469.fits",
+    "seed": "/data/sas/sdsswork/lvm/spectro/redux/1.3.2/0011XX/11111/60177/lvmSFrame-skyml-00003469.fits",
+    "purpose": "Stellar Milky Way field (M24)",
+    "output": "/data/sas/sdsswork/users/u6058164/lvm_sky_subtraction_block_validation_drp132/products/lvmSFrame-skyml-block-00003469.fits"
+  },
+  {
+    "expnum": 4108,
+    "lunation": 1,
+    "measurements": 5139,
+    "input": "/data/sas/sdsswork/users/u6058164/lvm_sky_subtraction_block_validation_drp132/inputs/lvmCFrame-00004108.fits",
+    "drp": "/data/sas/sdsswork/lvm/spectro/redux/1.3.2/0011XX/11111/60187/lvmSFrame-00004108.fits",
+    "output": "/data/sas/sdsswork/users/u6058164/lvm_sky_subtraction_block_validation_drp132/products/lvmSFrame-skyml-block-00004108.fits"
+  },
+  {
+    "expnum": 12630,
+    "input": "/data/sas/sdsswork/lvm/spectro/redux/1.3.2/1046XX/1046750/60356/lvmCFrame-00012630.fits",
+    "drp": "/data/sas/sdsswork/lvm/spectro/redux/1.3.2/1046XX/1046750/60356/lvmSFrame-00012630.fits",
+    "seed": "/data/sas/sdsswork/lvm/spectro/redux/1.3.2/1046XX/1046750/60356/lvmSFrame-skyml-00012630.fits",
+    "purpose": "Moon-down comparison field",
+    "output": "/data/sas/sdsswork/users/u6058164/lvm_sky_subtraction_block_validation_drp132/products/lvmSFrame-skyml-block-00012630.fits"
+  },
+  {
+    "expnum": 16819,
+    "input": "/data/sas/sdsswork/lvm/spectro/redux/1.3.2/1050XX/1050184/60423/lvmCFrame-00016819.fits",
+    "drp": "/data/sas/sdsswork/lvm/spectro/redux/1.3.2/1050XX/1050184/60423/lvmSFrame-00016819.fits",
+    "seed": "/data/sas/sdsswork/lvm/spectro/redux/1.3.2/1050XX/1050184/60423/lvmSFrame-skyml-00016819.fits",
+    "purpose": "Nearly full Moon",
+    "output": "/data/sas/sdsswork/users/u6058164/lvm_sky_subtraction_block_validation_drp132/products/lvmSFrame-skyml-block-00016819.fits"
+  },
+  {
+    "expnum": 40620,
+    "lunation": 10,
+    "measurements": 5154,
+    "input": "/data/sas/sdsswork/users/u6058164/lvm_sky_subtraction_block_validation_drp132/inputs/lvmCFrame-00040620.fits",
+    "drp": "/data/sas/sdsswork/lvm/spectro/redux/1.3.2/1050XX/1050080/60806/lvmSFrame-00040620.fits",
+    "output": "/data/sas/sdsswork/users/u6058164/lvm_sky_subtraction_block_validation_drp132/products/lvmSFrame-skyml-block-00040620.fits"
+  },
+  {
+    "expnum": 44808,
+    "input": "/data/sas/sdsswork/lvm/spectro/redux/1.3.2/1030XX/1030046/60898/lvmCFrame-00044808.fits",
+    "drp": "/data/sas/sdsswork/lvm/spectro/redux/1.3.2/1030XX/1030046/60898/lvmSFrame-00044808.fits",
+    "seed": "/data/sas/sdsswork/lvm/spectro/redux/1.3.2/1030XX/1030046/60898/lvmSFrame-skyml-00044808.fits",
+    "purpose": "Nearly full Moon",
+    "output": "/data/sas/sdsswork/users/u6058164/lvm_sky_subtraction_block_validation_drp132/products/lvmSFrame-skyml-block-00044808.fits"
+  },
+  {
+    "expnum": 59750,
+    "input": "/data/sas/sdsswork/lvm/spectro/redux/1.3.2/1038XX/1038686/61192/lvmCFrame-00059750.fits",
+    "drp": "/data/sas/sdsswork/lvm/spectro/redux/1.3.2/1038XX/1038686/61192/lvmSFrame-00059750.fits",
+    "seed": "/data/sas/sdsswork/lvm/spectro/redux/1.3.2/1038XX/1038686/61192/lvmSFrame-skyml-00059750.fits",
+    "purpose": "Later nearly full-moon exposure",
+    "output": "/data/sas/sdsswork/users/u6058164/lvm_sky_subtraction_block_validation_drp132/products/lvmSFrame-skyml-block-00059750.fits"
+  },
+  {
+    "expnum": 60919,
+    "lunation": 19,
+    "measurements": 5178,
+    "input": "/data/sas/sdsswork/users/u6058164/lvm_sky_subtraction_block_validation_drp132/inputs/lvmCFrame-00060919.fits",
+    "drp": "/data/sas/sdsswork/lvm/spectro/redux/1.3.2/1055XX/1055960/61222/lvmSFrame-00060919.fits",
+    "output": "/data/sas/sdsswork/users/u6058164/lvm_sky_subtraction_block_validation_drp132/products/lvmSFrame-skyml-block-00060919.fits"
+  }
+]

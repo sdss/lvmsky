@@ -1,0 +1,23 @@
+[
+  {
+    "expnum": 60919,
+    "lunation": 19,
+    "measurements": 5178,
+    "input": "/data/sas/sdsswork/users/u6058164/lvm_sky_subtraction_block_validation_drp132/inputs/lvmCFrame-00060919.fits",
+    "drp": "/data/sas/sdsswork/lvm/spectro/redux/1.3.2/1055XX/1055960/61222/lvmSFrame-00060919.fits"
+  },
+  {
+    "expnum": 40620,
+    "lunation": 10,
+    "measurements": 5154,
+    "input": "/data/sas/sdsswork/users/u6058164/lvm_sky_subtraction_block_validation_drp132/inputs/lvmCFrame-00040620.fits",
+    "drp": "/data/sas/sdsswork/lvm/spectro/redux/1.3.2/1050XX/1050080/60806/lvmSFrame-00040620.fits"
+  },
+  {
+    "expnum": 4108,
+    "lunation": 1,
+    "measurements": 5139,
+    "input": "/data/sas/sdsswork/users/u6058164/lvm_sky_subtraction_block_validation_drp132/inputs/lvmCFrame-00004108.fits",
+    "drp": "/data/sas/sdsswork/lvm/spectro/redux/1.3.2/0011XX/11111/60187/lvmSFrame-00004108.fits"
+  }
+]

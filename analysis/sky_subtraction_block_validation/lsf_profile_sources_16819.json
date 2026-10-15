@@ -1,0 +1,44 @@
+{
+  "parameter_files": [
+    "/data/sas/sdsswork/users/u6058164/lvm_solarblue_all_fibers_drp132_moonalt60_fli095/parameters/solarblue-shard-0002-00016812-00016939_sci_meta_coef_palacecorr_aijc_vnf_split_zodi_lsf_spline2d_solarblue.fits"
+  ],
+  "comparisons": [
+    {
+      "fiberid": 363,
+      "channel": "R",
+      "wavelength_A": 6600.0,
+      "integrated_abs_difference": 0.06255561130330822
+    },
+    {
+      "fiberid": 363,
+      "channel": "Z",
+      "wavelength_A": 8500.0,
+      "integrated_abs_difference": 0.049578006623912874
+    },
+    {
+      "fiberid": 890,
+      "channel": "R",
+      "wavelength_A": 6600.0,
+      "integrated_abs_difference": 0.05484602135136808
+    },
+    {
+      "fiberid": 890,
+      "channel": "Z",
+      "wavelength_A": 8500.0,
+      "integrated_abs_difference": 0.030523235127321247
+    },
+    {
+      "fiberid": 1639,
+      "channel": "R",
+      "wavelength_A": 6600.0,
+      "integrated_abs_difference": 0.047640069200772045
+    },
+    {
+      "fiberid": 1639,
+      "channel": "Z",
+      "wavelength_A": 8500.0,
+      "integrated_abs_difference": 0.041619948253222794
+    }
+  ],
+  "profiles_recentered": false
+}

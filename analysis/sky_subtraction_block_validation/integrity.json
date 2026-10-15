@@ -1,0 +1,106 @@
+[
+  {
+    "expnum": 3469,
+    "roundtrip_fiberids": [
+      329,
+      976,
+      1618
+    ],
+    "global_blocks": 6,
+    "science_fibers": 1754,
+    "normalization_max": 4.440892098500626e-16,
+    "centroid_max_A": 1.525868180409138e-16,
+    "flux_identity_max": 4.336808689942018e-19
+  },
+  {
+    "expnum": 4108,
+    "roundtrip_fiberids": [
+      329,
+      976,
+      1618
+    ],
+    "global_blocks": 6,
+    "science_fibers": 1754,
+    "normalization_max": 4.440892098500626e-16,
+    "centroid_max_A": 1.0755285551056204e-16,
+    "flux_identity_max": 4.336808689942018e-19
+  },
+  {
+    "expnum": 12630,
+    "roundtrip_fiberids": [
+      329,
+      976,
+      1618
+    ],
+    "global_blocks": 6,
+    "science_fibers": 1754,
+    "normalization_max": 3.3306690738754696e-16,
+    "centroid_max_A": 9.07126047113114e-17,
+    "flux_identity_max": 8.673617379884035e-19
+  },
+  {
+    "expnum": 16819,
+    "roundtrip_fiberids": [
+      329,
+      976,
+      1618
+    ],
+    "global_blocks": 6,
+    "science_fibers": 1754,
+    "normalization_max": 4.440892098500626e-16,
+    "centroid_max_A": 1.5092094240998222e-16,
+    "flux_identity_max": 4.336808689942018e-19
+  },
+  {
+    "expnum": 40620,
+    "roundtrip_fiberids": [
+      329,
+      976,
+      1618
+    ],
+    "global_blocks": 6,
+    "science_fibers": 1754,
+    "normalization_max": 5.551115123125783e-16,
+    "centroid_max_A": 1.0408340855860843e-16,
+    "flux_identity_max": 1.734723475976807e-18
+  },
+  {
+    "expnum": 44808,
+    "roundtrip_fiberids": [
+      329,
+      976,
+      1618
+    ],
+    "global_blocks": 6,
+    "science_fibers": 1754,
+    "normalization_max": 4.440892098500626e-16,
+    "centroid_max_A": 1.214306433183765e-16,
+    "flux_identity_max": 1.734723475976807e-18
+  },
+  {
+    "expnum": 59750,
+    "roundtrip_fiberids": [
+      680,
+      1447,
+      971
+    ],
+    "global_blocks": 6,
+    "science_fibers": 1754,
+    "normalization_max": 3.3306690738754696e-16,
+    "centroid_max_A": 1.302878947942473e-16,
+    "flux_identity_max": 2.168404344971009e-19
+  },
+  {
+    "expnum": 60919,
+    "roundtrip_fiberids": [
+      329,
+      976,
+      1618
+    ],
+    "global_blocks": 6,
+    "science_fibers": 1754,
+    "normalization_max": 4.440892098500626e-16,
+    "centroid_max_A": 1.2836953722228372e-16,
+    "flux_identity_max": 8.673617379884035e-19
+  }
+]

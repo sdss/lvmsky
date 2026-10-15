@@ -1,0 +1,30 @@
+[
+  {
+    "path": "/",
+    "status": 200
+  },
+  {
+    "path": "00_MAIN_sky_block_report.html",
+    "status": 200
+  },
+  {
+    "path": "spectra/science_59750_680.html",
+    "status": 200
+  },
+  {
+    "path": "assets/plotly.min.js",
+    "status": 200
+  },
+  {
+    "path": "figures/lsf_profiles_40620.png",
+    "status": 200
+  },
+  {
+    "path": "data/lsf_differences.csv",
+    "status": 200
+  },
+  {
+    "path": "data/product_validation.json",
+    "status": 200
+  }
+]
