@@ -5,6 +5,10 @@ from collections.abc import Mapping
 from contextlib import ExitStack
 from copy import deepcopy
 import re
+import csv
+import json
+import hashlib
+from functools import lru_cache
 
 from astropy.time import Time
 
@@ -269,3 +273,75 @@ def reference_covariance(path: str | Path, reference_id: int, *, kind="scatter")
         if denominator <= 0:
             return np.full((factors.shape[1], factors.shape[1]), np.nan)
         return factors.T @ factors / denominator
+
+
+@lru_cache(maxsize=4)
+def _survey_ascii_tables(directory, manifest_digest):
+    directory = Path(directory)
+    manifest = json.loads((directory / "manifest.json").read_text())
+    if manifest.get("schema") != "survey_lsf_ascii_v1" or manifest.get("representation") != LSF_SPLINE2D_REPRESENTATION:
+        raise ValueError("Unsupported survey ASCII LSF schema or representation")
+    names = ["wavelength_knots.csv", "coverage.csv", *[f"survey_lsf_{ch}.csv" for ch in "BRZ"]]
+    for name in names:
+        content = (directory / name).read_bytes()
+        if hashlib.sha256(content).hexdigest() != manifest["files_sha256"].get(name):
+            raise ValueError(f"Survey ASCII LSF checksum differs: {name}")
+    tables = {}
+    for ch in "BRZ":
+        with (directory / f"survey_lsf_{ch}.csv").open(newline="") as stream:
+            rows = list(csv.DictReader(stream))
+        tables[ch] = {int(row["fiberid"]): row for row in rows}
+        if len(tables[ch]) != len(rows):
+            raise ValueError(f"Duplicate {ch} physical fiber in survey ASCII LSF")
+    with (directory / "wavelength_knots.csv").open(newline="") as stream:
+        rows = list(csv.DictReader(stream))
+    knots = {}
+    for ch in "BRZ":
+        chosen = sorted((r for r in rows if r["channel"] == ch), key=lambda r: int(r["knot_index"]))
+        if [int(r["knot_index"]) for r in chosen] != list(range(len(chosen))):
+            raise ValueError(f"Invalid {ch} wavelength knot indices")
+        knots[ch] = np.array([float(r["wavelength_angstrom"]) for r in chosen])
+    return manifest, tables, knots
+
+
+def load_survey_ascii_lsf(directory, fiberid, *, channels=("B", "R", "Z"), allow_warning=False):
+    """Load a measured physical-fiber survey profile; explicitly opt into flagged R/Z diagnostics.
+
+    These coefficients pool observed epochs. Epoch variation and held-out-night
+    repeatability are recorded in metrics, rather than interpreted as hardware accuracy.
+    """
+    directory = Path(directory).resolve()
+    channels = tuple(channels)
+    if not channels or len(set(channels)) != len(channels) or not set(channels) <= set("BRZ"):
+        raise ValueError("channels must be a unique nonempty subset of B/R/Z")
+    digest = hashlib.sha256((directory / "manifest.json").read_bytes()).hexdigest()
+    manifest, tables, all_knots = _survey_ascii_tables(str(directory), digest)
+    coefficients, knots, degrees, bounds, metrics = {}, {}, {}, {}, {}
+    for ch in channels:
+        if int(fiberid) not in tables[ch]:
+            raise ValueError(f"No measured {ch} survey LSF for physical fiber {fiberid}")
+        row = tables[ch][int(fiberid)]
+        if row["quality"] != "measured" and not allow_warning:
+            raise ValueError(f"{ch} fiber {fiberid} has quality warning {row['quality']}; inspect coverage before allowing it")
+        cf = manifest["channels"][ch]
+        coefficient = np.array([[float(row[f"coef_{i:02d}_{j:02d}"]) for j in range(cf["n_basis"])] for i in range(len(manifest["tap_offsets"]))])
+        validate_coefficients(coefficient)
+        knot = all_knots[ch].copy(); degree = int(cf["degree"])
+        if len(knot) != coefficient.shape[1]+degree+1 or np.any(np.diff(knot) < 0):
+            raise ValueError(f"Invalid {ch} survey LSF knot dimensions or ordering")
+        basis = evaluate_bspline_basis(np.linspace(knot[degree], knot[-degree-1], 31), knot, degree)
+        if not np.isfinite(basis).all() or not np.allclose(basis.sum(axis=1), 1):
+            raise ValueError("Survey ASCII wavelength basis must form a partition of unity")
+        coefficients[ch], knots[ch], degrees[ch], bounds[ch] = coefficient, knot, degree, (cf["lower"], cf["upper"])
+        metrics[ch] = dict(model="quality_screened_equal_night_survey", fiberid=int(fiberid),
+                           quality=row["quality"], n_exposures=int(row["n_exposures"]), n_nights=int(row["n_nights"]),
+                           n_epochs=int(row["n_epochs"]), epoch_dependent=row["epoch_dependent"].lower()=="true",
+                           epoch_width_range_pct=float(row["epoch_width_range_pct"]),
+                           loo_night_width_error_pct=float(row["loo_night_width_error_pct"]), reference_file=str(directory))
+    fingerprint = manifest["wave_fingerprint"]
+    return LSFSurfaceState(coefficients=coefficients, knot_vectors=knots, degrees=degrees, channel_bounds=bounds,
+                           tap_offsets=np.asarray(manifest["tap_offsets"],dtype=int), config=manifest["config"].copy(),
+                           metrics=metrics, requested_cycles=0, completed_cycles=0,
+                           wave_n=int(fingerprint[0]), wave_min=float(fingerprint[1]), wave_max=float(fingerprint[2]),
+                           wave_sha256=fingerprint[3], fit_status="empirical_survey_ascii_reference",
+                           knot_strategy="inherited_fixed_basis", legacy_kernel_representation=LSF_SPLINE2D_REPRESENTATION)
