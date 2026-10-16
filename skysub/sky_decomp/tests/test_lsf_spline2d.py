@@ -10,8 +10,11 @@ from skysub.sky_decomp.lsf_spline2d import (
     LSF_SPLINE2D_REPRESENTATION,
     SkyDecompLSFSpline2D,
     _integrated_components,
+    _offset_knots,
+    _offset_splines,
     evaluate_lsf_density,
     mspline_basis,
+    mspline_cdf,
     native_pixel_edges,
 )
 from skysub.sky_decomp.lsf_surface_iterative import (
@@ -25,6 +28,21 @@ from skysub.sky_decomp.result_io import load_lsf_surface_state, results_to_fits
 def test_invalid_offset_regularization_is_rejected(strength):
     with pytest.raises(ValueError, match="offset_roughness_fraction"):
         SkyDecompLSFSpline2D(np.array([4000., 4001.]), offset_roughness_fraction=strength)
+
+
+@pytest.mark.parametrize("count, half_width", [(11, 3.0), (15, 2.5)])
+def test_mspline_cdf_matches_bspline_antiderivative(count, half_width):
+    x = np.linspace(-half_width - 1.0, half_width + 1.0, 2001)
+    _, antiderivatives, areas = _offset_splines(count, half_width)
+    knots = _offset_knots(count, half_width)
+    expected = np.stack(
+        [
+            (a(np.clip(x, knots[i], knots[i + 4])) - a(knots[i])) / areas[i]
+            for i, a in enumerate(antiderivatives)
+        ],
+        axis=-1,
+    )
+    assert np.abs(mspline_cdf(x, n_basis=count, half_width=half_width) - expected).max() < 1.0e-13
 
 
 @pytest.mark.parametrize("count, half_width", [(11, 3.0), (15, 2.5)])

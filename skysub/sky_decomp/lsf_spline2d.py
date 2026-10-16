@@ -78,23 +78,59 @@ def mspline_basis(delta_wavelength: np.ndarray, derivative: int = 0, *, n_basis=
     return result.reshape(coordinate.shape + (n_basis,))
 
 
+@cache
+def _offset_cdf_table(n_basis=11, half_width=3.0) -> np.ndarray:
+    """Per knot interval polynomial coefficients (in u=(x-knot)/h) of every normalised M-spline CDF."""
+    knots = _offset_knots(n_basis, half_width)
+    _, antiderivatives, areas = _offset_splines(n_basis, half_width)
+    step = np.diff(knots)
+    u = np.linspace(0.0, 1.0, LSF_OFFSET_DEGREE + 2)
+    vander = np.vander(u, LSF_OFFSET_DEGREE + 2, increasing=True)
+    table = np.zeros((step.size, n_basis, LSF_OFFSET_DEGREE + 2))
+    for index, antiderivative in enumerate(antiderivatives):
+        base = antiderivative(knots[index])
+        for interval in range(index, index + LSF_OFFSET_DEGREE + 1):
+            x = np.clip(knots[interval] + u * step[interval], knots[index], knots[index + 4])
+            table[interval, index] = np.linalg.solve(vander, (antiderivative(x) - base) / areas[index])
+        table[index + LSF_OFFSET_DEGREE + 1 :, index, 0] = 1.0
+    table.setflags(write=False)
+    return table
+
+
+def mspline_cdf(x: np.ndarray, *, n_basis=11, half_width=3.0, block=65536) -> np.ndarray:
+    """Cumulative integral of every unit-area M-spline from ``-half_width`` to ``x`` (Horner form)."""
+    knots = _offset_knots(n_basis, half_width)
+    table = _offset_cdf_table(n_basis, half_width)
+    x = np.asarray(x, dtype=float)
+    flat = np.clip(x.ravel(), knots[0], knots[-1])
+    result = np.empty((flat.size, n_basis))
+    for start in range(0, flat.size, block):
+        part = flat[start : start + block]
+        interval = np.clip(np.searchsorted(knots, part, side="right") - 1, 0, table.shape[0] - 1)
+        u = ((part - knots[interval]) / (knots[interval + 1] - knots[interval]))[:, None]
+        coef = table[interval]
+        acc = coef[..., -1]
+        for power in range(coef.shape[-1] - 2, -1, -1):
+            acc = acc * u + coef[..., power]
+        result[start : start + block] = acc
+    return result.reshape(x.shape + (n_basis,))
+
+
+def _clean_mass(mass: np.ndarray) -> np.ndarray:
+    mass[np.abs(mass) < 2.0e-15] = 0.0
+    return np.maximum(mass, 0.0)
+
+
 def mspline_bin_integrals(lower: np.ndarray, upper: np.ndarray, *, n_basis=11, half_width=3.0) -> np.ndarray:
     """Analytically integrate every M-spline over paired intervals."""
-    knots = _offset_knots(n_basis, half_width)
     lower = np.asarray(lower, dtype=float)
     upper = np.asarray(upper, dtype=float)
     if lower.shape != upper.shape or np.any(upper < lower):
         raise ValueError("bin edges must be conformable and ordered")
-    flat_lower, flat_upper = lower.ravel(), upper.ravel()
-    result = np.empty((flat_lower.size, n_basis))
-    _, antiderivatives, areas = _offset_splines(n_basis, half_width)
-    for index, antiderivative in enumerate(antiderivatives):
-        support_lower, support_upper = knots[index], knots[index + 4]
-        lo = np.clip(flat_lower, support_lower, support_upper)
-        hi = np.clip(flat_upper, support_lower, support_upper)
-        result[:, index] = (antiderivative(hi) - antiderivative(lo)) / areas[index]
-    result[np.abs(result) < 2.0e-15] = 0.0
-    return np.maximum(result.reshape(lower.shape + (n_basis,)), 0.0)
+    return _clean_mass(
+        mspline_cdf(upper, n_basis=n_basis, half_width=half_width)
+        - mspline_cdf(lower, n_basis=n_basis, half_width=half_width)
+    )
 
 
 def native_pixel_edges(wave: np.ndarray) -> np.ndarray:
@@ -175,12 +211,15 @@ def _build_integrated_components(
         return sp.csc_matrix((wave.size, line_wave.size * n_basis))
     start = np.repeat(np.cumsum(count) - count, count)
     pixel = first[line] + np.arange(line.size) - start
+    # Each line's pixels are contiguous, so every shared edge enters the CDF once.
+    edge_line = np.repeat(np.arange(line_wave.size), count + 1)
+    edge_start = np.repeat(np.cumsum(count + 1) - (count + 1), count + 1)
+    edge_pixel = first[edge_line] + np.arange(edge_line.size) - edge_start
+    cdf = mspline_cdf(edges[edge_pixel] - line_wave[edge_line], n_basis=n_basis, half_width=half_width)
+    slot = np.arange(line.size) + line
     keep = output_mask[pixel]
-    line, pixel = line[keep], pixel[keep]
-    mass = mspline_bin_integrals(
-        edges[pixel] - line_wave[line],
-        edges[pixel + 1] - line_wave[line], n_basis=n_basis, half_width=half_width,
-    ) / widths[pixel, None]
+    line, pixel, slot = line[keep], pixel[keep], slot[keep]
+    mass = _clean_mass(cdf[slot + 1] - cdf[slot]) / widths[pixel, None]
     pair, basis = np.nonzero(mass)
     return sp.coo_matrix(
         (
