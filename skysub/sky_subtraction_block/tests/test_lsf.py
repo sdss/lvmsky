@@ -69,3 +69,25 @@ def test_blue_channel_is_never_replaced_by_a_block():
         evaluate_block(base, {(1, 'R'): blocks[(1, 'R')]}, 1, 300.)
     with pytest.raises(KeyError):
         evaluate_block(base, {(1, c): dict(coef=coef, slit_knots=knots, qa=dict(status='Solved')) for c in 'RZ'}, 1, 300.)
+
+
+def test_fwhm_batch_matches_profile_diagnostics():
+    from skysub.sky_subtraction_block.lsf import offset_centers
+    from skysub.sky_subtraction_block.science import fwhm_batch
+    from skysub.sky_decomp.lsf_spline2d import evaluate_lsf_diagnostics
+    from skysub.sky_decomp.lsf_surface_iterative import evaluate_bspline_basis
+    rng = np.random.default_rng(5)
+    knots = np.r_[[5000.] * 4, [9500.] * 4]
+    centers = offset_centers(11, 2.5)
+    wave = np.array([6000., 7000., 8000.])
+    basis = evaluate_bspline_basis(wave, knots, 3)
+    basis = basis.toarray() if hasattr(basis, 'toarray') else basis
+    sigma = rng.uniform(.4, 1.2, 4)
+    coef = np.stack([np.exp(-.5 * (centers / s) ** 2) * rng.uniform(.8, 1.2, 11) for s in sigma])
+    for c in coef:
+        c = np.repeat(c[:, None], 4, axis=1)
+        state = SimpleNamespace(coefficients={ch: c for ch in 'BRZ'}, knot_vectors={ch: knots for ch in 'BRZ'},
+                                degrees={ch: 3 for ch in 'BRZ'}, config={'offset_half_width_angstrom': 2.5},
+                                legacy_kernel_representation='lsf-spline2d')
+        expected = evaluate_lsf_diagnostics(state, wave)['fwhm_angstrom']
+        np.testing.assert_allclose(fwhm_batch(basis @ c.T, 2.5), expected, rtol=0, atol=1e-12)

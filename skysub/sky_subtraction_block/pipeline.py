@@ -8,6 +8,7 @@ import multiprocessing as mp
 import os
 import tempfile
 import time
+import ctypes
 import numpy as np
 from astropy.io import fits
 from astropy.table import Table
@@ -15,8 +16,8 @@ from skysub.sky_subtraction import pipeline as common
 from skysub.sky_subtraction.io import read_cframe
 from skysub.sky_subtraction.reconstruction import SkyMLReconstructor
 from skysub.sky_decomp.result_io import build_lsf_hdus
-from mlp_predictor.sky_arm_correction import sky_arm_residual_correction
-from .lsf import FIT_CHANNELS,individual_coefficients,channel_tensors,fit_block,evaluate_block
+from .lsf import FIT_CHANNELS,component_matrices,individual_coefficients,channel_tensors,fit_block
+from .science import evaluate_science
 
 LOG=logging.getLogger(__name__)
 _WORK=None
@@ -28,20 +29,18 @@ def _fit_sky(index):
     flux=w['flux'][index]*common.FACTOR; ivar=w['ivar'][index]/common.FACTOR**2
     mask=w['mask'][index].copy()
     mask[w['renderer'].h['MED_FIT_MASK'].data.astype(bool)] |= 1
-    coef,status=individual_coefficients(model,state,flux,ivar,mask)
+    coef,status=individual_coefficients(model,state,flux,ivar,mask,w['matrices'][label])
     return dict(input_row=int(index),fiberid=int(w['slit']['fiberid'][index]),
         spectrograph=int(w['slit']['spectrographid'][index]),telescope=label,coef=coef,status=status)
 
 
-def _render_science(index):
-    w=_WORK; slit=w['slit']; r=w['renderer']
-    base=r.state('',w['lsf_row'][index])
-    state=evaluate_block(base,w['blocks'],slit['spectrographid'][index],slit['fiberid'][index])
-    raw,components,matrices=common.render(r.model_sci,r.coef,state)
-    oh=r.model_sci._components_from_coef(r.oh_coef,matrices)['oh']-components['oh']
-    residual=sky_arm_residual_correction(r.wave,raw/common.FACTOR,
-        (components['moon']+components['zodi'])/common.FACTOR,r.arms,max_wavelength=5000.)
-    return int(index),(raw/common.FACTOR+oh/common.FACTOR+residual).astype('f4'),state,common.fwhm_grid(state,r.wave)
+def _keep_freed_memory():
+    # glibc returns every large temporary to the kernel; faulting the pages back in cost 45% of a single-thread run.
+    try:
+        libc=ctypes.CDLL('libc.so.6')
+        libc.mallopt(-4,0);libc.mallopt(-1,2**31-1);libc.mallopt(-2,256<<20)  # M_MMAP_MAX, M_TRIM_THRESHOLD, M_TOP_PAD
+    except OSError:
+        pass
 
 
 def _mapped(function,indices,jobs):
@@ -54,6 +53,7 @@ def _mapped(function,indices,jobs):
 
 def run(input_path, *, output=None, seed=None, ensemble=None, gaia_dir=None, jobs=8, slit_count=4):
     global _WORK
+    _keep_freed_memory()
     started=time.perf_counter(); input_path=Path(input_path).resolve()
     output=Path(output).resolve() if output else input_path.with_name(input_path.name.replace('lvmCFrame-','lvmSFrame-skyml-block-').removesuffix('.gz'))
     if jobs<1 or slit_count<4:
@@ -66,7 +66,7 @@ def run(input_path, *, output=None, seed=None, ensemble=None, gaia_dir=None, job
         seed=output.parent/('lvmSFrame-skyml-preparation-'+input_path.name.removeprefix('lvmCFrame-').removesuffix('.gz'))
         if not Path(seed).exists():
             if ensemble is None:raise ValueError('Supply an ensemble for median/ML preparation or an existing --seed product')
-            common.run(input_path,ensemble,gaia_dir=gaia_dir,output=seed,jobs=jobs,survey_only=True)
+            common.run(input_path,ensemble,gaia_dir=gaia_dir,output=seed,jobs=jobs,survey_only=True,render_sky=False)
     seed=Path(seed).resolve()
     if seed==output:raise ValueError('Seed and output must differ')
     header,slit,wave,flux,ivar,mask,_=read_cframe(input_path)
@@ -82,7 +82,8 @@ def run(input_path, *, output=None, seed=None, ensemble=None, gaia_dir=None, job
         selected=r.provenance['selected_fiberids']
         skyids=set(selected['SkyE'])|set(selected['SkyW'])
         indices=np.flatnonzero(np.isin(slit['fiberid'],list(skyids)))
-        _WORK=dict(renderer=r,slit=slit,flux=flux,ivar=ivar,mask=mask,templates=templates)
+        matrices={label:component_matrices(r.model(label),templates[label]) for label in {str(slit['telescope'][i]).strip() for i in indices}}
+        _WORK=dict(renderer=r,slit=slit,flux=flux,ivar=ivar,mask=mask,templates=templates,matrices=matrices)
         LOG.info('Decomposing %s selected Sky fibers with fixed median LSFs',len(indices))
         block_started=time.perf_counter()
         fiber_rows=list(_mapped(_fit_sky,indices,jobs)); blocks={}
@@ -96,7 +97,7 @@ def run(input_path, *, output=None, seed=None, ensemble=None, gaia_dir=None, job
                 i=row['input_row']; model=r.model(row['telescope']); state=templates[row['telescope']]
                 fm=mask[i].copy();fm[r.h['MED_FIT_MASK'].data.astype(bool)] |= 1
                 samples.append(dict(position=float(slit['fiberid'][i]),wave=wave,flux=flux[i]*common.FACTOR,
-                    ivar=ivar[i]/common.FACTOR**2,mask=fm,designs=channel_tensors(model,row['coef'],state)))
+                    ivar=ivar[i]/common.FACTOR**2,mask=fm,designs=channel_tensors(model,row['coef'],state,matrices[row['telescope']])))
             tensor_seconds+=time.perf_counter()-tensor_started
             if not samples:raise ValueError(f'No selected Sky fibers for spectrograph {spectrograph}')
             domain=np.asarray(slit['fiberid'])[slit['spectrographid']==spectrograph]
@@ -114,11 +115,8 @@ def run(input_path, *, output=None, seed=None, ensemble=None, gaia_dir=None, job
         science=np.flatnonzero((np.char.strip(np.asarray(slit['telescope']).astype(str))=='Sci')&(slit['fibstatus']==0))
         lsf_row={int(v):j for j,v in enumerate(r.h['LSF_FIBERS'].data['input_row'])}
         if not set(map(int,science))<=set(lsf_row):raise ValueError('Preparation lacks adopted B survey LSFs for some Science fibers')
-        _WORK['blocks']=blocks;_WORK['lsf_row']=lsf_row
-        sky=np.zeros(flux.shape,dtype='f4'); states=[]; widths=[]
-        LOG.info('Rendering %s Science fibers from the global blocks',len(science))
-        for i,total,state,width in _mapped(_render_science,science,jobs):
-            sky[i]=total;states.append(state);widths.append(width)
+        LOG.info('Evaluating %s Science fibers from the global blocks',len(science))
+        sky,states,widths=evaluate_science(r,blocks,slit,science,lsf_row)
         # Preserve the common compact schema and its coefficient-based diagnostic renderer.
         remove={'FLUX','IVAR','MASK','LSF','SKY','LSF_FIBERS','LSF_COEF','LSF_KNOTS','LSF_META',
             'CAND_LSF_COEF','CAND_LSF_KNOTS','CAND_LSF_META','LSF_QA','FIT_LSF_HISTORY','SKYML_META'}

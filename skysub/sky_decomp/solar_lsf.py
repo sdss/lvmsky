@@ -17,6 +17,8 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import replace
+import hashlib
+import os
 from functools import lru_cache
 from pathlib import Path
 import time
@@ -91,14 +93,41 @@ def _solar_tensor(
     return tensor
 
 
+def _disk_cache_path(wave_bytes, knots_bytes, degree, solar_path, size, mtime, offset_basis_count, offset_half_width_angstrom) -> Path:
+    """File for one tensor; the key covers every input and the source of the code that builds it."""
+    key = hashlib.sha256()
+    for part in (wave_bytes, knots_bytes, repr((degree, solar_path, size, mtime, offset_basis_count, offset_half_width_angstrom)).encode()):
+        key.update(part)
+    for source in (Path(__file__), Path(__file__).with_name("lsf_spline2d.py")):
+        key.update(source.read_bytes())
+    root = Path(os.environ.get("LVMSKY_CACHE_DIR") or Path.home() / ".cache" / "lvmsky")
+    return root / f"solar_tensor_{key.hexdigest()[:24]}.npy"
+
+
 @lru_cache(maxsize=4)
 def _solar_tensor_cached(wave_bytes, knots_bytes, degree, solar_path, size, mtime, offset_basis_count, offset_half_width_angstrom) -> np.ndarray:
-    tensor = _solar_tensor(
-        np.frombuffer(wave_bytes, dtype=float),
-        np.frombuffer(knots_bytes, dtype=float),
-        degree,
-        solar_path, offset_basis_count=offset_basis_count, offset_half_width_angstrom=offset_half_width_angstrom,
-    )
+    # The tensor depends on the grid, knots and solar file only, never on the exposure: ~25 s to build, ~2 MB to keep.
+    path = _disk_cache_path(wave_bytes, knots_bytes, degree, solar_path, size, mtime, offset_basis_count, offset_half_width_angstrom)
+    tensor = None
+    try:
+        tensor = np.load(path)
+    except (OSError, ValueError):
+        pass  # missing or truncated: rebuild
+    if tensor is None:
+        tensor = _solar_tensor(
+            np.frombuffer(wave_bytes, dtype=float),
+            np.frombuffer(knots_bytes, dtype=float),
+            degree,
+            solar_path, offset_basis_count=offset_basis_count, offset_half_width_angstrom=offset_half_width_angstrom,
+        )
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+            with temporary.open("wb") as stream:
+                np.save(stream, tensor)
+            os.replace(temporary, path)  # atomic: concurrent workers never see a partial file
+        except OSError:
+            pass  # read-only cache directory: keep working without it
     tensor.setflags(write=False)
     return tensor
 

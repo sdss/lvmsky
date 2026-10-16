@@ -47,19 +47,26 @@ def solve_normal(hessian, linear, shape, centers):
     return coefficient, str(solution.status)
 
 
-def channel_tensors(model, coef, state):
-    """Affine native-pixel designs ``{channel: (take, design, fixed)}`` of the shared sky renderer, R and Z only."""
+def component_matrices(model, state):
+    """Component matrices of a model and LSF state; independent of the coefficients, so shared by all fibers of a telescope."""
     from skysub.sky_subtraction.pipeline import render
+    return render(model, np.zeros(len(model.design_names)), state)[2]
+
+
+def channel_tensors(model, coef, state, matrices=None):
+    """Affine native-pixel designs ``{channel: (take, design, fixed)}`` of the shared sky renderer, R and Z only."""
     from skysub.sky_subtraction.fiber_lsf import sky_designs
-    _, _, matrices = render(model, coef, state)
+    if matrices is None:
+        matrices = component_matrices(model, state)
     return {ch: (take, parts['lines']+parts['solar'], parts['fixed'])
             for ch, (take, parts) in sky_designs(model, coef, state, matrices).items()}
 
 
-def individual_coefficients(model, state, flux, ivar, mask):
+def individual_coefficients(model, state, flux, ivar, mask, matrices=None):
     """One full component QP with fixed median LSF and median O2 temperature."""
-    from skysub.sky_subtraction.pipeline import render, FAMILIES
-    _, _, matrices = render(model, np.zeros(len(model.design_names)), state)
+    from skysub.sky_subtraction.pipeline import FAMILIES
+    if matrices is None:
+        matrices = component_matrices(model, state)
     slices = model._component_slices(matrices)
     good = (mask==0)&np.isfinite(flux)&np.isfinite(ivar)&(ivar>0)
     if good.sum() <= len(model.design_names):

@@ -386,7 +386,7 @@ def fit_and_render_fibers(work, rows, jobs, started):
     return sky, fits_by_row
 
 
-def run(input_path, ensemble_path, *, gaia_dir=None, lsf_calibration=None, output=None, jobs=1, survey_only=False):
+def run(input_path, ensemble_path, *, gaia_dir=None, lsf_calibration=None, output=None, jobs=1, survey_only=False, render_sky=True):
     """Process one lvmCFrame and publish ``lvmSFrame-skyml-<exposure>.fits``; returns its path.
 
     Workers are forked after the ML ensemble is released. Callers outside the CLI should
@@ -438,7 +438,12 @@ def run(input_path, ensemble_path, *, gaia_dir=None, lsf_calibration=None, outpu
     )
     rows = np.array([i for i in references if str(frame.slit['telescope'][i]).strip() == 'Sci'], int)
     LOG.info('Fitting and rendering %s Science fibers using %s processes', len(rows), jobs)
-    sky, fiber_fits = fit_and_render_fibers(work, rows, jobs, started)
+    if render_sky:
+        sky, fiber_fits = fit_and_render_fibers(work, rows, jobs, started)
+    else:
+        # Preparation for a caller that renders its own sky: SKY stays NaN, so the product's rows are flagged invalid.
+        sky = np.full(frame.flux.shape, np.nan, dtype='f4')
+        fiber_fits = [_survey_fit(references[i], 'survey_only') for i in rows]
 
     qa = [record for fit in fiber_fits for record in fit.qa]
     inputs = ProductInputs(
@@ -483,6 +488,7 @@ def run(input_path, ensemble_path, *, gaia_dir=None, lsf_calibration=None, outpu
             fiber_fit_model='full_sky_decomp_plus_nonnegative_spline',
             ml_scope='IFU center',
             survey_only=survey_only,
+            render_sky=render_sky,
             jobs=jobs,
             **settings.asdict(),
         ),
