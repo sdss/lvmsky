@@ -136,6 +136,9 @@ SUFFIXED_PMD_TABLES = frozenset({"pmd_popmodel_OH.dat", "pmd_refcont.dat"})
 LSF_KERNEL_SIZE = 11
 LSF_MIN_VALID_FRAC = 0.5
 
+# Below this fraction of nonzeros _fit_design forms its Gram matrix sparsely.
+_SPARSE_GRAM_DENSITY = 0.1
+
 
 def peak_memory_requested() -> bool:
     """Whether ``fit`` should trace allocations to report ``peak_memory_mb``.
@@ -1530,7 +1533,6 @@ class SkyDecomp:
             diffuse_slice_local: slice | None = None,
             unconstrained_local: np.ndarray | None = None,
         ) -> tuple[np.ndarray, str, float, np.ndarray, np.ndarray, float]:
-            aw = a_mat * w_vec[:, None]
             yw = y_vec * w_vec
             raw_data_scale = float(np.sqrt(np.nanmean(yw**2))) if yw.size else 1.0
             # Normalise by the UNCLAMPED scale.  The old `max(raw, 1.0)` clamp
@@ -1550,14 +1552,25 @@ class SkyDecomp:
                           else 1.0)
             penalty_scale = data_scale ** 2
             solve_scales.append((raw_data_scale, data_scale))
-            aw = aw / data_scale
             yw = yw / data_scale
-            col_scale = np.sqrt(np.sum(aw**2, axis=0))
-            col_scale = np.where(np.isfinite(col_scale) & (col_scale > 0), col_scale, 1.0)
-            aw = aw / col_scale[None, :]
-
-            n_par_local = int(aw.shape[1])
-            p_dense_local = aw.T @ aw
+            n_par_local = int(a_mat.shape[1])
+            pixel, column = np.nonzero(a_mat)
+            if pixel.size < _SPARSE_GRAM_DENSITY * a_mat.size:
+                # Line designs are ~2% dense; the same Gram matrix and projection
+                # through a sparse product instead of a dense GEMM over zeros.
+                value = a_mat[pixel, column] * (w_vec[pixel] / data_scale)
+                weighted = sp.csc_matrix((value, (pixel, column)), shape=a_mat.shape)
+                col_scale = np.sqrt(np.bincount(column, value * value, minlength=n_par_local))
+                col_scale = np.where(np.isfinite(col_scale) & (col_scale > 0), col_scale, 1.0)
+                p_dense_local = (weighted.T @ weighted).toarray() / np.outer(col_scale, col_scale)
+                projection = (weighted.T @ yw) / col_scale
+            else:
+                aw = (a_mat * w_vec[:, None]) / data_scale
+                col_scale = np.sqrt(np.sum(aw**2, axis=0))
+                col_scale = np.where(np.isfinite(col_scale) & (col_scale > 0), col_scale, 1.0)
+                aw = aw / col_scale[None, :]
+                p_dense_local = aw.T @ aw
+                projection = aw.T @ yw
 
             # Penalize curvature of moon-spline coefficients to suppress oscillations.
             #
@@ -1608,7 +1621,7 @@ class SkyDecomp:
                     _lam_z = self.zodi_smooth_lambda / penalty_scale
                     p_dense_local[i0z:i1z, i0z:i1z] += 2.0 * _lam_z * (d2z_scaled.T @ d2z_scaled)
 
-            q_local = -(aw.T @ yw)
+            q_local = -projection
             p_local = sp.csc_matrix((p_dense_local + p_dense_local.T) / 2.0)
             p_local = sp.triu(p_local).tocsc()
             # --- Adjacent-knot ratio bounds on the moon / zodi spline shape ---
