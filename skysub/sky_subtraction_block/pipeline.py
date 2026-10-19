@@ -1,4 +1,4 @@
-"""Reuse median/ML preparation; infer a centered sky-only LSF for every block."""
+"""Reuse median/ML preparation; infer a sky-only LSF for every block."""
 from concurrent.futures import ProcessPoolExecutor
 from copy import deepcopy
 from pathlib import Path
@@ -51,7 +51,7 @@ def _mapped(function,indices,jobs):
             yield from pool.map(function,indices,chunksize=4)
 
 
-def run(input_path, *, output=None, seed=None, ensemble=None, gaia_dir=None, jobs=8, slit_count=4):
+def run(input_path, *, output=None, seed=None, ensemble=None, gaia_dir=None, jobs=8, slit_count=4, centered=False):
     global _WORK
     _keep_freed_memory()
     started=time.perf_counter(); input_path=Path(input_path).resolve()
@@ -102,7 +102,7 @@ def run(input_path, *, output=None, seed=None, ensemble=None, gaia_dir=None, job
             if not samples:raise ValueError(f'No selected Sky fibers for spectrograph {spectrograph}')
             domain=np.asarray(slit['fiberid'])[slit['spectrographid']==spectrograph]
             for ch in FIT_CHANNELS:
-                coefficient,knots,qa=fit_block(samples,templates['Sci'],ch,float(domain.min()),float(domain.max()),slit_count)
+                coefficient,knots,qa=fit_block(samples,templates['Sci'],ch,float(domain.min()),float(domain.max()),slit_count,centered)
                 if qa['slit_rank']<slit_count:raise ValueError('Selected Sky fibers do not identify the slit basis')
                 # Coefficients belong to the template wavelength basis; Science renders must use it too.
                 blocks[(int(spectrograph),ch)]=dict(coef=coefficient,slit_knots=knots,qa=qa,
@@ -116,6 +116,7 @@ def run(input_path, *, output=None, seed=None, ensemble=None, gaia_dir=None, job
         lsf_row={int(v):j for j,v in enumerate(r.h['LSF_FIBERS'].data['input_row'])}
         if not set(map(int,science))<=set(lsf_row):raise ValueError('Preparation lacks adopted B survey LSFs for some Science fibers')
         LOG.info('Evaluating %s Science fibers from the global blocks',len(science))
+        method='sky_block_centered' if centered else 'sky_block'
         sky,states,widths=evaluate_science(r,blocks,slit,science,lsf_row)
         # Preserve the common compact schema and its coefficient-based diagnostic renderer.
         remove={'FLUX','IVAR','MASK','LSF','SKY','LSF_FIBERS','LSF_COEF','LSF_KNOTS','LSF_META',
@@ -132,7 +133,7 @@ def run(input_path, *, output=None, seed=None, ensemble=None, gaia_dir=None, job
         product.append(fits.BinTableHDU(Table(dict(input_row=science,fiberid=np.asarray(slit['fiberid'])[science])),name='LSF_FIBERS'))
         for extension in build_lsf_hdus(states):product.append(extension)
         qa=[dict(input_row=int(i),fiberid=int(slit['fiberid'][i]),channel=ch,accepted=True,
-            reason='survey_fixed' if ch=='B' else 'sky_block_centered') for i in science for ch in 'BRZ']
+            reason='survey_fixed' if ch=='B' else method) for i in science for ch in 'BRZ']
         product.append(fits.BinTableHDU(Table(rows=qa),name='LSF_QA'))
         block_rows=[]
         for (sp,ch),block in blocks.items():
@@ -144,16 +145,16 @@ def run(input_path, *, output=None, seed=None, ensemble=None, gaia_dir=None, job
         product.append(fits.ImageHDU(np.stack([v['wave_knots'] for v in blocks.values()]),name='BLOCK_WAVE_KNOTS'))
         product.append(fits.BinTableHDU(Table(rows=fiber_rows),name='SKY_FIBER_COEF'))
         provenance=deepcopy(r.provenance)
-        provenance.update(block_timing=block_timing,input=str(input_path),method='sky_block_centered',preparation=str(seed),preparation_sha256=common.sha256(seed),
+        provenance.update(block_timing=block_timing,input=str(input_path),method=method,preparation=str(seed),preparation_sha256=common.sha256(seed),
             block_settings=dict(fitted_channels='RZ',blue_lsf='each Science fiber keeps its survey LSF from the preparation; B is not fitted',slit_basis=slit_count,slit_degree=3,coordinate='SLITMAP.fiberid within spectrograph',
-                wavelength_solution='input, unchanged',constraints='nonnegative, unit integral, zero first moment at all wavelength/slit control pairs',
+                wavelength_solution='input, unchanged',constraints='nonnegative, unit integral'+(', zero first moment' if centered else '; no centroid constraint')+' at all wavelength/slit control pairs',
                 regularization='none',fiber_coefficients='individual full-component QP, fixed telescope-median LSF and O2 temperature',
                 fit_weights='native observed IVAR and input/protected-line masks; 5 A trimmed channel edges',
                 science_lsf='R and Z evaluated exclusively from SkyE/SkyW blocks'),
             block_code_sha256={p.name:common.sha256(p) for p in Path(__file__).parent.glob('*.py')},
             elapsed_seconds=time.perf_counter()-started)
         product.append(fits.ImageHDU(np.frombuffer(json.dumps(provenance,default=common._json).encode(),dtype='u1'),name='SKYML_META'))
-        product[0].header['SKYMETH']='skyml-block'; product[0].header['LSFCENT']=True; product[0].header['BLOCKCH']='RZ'
+        product[0].header['SKYMETH']='skyml-block'; product[0].header['LSFCENT']=centered; product[0].header['BLOCKCH']='RZ'
         fd,temporary=tempfile.mkstemp(prefix='.skyblock-',suffix='.fits',dir=output.parent);os.close(fd)
         try:
             product.writeto(temporary,overwrite=True,checksum=True);os.chmod(temporary,0o644);os.link(temporary,output)

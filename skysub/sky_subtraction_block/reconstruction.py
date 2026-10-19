@@ -14,7 +14,7 @@ class SkyBlockReconstructor(SkyMLReconstructor):
                 coef=np.asarray(self.h['BLOCK_LSF_COEF'].data[i],float),
                 slit_knots=np.asarray(self.h['BLOCK_SLIT_KNOTS'].data[i],float),
                 wave_knots=np.asarray(self.h['BLOCK_WAVE_KNOTS'].data[i],float),
-                wave_degree=int(row['wave_degree']),qa=dict(status=str(row['status'])))
+                wave_degree=int(row['wave_degree']),qa=dict(status=str(row['status']),centered=bool(row['centered']) if 'centered' in row.array.names else True))
 
     def global_state(self,fiberid):
         """R/Z block surfaces at this physical fiber; B is the Science fiber's survey LSF or the Sky telescope median."""

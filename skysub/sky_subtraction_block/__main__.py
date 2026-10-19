@@ -12,9 +12,10 @@ def main():
     p.add_argument('--ensemble',help='Trusted ML archive, required when creating preparation')
     p.add_argument('--gaia-dir');p.add_argument('--jobs',type=int,default=8)
     p.add_argument('--slit-count',type=int,default=4)
+    p.add_argument('--centered',action='store_true',help='Also constrain every block profile to zero first moment (default: unconstrained centroid)')
     a=p.parse_args();logging.basicConfig(level=logging.INFO,format='%(asctime)s %(levelname)s %(message)s')
     from .pipeline import run
-    print(run(a.input,output=a.output,seed=a.seed,ensemble=a.ensemble,gaia_dir=a.gaia_dir,jobs=a.jobs,slit_count=a.slit_count))
+    print(run(a.input,output=a.output,seed=a.seed,ensemble=a.ensemble,gaia_dir=a.gaia_dir,jobs=a.jobs,slit_count=a.slit_count,centered=a.centered))
 
 
 if __name__=='__main__':main()

@@ -23,7 +23,7 @@ def test_exact_continuous_constraints_and_injected_recovery():
         samples.append(dict(position=position,wave=wave,flux=flux,ivar=np.ones(len(wave)),mask=np.zeros(len(wave)),
             designs={'R':(np.ones(len(wave),bool),design,np.zeros(len(wave)))}))
     state=SimpleNamespace(coefficients={'R':truth[:,:,0]},config={'offset_half_width_angstrom':2.5})
-    fitted,_,qa=fit_block(samples,state,'R',1,648,ns)
+    fitted,_,qa=fit_block(samples,state,'R',1,648,ns,centered=True)
     np.testing.assert_allclose(fitted,truth,atol=3e-5)
     assert qa['slit_rank']==4 and qa['n_fibers']==8
     wb=BSpline.design_matrix(np.linspace(0,1,31),[0]*4+[1]*4,3).toarray()
@@ -32,6 +32,25 @@ def test_exact_continuous_constraints_and_injected_recovery():
     assert profiles.min()>0
     np.testing.assert_allclose(profiles.sum(axis=-1),1,atol=1e-8)
     np.testing.assert_allclose(profiles@centers,0,atol=1e-8)
+
+
+def test_centroid_constraint_is_optional_and_off_by_default():
+    rng=np.random.default_rng(11);no,nw,ns=11,4,4;centers=offset_centers(no,2.5)
+    # Truth with a nonzero centroid (shifted LSF): only the unconstrained default can recover it.
+    truth=np.exp(-.5*((np.arange(no)-6.5)/1.5)**2)[:,None,None]*rng.uniform(.9,1.1,(no,nw,ns));truth/=truth.sum(axis=0)
+    assert np.abs(np.einsum('k,kqs->qs',centers,truth)).min()>.05
+    positions=[1,30,100,200,350,500,600,648];basis,_=slit_basis(positions,1,648,ns);wave=np.linspace(6000,7000,240)
+    samples=[]
+    for position,b in zip(positions,basis):
+        design=rng.uniform(0,2,(len(wave),no*nw))
+        samples.append(dict(position=position,wave=wave,flux=design@np.einsum('kqs,s->kq',truth,b).ravel(),ivar=np.ones(len(wave)),
+            mask=np.zeros(len(wave)),designs={'R':(np.ones(len(wave),bool),design,np.zeros(len(wave)))}))
+    state=SimpleNamespace(coefficients={'R':truth[:,:,0]},config={'offset_half_width_angstrom':2.5})
+    free,_,qa=fit_block(samples,state,'R',1,648,ns)
+    np.testing.assert_allclose(free,truth,atol=1e-4)
+    assert not qa['centered'] and qa['centroid_error']>.05
+    forced,_,qa=fit_block(samples,state,'R',1,648,ns,centered=True)
+    assert qa['centered'] and qa['centroid_error']<1e-7 and np.abs(forced-truth).max()>1e-3
 
 
 def test_input_and_solver_guards():
