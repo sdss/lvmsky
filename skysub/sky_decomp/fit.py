@@ -99,6 +99,7 @@ from pathlib import Path
 import inspect
 import pathlib
 import re
+import os
 import time
 import tracemalloc
 
@@ -134,6 +135,19 @@ _DATA_SCALE_MIN = 1e-30
 SUFFIXED_PMD_TABLES = frozenset({"pmd_popmodel_OH.dat", "pmd_refcont.dat"})
 LSF_KERNEL_SIZE = 11
 LSF_MIN_VALID_FRAC = 0.5
+
+
+def peak_memory_requested() -> bool:
+    """Whether ``fit`` should trace allocations to report ``peak_memory_mb``.
+
+    Off unless ``LVMSKY_MEASURE_PEAK_MEMORY`` is set to a non-zero value.
+    tracemalloc records the line of the calling frame on every allocation, and
+    the solver closures are hundreds of lines long, so tracing made one row fit
+    ~2.8x slower (13.1 s against 4.6 s on the golden row); the fit itself is
+    unchanged either way.
+    """
+    return os.environ.get("LVMSKY_MEASURE_PEAK_MEMORY", "").strip() not in ("", "0")
+
 LSF_CHANNELS = (
     ("B", None, 5787.0),
     ("R", 5787.0, 7454.0),
@@ -922,10 +936,13 @@ class SkyDecomp:
         ivar = np.asarray(ivar, float)
         n_lsf_refits = max(int(n_lsf_refits), 0)
         trace_started = False
-        if not tracemalloc.is_tracing():
+        measure_memory = getattr(self, "_measure_peak_memory", None)
+        measure_memory = peak_memory_requested() if measure_memory is None else bool(measure_memory)
+        if measure_memory and not tracemalloc.is_tracing():
             tracemalloc.start()
             trace_started = True
-        tracemalloc.reset_peak()
+        if measure_memory:
+            tracemalloc.reset_peak()
         t0 = time.perf_counter()
 
         self._prefit_o2(flux, ivar)
@@ -1031,7 +1048,7 @@ class SkyDecomp:
         )
 
         fit_elapsed_sec = time.perf_counter() - t0
-        peak_memory_mb = tracemalloc.get_traced_memory()[1] / 1024**2
+        peak_memory_mb = tracemalloc.get_traced_memory()[1] / 1024**2 if measure_memory else np.nan
         if trace_started:
             tracemalloc.stop()
         self.peak_memory_mb = peak_memory_mb

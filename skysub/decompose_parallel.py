@@ -9,6 +9,9 @@ telluric split-zodi fit with ridge-corrected PALACE OH line strengths, whose
 blue-channel LSF is either fitted from the solar lines (``--blue-lsf solar``)
 or held at the survey-wide empirical reference (``--blue-lsf reference``).
 
+The ``peak_memory_mb`` result column is NaN unless ``LVMSKY_MEASURE_PEAK_MEMORY=1``
+is set: allocation tracing makes each fit ~2.8x slower.
+
 Usage:
     python decompose_parallel.py <data_file> [data_root] [options]
 
@@ -61,7 +64,7 @@ from skysub.sky_decomp.moon_zodi_model import (
     validate_decomposition_data_root,
     wave_sha256,
 )
-from skysub.sky_decomp.fit import SPLIT_ZODI_CONTINUUM_DEFAULTS
+from skysub.sky_decomp.fit import SPLIT_ZODI_CONTINUUM_DEFAULTS, peak_memory_requested
 
 try:
     from threadpoolctl import threadpool_limits
@@ -1926,7 +1929,8 @@ def _fit_worker_row(kind, idx, flux_row, ivar_row, fixed_lsf_state=None, initial
         schema = _telluric_decomposer(kind, idx, schema_only=True)
         result = schema.failed_input_result(str(error))
         return result, _reliability_flags(result, row_index=idx)
-    decomposer._measure_peak_memory = _WORKER_COMPACT_CACHE_DIR is None
+    # Tracing allocations costs ~2.8x the fit; only on request (LVMSKY_MEASURE_PEAK_MEMORY=1).
+    decomposer._measure_peak_memory = _WORKER_COMPACT_CACHE_DIR is None and peak_memory_requested()
     if _WORKER_BLUE_REFERENCE_FILE is not None:
         decomposer.blue_reference_lsf = _blue_reference_lsf(kind, idx)
     if initial_lsf_state is not None:

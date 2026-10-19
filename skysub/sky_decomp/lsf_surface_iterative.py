@@ -26,7 +26,7 @@ from .result_io import (
     METRIC_COLUMNS,
     STATE_CONFIG_COLUMNS,
 )
-from .fit import LSF_CHANNELS, LSF_KERNEL_SIZE, SkyDecomp, SkyDecompResult
+from .fit import LSF_CHANNELS, LSF_KERNEL_SIZE, SkyDecomp, SkyDecompResult, peak_memory_requested
 
 
 LSF_STATE_SCHEMA_VERSION = 1
@@ -2092,7 +2092,7 @@ class SkyDecompLSFSurfaceIterative(SkyDecomp):
         elapsed = time.perf_counter() - started
         peak_memory_mb = (
             tracemalloc.get_traced_memory()[1] / 1024**2
-            if getattr(self, "_measure_peak_memory", True) else np.nan)
+            if getattr(self, "_measuring_peak_memory", False) else np.nan)
         if trace_started:
             tracemalloc.stop()
 
@@ -2288,10 +2288,13 @@ class SkyDecompLSFSurfaceIterative(SkyDecomp):
         self._fixed_lsf_state = deepcopy(fixed_lsf_state)
 
         trace_started = False
-        if getattr(self, "_measure_peak_memory", True) and not tracemalloc.is_tracing():
+        measure_memory = getattr(self, "_measure_peak_memory", None)
+        self._measuring_peak_memory = measure_memory = (
+            peak_memory_requested() if measure_memory is None else bool(measure_memory))
+        if measure_memory and not tracemalloc.is_tracing():
             tracemalloc.start()
             trace_started = True
-        if getattr(self, "_measure_peak_memory", True):
+        if measure_memory:
             tracemalloc.reset_peak()
         started = time.perf_counter()
         self._set_lsf_state(None)
