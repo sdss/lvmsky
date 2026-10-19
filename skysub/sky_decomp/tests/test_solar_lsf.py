@@ -172,6 +172,19 @@ def test_solar_tensor_matches_direct_double_integral(synthetic_grid, count, half
     np.testing.assert_allclose(again, tensor, rtol=1e-12, atol=1e-12)
 
 
+@pytest.mark.parametrize("count, half_width", [(11, 3.0), (15, 2.5), (11, 2.5)])
+def test_solar_tensor_matches_sparse_reference(synthetic_grid, count, half_width):
+    # The edge/moment regrouping must reproduce the per-sample sparse operator.
+    path, wave, _, _ = synthetic_grid
+    knots = _uniform_knots(wave)
+    fast = solar_lsf._solar_tensor(wave, knots, 3, str(path), chunk=700,
+        offset_basis_count=count, offset_half_width_angstrom=half_width)
+    reference = solar_lsf._solar_tensor_sparse(wave, knots, 3, str(path), chunk=700,
+        offset_basis_count=count, offset_half_width_angstrom=half_width)
+    assert fast.shape == reference.shape
+    np.testing.assert_allclose(fast, reference, rtol=0.0, atol=1.0e-13 * np.max(np.abs(reference)))
+
+
 def test_center_offsets_gives_the_same_constrained_solution():
     rng = np.random.default_rng(3)
     wave = np.linspace(4000.0, 4100.0, 400)

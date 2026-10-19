@@ -30,6 +30,8 @@ import scipy.sparse as sp
 from .fit import LSF_CHANNELS, _solar_templates, read_static_matrix, vac_to_air
 from .lsf_spline2d import (
     _build_integrated_components,
+    _offset_cdf_table,
+    _offset_knots,
     native_pixel_edges,
     evaluate_lsf_diagnostics,
 )
@@ -49,7 +51,7 @@ REFERENCE_BLUE_MODEL = "fixed_empirical_reference"
 _BLUE = LSF_CHANNELS[0]
 
 
-def _solar_tensor(
+def _solar_tensor_sparse(
     wave: np.ndarray,
     knots: np.ndarray,
     degree: int,
@@ -57,7 +59,7 @@ def _solar_tensor(
     chunk: int = 20000,
     offset_basis_count: int = 11, offset_half_width_angstrom: float = 3.0,
 ) -> np.ndarray:
-    """Exact midpoint-source-cell quadrature of ``G`` over every Meftah sample."""
+    """Reference build of ``G`` through the per-sample sparse bin operator (slow; kept for tests)."""
     raw = read_static_matrix(solar_path, ";")
     source_wave = vac_to_air(raw[:, 0] * 10.0)
     # Same unit as the Moon/Zodi templates: median over the whole file.
@@ -93,6 +95,123 @@ def _solar_tensor(
     return tensor
 
 
+def _solar_samples(solar_path: str, wave: np.ndarray, output: np.ndarray, half_width: float):
+    """Air wavelengths and source-cell weights of the Meftah samples that can reach ``output`` pixels."""
+    raw = read_static_matrix(solar_path, ";")
+    source_wave = vac_to_air(raw[:, 0] * 10.0)
+    # Same unit as the Moon/Zodi templates: median over the whole file.
+    flux = raw[:, 1] / np.nanmedian(raw[:, 1])
+    weight = flux * np.diff(native_pixel_edges(source_wave))
+    rows = np.flatnonzero(output)
+    edges = native_pixel_edges(wave)
+    active = np.flatnonzero(
+        (source_wave >= edges[rows[0]] - half_width) & (source_wave <= edges[rows[-1] + 1] + half_width)
+        & np.isfinite(weight)
+    )
+    return source_wave[active], weight[active], rows, edges
+
+
+def _solar_tensor(
+    wave: np.ndarray,
+    knots: np.ndarray,
+    degree: int,
+    solar_path: str,
+    chunk: int = 20000,
+    offset_basis_count: int = 11, offset_half_width_angstrom: float = 3.0,
+) -> np.ndarray:
+    """Exact midpoint-source-cell quadrature of ``G`` over every Meftah sample.
+
+    Same integral as `_solar_tensor_sparse`, regrouped by pixel edge instead of
+    by sample.  With ``C_k`` the unit-area M-spline CDF and ``c_sb = w_s B_b(l_s)``,
+
+        G[i] = (E[i+1] - E[i] + D[i]) / width_i,
+        E[j, k, b] = sum_{|e_j - l_s| < hw} c_sb C_k(e_j - l_s),
+        D[i, b]    = sum_{e_i - hw < l_s <= e_{i+1} - hw} c_sb,
+
+    because ``C_k = 1`` beyond ``+hw`` (the ``D`` term, a direct local sum, not a
+    difference of running totals) and ``0`` below ``-hw``.  On each offset knot
+    interval ``C_k`` is a quartic in ``u in [0, 1)``, so ``E`` is the contraction of
+    the CDF table with local moments ``sum c_sb u_s**p``; every sample enters each
+    of the ~2 hw / pixel edges it can reach once.  ``chunk`` bounds the samples
+    processed at once, and with it the per-edge power arrays (memory, not result).
+    The offset knots must be uniform: the interval index and ``u`` use one step.
+    """
+    if np.any(np.diff(wave) <= 0.0):
+        raise ValueError("wave must be strictly increasing")
+    output = _channel_mask(wave, *_BLUE[1:])
+    half_width = float(offset_half_width_angstrom)
+    lam, weight, rows, edges = _solar_samples(solar_path, wave, output, half_width)
+    if np.any(np.diff(lam) < 0.0):
+        order = np.argsort(lam, kind="stable")
+        lam, weight = lam[order], weight[order]
+    n_basis = knots.size - degree - 1
+    n_offset = int(offset_basis_count)
+    if not np.all(np.diff(rows) == 1):
+        raise ValueError("solar tensor output pixels must be contiguous")
+    span_edges = edges[rows[0] : rows[-1] + 2]
+    n_edge = span_edges.size
+    offset_knots = _offset_knots(n_offset, half_width)
+    n_interval = offset_knots.size - 1
+    step = (offset_knots[-1] - offset_knots[0]) / n_interval
+    if not np.allclose(np.diff(offset_knots), step, rtol=1e-12, atol=0.0):
+        raise ValueError("solar tensor requires uniform offset knots")
+    table = _offset_cdf_table(n_offset, half_width)          # (interval, k, power)
+    n_power = table.shape[-1]
+    moments = np.zeros((n_edge * n_interval, n_power, n_basis))
+    tail = np.zeros((n_edge - 1, n_basis))
+    chunk = max(int(chunk), 1)
+    for start in range(0, lam.size, chunk):
+        part = lam[start : start + chunk]
+        c = weight[start : start + chunk, None] * evaluate_bspline_basis(
+            np.clip(part, knots[degree], knots[-degree - 1]), knots, degree)
+        # Edges with x = e_j - l in [-hw, hw): part - hw <= e_j < part + hw.  The tail
+        # below takes x >= hw, so each (edge, sample) pair is counted exactly once.
+        first = np.searchsorted(span_edges, part - half_width, side="left")
+        last = np.searchsorted(span_edges, part + half_width, side="left")
+        for shift in range(int(np.max(last - first, initial=0))):
+            edge = first + shift
+            keep = edge < last
+            if not np.any(keep):
+                continue
+            edge, sample = edge[keep], np.flatnonzero(keep)
+            x = span_edges[edge] - part[sample]
+            interval = np.clip(((x - offset_knots[0]) / step).astype(np.int64), 0, n_interval - 1)
+            u = (x - offset_knots[interval]) / step
+            # Edge is nondecreasing in the sample and, for one edge, the interval
+            # decreases, so this flat index is sorted and reduceat sums contiguous runs.
+            flat = edge * n_interval + (n_interval - 1 - interval)
+            power = np.empty((sample.size, n_power, n_basis))
+            power[:, 0] = c[sample]
+            for p in range(1, n_power):
+                power[:, p] = power[:, p - 1] * u[:, None]
+            boundary = np.flatnonzero(np.r_[True, flat[1:] != flat[:-1]])
+            target = flat[boundary]
+            target = (target // n_interval) * n_interval + (n_interval - 1 - target % n_interval)
+            moments[target] += np.add.reduceat(power, boundary, axis=0)
+        # Tail term: samples with e_i - hw < l <= e_{i+1} - hw, for every pixel i.
+        lower = np.searchsorted(part, span_edges - half_width, side="right")
+        count = np.diff(lower)
+        nonempty = np.flatnonzero(count > 0)
+        if nonempty.size:
+            tail[nonempty] += _segment_sums(c, lower, nonempty)
+    moments = moments.reshape(n_edge, n_interval, n_power, n_basis)
+    cumulative = np.einsum("jmpb,mkp->jkb", moments, table)
+    widths = np.diff(span_edges)
+    return (cumulative[1:] - cumulative[:-1] + tail[:, None, :]) / widths[:, None, None]
+
+
+def _segment_sums(values: np.ndarray, starts: np.ndarray, nonempty: np.ndarray) -> np.ndarray:
+    """Sums of ``values[starts[i]:starts[i+1]]`` for the listed nonempty segments."""
+    out = np.empty((nonempty.size,) + values.shape[1:])
+    # reduceat over [start_i, start_{i+1}) pairs: interleave starts and stops.
+    bounds = np.empty(2 * nonempty.size, dtype=np.int64)
+    bounds[0::2] = starts[nonempty]
+    bounds[1::2] = starts[nonempty + 1]
+    padded = np.concatenate([values, np.zeros((1,) + values.shape[1:])])
+    out[:] = np.add.reduceat(padded, bounds, axis=0)[0::2]
+    return out
+
+
 def _disk_cache_path(wave_bytes, knots_bytes, degree, solar_path, size, mtime, offset_basis_count, offset_half_width_angstrom) -> Path:
     """File for one tensor; the key covers every input and the source of the code that builds it."""
     key = hashlib.sha256()
@@ -106,7 +225,7 @@ def _disk_cache_path(wave_bytes, knots_bytes, degree, solar_path, size, mtime, o
 
 @lru_cache(maxsize=4)
 def _solar_tensor_cached(wave_bytes, knots_bytes, degree, solar_path, size, mtime, offset_basis_count, offset_half_width_angstrom) -> np.ndarray:
-    # The tensor depends on the grid, knots and solar file only, never on the exposure: ~25 s to build, ~2 MB to keep.
+    # The tensor depends on the grid, knots and solar file only, never on the exposure: ~2 s to build, ~2 MB to keep.
     path = _disk_cache_path(wave_bytes, knots_bytes, degree, solar_path, size, mtime, offset_basis_count, offset_half_width_angstrom)
     tensor = None
     try:
