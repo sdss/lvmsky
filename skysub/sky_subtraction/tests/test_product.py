@@ -13,7 +13,7 @@ from skysub.sky_decomp.lsf_reference import load_survey_ascii_lsf
 from skysub.sky_subtraction import pipeline
 from skysub.sky_subtraction.decomp_adapter import MedianFits
 from skysub.sky_subtraction.io import Median
-from skysub.sky_subtraction.product import MLCoefficients, ProductInputs, sha256, write_product
+from skysub.sky_subtraction.product import MLCoefficients, ProductInputs, build_product, sha256, write_product
 from skysub.sky_subtraction.rendering import render
 
 LSF = Path(__file__).parents[2] / 'sky_decomp/data/lsf'
@@ -24,13 +24,13 @@ def test_output_is_reconstructible_and_atomic(tmp_path):
     ref = load_survey_ascii_lsf(LSF, 500)
     refs = [ref, deepcopy(ref)]
     n = len(wave)
-    flux = np.full((2, n), 1e-14, dtype='f4')
+    flux = np.full((3, n), 1e-14, dtype='f4')
     first = fits.PrimaryHDU()
     first.header['EXPOSURE'] = 1
     image = fits.ImageHDU(flux, name='FLUX')
     image.header['BUNIT'] = 'erg / (Angstrom s cm2)'
     source = tmp_path / 'lvmCFrame-00000001.fits'
-    slit = Table(dict(fiberid=[500, 501], telescope=['Sci', 'Sci']))
+    slit = Table(dict(fiberid=[500, 501, 502], telescope=['Sci', 'Sci', 'SkyE']))
     fits.HDUList(
         [
             first,
@@ -45,6 +45,8 @@ def test_output_is_reconstructible_and_atomic(tmp_path):
     raw = np.full_like(flux, 1e-15)
     sky = raw + raw / 2 + raw / 4
     sky[0, wave > 8000] = np.nan
+    sky[2] = 3e-15
+    sky[2, 5] = 1e-14
     results = {
         k: SimpleNamespace(lsf_state=ref, coef=np.ones(2), fit_status='Solved', reduced_chi2=1.0, t_o2=190.0)
         for k in ('Sci', 'SkyE', 'SkyW')
@@ -61,6 +63,8 @@ def test_output_is_reconstructible_and_atomic(tmp_path):
     inputs = ProductInputs(
         sky=sky,
         rows=np.array([0, 1]),
+        arm_rows=np.array([2]),
+        arm_states=[ref],
         adopted=refs,
         candidates=refs,
         qa=[dict(channel=ch, accepted=True, reason='insitu', fiberid=f) for f in [500, 501] for ch in 'RZ'],
@@ -100,6 +104,15 @@ def test_output_is_reconstructible_and_atomic(tmp_path):
         assert h['SKY'].header['BUNIT'] == h['FLUX'].header['BUNIT']
         assert np.all(h['IVAR'].data[0, wave > 8000] == 0)
         assert np.all(h['MASK'].data[0, wave > 8000] != 0)
+        np.testing.assert_array_equal(h['SLITMAP'].data['skyml_applied'], [True, True, True])
+        assert h['FLUX'].data[2, 5] == 0 and h['SKY'].data[2, 5] == np.float32(1e-14)
+    # The in-memory product (used by the block method) equals what is published.
+    memory = build_product(source, inputs, {})
+    with fits.open(dest) as h:
+        assert sorted(x.name for x in memory) == sorted(x.name for x in h)
+        for name in ('FLUX', 'SKY', 'MED_COEF'):
+            np.testing.assert_array_equal(memory[name].data, h[name].data)
+        assert memory['ML_COEF'].data['coef'].dtype.kind == 'f' and memory['ML_COEF'].data['coef'].itemsize == 4
     existing = sha256(dest)
     with pytest.raises(FileExistsError):
         write_product(source, dest, inputs, {})

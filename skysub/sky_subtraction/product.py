@@ -4,7 +4,7 @@ import hashlib
 import json
 import os
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
@@ -21,6 +21,35 @@ FORMAT_VERSION = 3
 INVALID_SKY_MASK = 1
 DRP_SKY_EXTENSIONS = ('SKY_EAST', 'SKY_EAST_IVAR', 'SKY_WEST', 'SKY_WEST_IVAR')
 HISTORY_VECTORS = ('continuum_knots', 'continuum_coef', 'variance_continuum_coef')
+# Extension order of the DRP lvmSFrame, then of the SkyML extensions every method writes.
+# Method-specific extensions follow them and SKYML_META is last.
+STANDARD_ORDER = (
+    'FLUX', 'IVAR', 'MASK', 'WAVE', 'LSF', 'SKY', 'FLUXCAL_STD', 'FLUXCAL_SCI', 'FLUXCAL_MOD', 'SLITMAP',
+)
+SHARED_ORDER = (
+    *STANDARD_ORDER,
+    'GAIA', 'GAIA_SOURCES', 'MED_LABELS', 'MED_META', 'MED_QA', 'MED_FLUX', 'MED_IVAR', 'MED_COUNT',
+    'LSF_FIBERS', 'LSF_COEF', 'LSF_KNOTS', 'LSF_META', 'CAND_LSF_COEF', 'CAND_LSF_KNOTS', 'CAND_LSF_META',
+    'MED_LSF_COEF', 'MED_LSF_KNOTS', 'MED_LSF_META', 'LSF_QA', 'MED_FIT_MASK', 'MED_COEF', 'COMPONENT_NAMES',
+    'ML_COEF', 'FIT_LSF_HISTORY', 'RENDER_META', 'RENDER_TRANSMISSION', 'LSF_FIT_MASK',
+    'INIT_LSF_COEF', 'INIT_LSF_KNOTS', 'INIT_LSF_META',
+)
+
+
+def lvmsframe_layout(product, output, source):
+    """Order the extensions identically for every method; FILENAME and the unit strings follow the lvmCFrame."""
+    product[0].header['FILENAME'] = Path(output).name
+    product['IVAR'].header['BUNIT'] = str(FLUX_UNIT**-2)
+    with fits.open(source, memmap=True) as h:
+        units = {c.name: c.unit for c in h['SLITMAP'].columns if c.unit}
+    slit = product['SLITMAP']
+    for name, unit in units.items():
+        slit.columns[name].unit = unit
+    slit.header.update({f'TUNIT{i + 1}': u for i, n in enumerate(slit.columns.names) if (u := units.get(n))})
+    rank = {name: i for i, name in enumerate(SHARED_ORDER)}
+    last = len(rank)
+    key = lambda x: last + 1 if x.name == 'SKYML_META' else rank.get(x.name, last)  # noqa: E731
+    return fits.HDUList([product[0], *sorted(product[1:], key=key)])
 
 
 def sha256(path):
@@ -88,6 +117,9 @@ class ProductInputs:
     stack_meta: Table
     ml: MLCoefficients
     fit_mask: np.ndarray  # science-line mask of the individual fiber fits
+    # Sky fibers subtracted with their telescope model
+    arm_rows: np.ndarray = field(default_factory=lambda: np.empty(0, int))
+    arm_states: list = field(default_factory=list)  # LSF state used for each of ``arm_rows``
 
 
 def _frame_hdus(input_path, inputs):
@@ -98,16 +130,19 @@ def _frame_hdus(input_path, inputs):
     product['IVAR'].data /= scale**2
     product['FLUX'].header['BUNIT'] = str(FLUX_UNIT)
     product['IVAR'].header['BUNIT'] = str(1 / FLUX_UNIT**2)
-    sky, rows = inputs.sky, inputs.rows
+    sky = inputs.sky
+    rows = np.concatenate([inputs.rows, inputs.arm_rows]).astype(int)
     processed = np.isin(np.arange(len(sky)), rows)
     product['FLUX'].data[rows] -= sky[rows]
     invalid = processed[:, None] & ~np.isfinite(sky)
     product['MASK'].data[invalid] |= INVALID_SKY_MASK
     product['IVAR'].data[invalid] = 0
     wave = np.asarray(product['WAVE'].data, float)
-    for row, state in zip(rows, inputs.adopted, strict=True):
+    for row, state in zip(rows, [*inputs.adopted, *inputs.arm_states], strict=True):
         product['LSF'].data[row] = fwhm_grid(state, wave)
-    product['FLUX'].header['COMMENT'] = 'Science flux minus SKY; other rows retain observed CFrame flux'
+    product['FLUX'].header['COMMENT'] = (
+        'Science and Sky-fiber flux minus SKY (SLITMAP skyml_applied); other rows retain observed CFrame flux'
+    )
     header = product[0].header
     header['SKYMETH'] = 'skyml'
     header['SKYMLVER'] = FORMAT_VERSION
@@ -124,7 +159,7 @@ def _frame_hdus(input_path, inputs):
     return product, np.asarray(slit['fiberid'])
 
 
-def _lsf_hdus(prefix, states):
+def lsf_hdus(prefix, states):
     hdus = build_lsf_hdus(states)
     for hdu in hdus:
         hdu.name = prefix + hdu.name
@@ -156,14 +191,15 @@ def _model_hdus(inputs, fiberids):
             name='MED_QA',
         ),
     ]
-    for name, field in (('FLUX', 'flux'), ('IVAR', 'ivar'), ('COUNT', 'count')):
-        hdus.append(fits.ImageHDU(np.array([getattr(inputs.medians[k], field) for k in labels]), name='MED_' + name))
+    for name, attribute in (('FLUX', 'flux'), ('IVAR', 'ivar'), ('COUNT', 'count')):
+        values = np.array([getattr(inputs.medians[k], attribute) for k in labels])
+        hdus.append(fits.ImageHDU(values, name='MED_' + name))
     hdus.append(
         fits.BinTableHDU(Table({'input_row': inputs.rows, 'fiberid': fiberids[inputs.rows]}), name='LSF_FIBERS')
     )
-    hdus += _lsf_hdus('', inputs.adopted)
-    hdus += _lsf_hdus('CAND_', inputs.candidates)
-    hdus += _lsf_hdus('MED_', [fits_by_label[k].lsf_state for k in labels])
+    hdus += lsf_hdus('', inputs.adopted)
+    hdus += lsf_hdus('CAND_', inputs.candidates)
+    hdus += lsf_hdus('MED_', [fits_by_label[k].lsf_state for k in labels])
     hdus += [
         fits.BinTableHDU(Table(rows=inputs.qa), name='LSF_QA'),
         fits.ImageHDU(inputs.median_fits.fit_mask, name='MED_FIT_MASK'),
@@ -188,7 +224,7 @@ def _model_hdus(inputs, fiberids):
         fits.ImageHDU(inputs.median_fits.transmission, name='RENDER_TRANSMISSION'),
         fits.ImageHDU(np.asarray(inputs.fit_mask, dtype='u1'), name='LSF_FIT_MASK'),
     ]
-    hdus += _lsf_hdus('INIT_', inputs.initial_states)
+    hdus += lsf_hdus('INIT_', inputs.initial_states)
     return hdus
 
 
@@ -205,12 +241,21 @@ def publish(product, output, mode):
         os.unlink(temporary)
 
 
-def write_product(input_path, output, inputs, provenance):
+def build_product(input_path, inputs, provenance):
     """Preserve CFrame rows; processed Science rows carry the subtraction and model validity."""
     product, fiberids = _frame_hdus(input_path, inputs)
+    product.extend(_model_hdus(inputs, fiberids))
+    product.append(json_hdu('SKYML_META', provenance, indent=2, allow_nan=True))
+    return product
+
+
+def publish_product(product, output, input_path):
+    publish(lvmsframe_layout(product, output, input_path), output, Path(input_path).stat().st_mode & 0o777)
+
+
+def write_product(input_path, output, inputs, provenance):
+    product = build_product(input_path, inputs, provenance)
     try:
-        product.extend(_model_hdus(inputs, fiberids))
-        product.append(json_hdu('SKYML_META', provenance, indent=2, allow_nan=True))
-        publish(product, output, Path(input_path).stat().st_mode & 0o777)
+        publish_product(product, output, input_path)
     finally:
         product.close()

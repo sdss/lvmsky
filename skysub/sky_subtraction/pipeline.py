@@ -36,8 +36,8 @@ from .ml import (
     sky_arm_residual_correction,
     sky_line_scaling_correction,
 )
-from .product import MLCoefficients, ProductInputs, _json, sha256, write_product
-from .rendering import FACTOR, FAMILIES, channel_slices, fwhm_grid, render, sky_parts
+from .product import MLCoefficients, ProductInputs, _json, build_product, sha256, write_product
+from .rendering import FACTOR, FAMILIES, arm_sky, channel_slices, fwhm_grid, render, sky_parts
 from .settings import SETTINGS
 
 # Names also used by skysub.sky_subtraction_block and analysis scripts.
@@ -386,8 +386,39 @@ def fit_and_render_fibers(work, rows, jobs, started):
     return sky, fits_by_row
 
 
-def run(input_path, ensemble_path, *, gaia_dir=None, lsf_calibration=None, output=None, jobs=1, survey_only=False, render_sky=True):
+def sky_arm_rows(slit, references):
+    """Usable SkyE/SkyW rows of the CFrame."""
+    return np.array([i for i in references if str(slit['telescope'][i]).strip() in SKY_ARMS], int)
+
+
+def render_sky_arm_fibers(sky, slit, rows, median_fits):
+    """Write each Sky fiber's telescope median model into ``sky``; returns the median LSF state used per row."""
+    labels = [str(slit['telescope'][i]).strip() for i in rows]
+    spectra = {
+        label: arm_sky(median_fits.models[label], median_fits.results[label].coef, median_fits.results[label].lsf_state)
+        for label in set(labels)
+    }
+    for row, label in zip(rows, labels, strict=True):
+        sky[row] = spectra[label]
+    return [median_fits.results[label].lsf_state for label in labels]
+
+
+def run(
+    input_path,
+    ensemble_path,
+    *,
+    gaia_dir=None,
+    lsf_calibration=None,
+    output=None,
+    jobs=1,
+    survey_only=False,
+    render_sky=True,
+    return_hdus=False,
+):
     """Process one lvmCFrame and publish ``lvmSFrame-skyml-<exposure>.fits``; returns its path.
+
+    With ``return_hdus`` nothing is written and the product's HDUList is returned (``output`` only
+    names the Gaia cache folder); the caller owns it.
 
     Workers are forked after the ML ensemble is released. Callers outside the CLI should
     limit native threads (OPENBLAS/OMP/MKL_NUM_THREADS=1) before importing numpy.
@@ -440,10 +471,13 @@ def run(input_path, ensemble_path, *, gaia_dir=None, lsf_calibration=None, outpu
     LOG.info('Fitting and rendering %s Science fibers using %s processes', len(rows), jobs)
     if render_sky:
         sky, fiber_fits = fit_and_render_fibers(work, rows, jobs, started)
+        arm_rows = sky_arm_rows(frame.slit, references)
+        arm_states = render_sky_arm_fibers(sky, frame.slit, arm_rows, median_fits)
     else:
         # Preparation for a caller that renders its own sky: SKY stays NaN, so the product's rows are flagged invalid.
         sky = np.full(frame.flux.shape, np.nan, dtype='f4')
         fiber_fits = [_survey_fit(references[i], 'survey_only') for i in rows]
+        arm_rows, arm_states = np.empty(0, int), []
 
     qa = [record for fit in fiber_fits for record in fit.qa]
     inputs = ProductInputs(
@@ -461,6 +495,8 @@ def run(input_path, ensemble_path, *, gaia_dir=None, lsf_calibration=None, outpu
         stack_meta=Table(stack['META'].data),
         ml=ml,
         fit_mask=corrections.science_mask,
+        arm_rows=arm_rows,
+        arm_states=arm_states,
     )
     provenance = dict(
         input=str(input_path),
@@ -481,6 +517,8 @@ def run(input_path, ensemble_path, *, gaia_dir=None, lsf_calibration=None, outpu
         },
         selected_fiberids={k: work.fiberids[v] for k, v in selection.indices.items()},
         median_lsf_rule='equal mean of selected valid fiber profiles; median approximation',
+        sky_fiber_model='SkyE/SkyW rows: telescope median decomposition rendered with the median LSF; '
+        'FLUX is a residual of the fibers that build that median, not an independent test',
         median_variance='heteroscedastic Gaussian median asymptote; no spatial covariance',
         uncertainty='IVAR: observed only; full sky variance unknown; '
         'reconstructed SKY_EPI: diagonal coefficient ensemble approximation',
@@ -495,7 +533,12 @@ def run(input_path, ensemble_path, *, gaia_dir=None, lsf_calibration=None, outpu
         elapsed_seconds=time.perf_counter() - started,
     )
     LOG.info(
-        'Writing %s; insitu accepted %s/%s channel fits', output, sum(bool(r.get('accepted')) for r in qa), len(qa)
+        '%s; insitu accepted %s/%s channel fits',
+        'Built in memory' if return_hdus else f'Writing {output}',
+        sum(bool(r.get('accepted')) for r in qa),
+        len(qa),
     )
+    if return_hdus:
+        return build_product(input_path, inputs, provenance)
     write_product(input_path, output, inputs, provenance)
     return output

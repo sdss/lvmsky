@@ -18,7 +18,8 @@ def main():
             np.testing.assert_array_equal(slit['fiberid'],source['SLITMAP'].data['fiberid'])
             np.testing.assert_array_equal(h['WAVE'].data,source['WAVE'].data)
             assert len(h['BLOCK_LSF_META'].data)==6 and set(h['BLOCK_LSF_META'].data['channel'])=={'R','Z'}
-            np.testing.assert_array_equal(np.flatnonzero(slit['skyml_applied']),indices)
+            sci=np.char.strip(np.asarray(slit['telescope']).astype(str))=='Sci'
+            np.testing.assert_array_equal(np.flatnonzero(slit['skyml_applied']&sci),indices)
             maximum=0.;centroid=0.;normalization=0.
             for j,meta in enumerate(h['BLOCK_LSF_META'].data):
                 coefficient=np.asarray(h['BLOCK_LSF_COEF'].data[j],float)
@@ -35,7 +36,7 @@ def main():
                     np.broadcast_to(h['BLOCK_WAVE_KNOTS'].data[j],(int(selected.sum()),len(h['BLOCK_WAVE_KNOTS'].data[j]))))
                 maximum=max(maximum,float(np.max(abs(expected-actual))))
                 np.testing.assert_allclose(actual,expected,atol=1e-13,rtol=0)
-            assert normalization<1e-7 and centroid<1e-7
+            assert normalization<1e-7 and (centroid<1e-7 or not h[0].header.get('LSFCENT',True))
             seed=row.get('seed') or str(Path(row['output']).with_name(f"lvmSFrame-skyml-preparation-{row['expnum']:08d}.fits"))
             with fits.open(seed,memmap=True) as prepared:
                 np.testing.assert_array_equal(prepared['LSF_FIBERS'].data['input_row'],mapping['input_row'])

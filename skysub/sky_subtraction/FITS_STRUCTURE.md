@@ -14,6 +14,24 @@ Current contract, measured on 2026-10-15. Working filenames remain `lvmSFrame-sk
 
 The standard frame content occupies about 304 MiB; final SKY adds 92 MiB. The rest stores coefficient/state/selection/context tables and observed median data. The standard LSF FWHM image is retained; full LSF surface coefficients are separate and compact.
 
+## Layout shared by all methods
+
+Every method (in-fiber, block) writes the same extensions in the same order, with the same column names: the lvmSFrame block `FLUX, IVAR, MASK, WAVE, LSF, SKY, FLUXCAL_STD, FLUXCAL_SCI, FLUXCAL_MOD, SLITMAP`, then the SkyML extensions in the order of the table below (`product.SHARED_ORDER`), then the method-specific ones, then `SKYML_META`. Headers, WAVE, FLUXCAL_*, and SLITMAP (with units, plus `skyml_applied`) are inherited from the lvmCFrame. `FILENAME` names the output file. Method-specific primary keywords are only `SKYMETH` (and `LSFCENT`, `BLOCKCH` for block). Deliberately absent against the DRP lvmSFrame: `SKY_IVAR` (see Storage boundary); against the lvmCFrame: `SKY_EAST/WEST` and their IVAR.
+
+What differs by method is content, not structure:
+
+| Extension | In-fiber | Block |
+|---|---|---|
+| `LSF_COEF/KNOTS/META` | Adopted per-fiber R/Z profile (in situ or survey) | R/Z block surface at the fiber; B survey |
+| `CAND_LSF_*` | Last fitted candidate, adopted or not | Repeats `LSF_*` (every block profile is adopted) |
+| `LSF_QA` | R/Z record per Science fiber from the fit | R/Z record per Science fiber with the same columns; fit-only columns are NaN/0, `reason` is `sky_block` or `sky_block_centered`, `converged` is the QP status |
+| `FIT_LSF_HISTORY` | Present when per-fiber fits ran | Absent (no per-fiber fit); also absent for `--survey-only` |
+| `BLOCK_LSF_*`, `SKY_FIBER_COEF` | Absent | Block surfaces and Sky-fiber coefficients |
+
+### Sky fibers
+
+`SKY` and `FLUX` cover the Science fibers and every usable (`fibstatus == 0`) SkyE and SkyW fiber; `SLITMAP.skyml_applied` marks these rows and `telescope` tells them apart. A Sky fiber's SKY is its telescope's median decomposition (`MED_COEF`) rendered with that fiber's LSF: the telescope median LSF (`MED_LSF_*`) for the in-fiber method; the block R/Z surface at the fiber plus the median B LSF for the block method. There are no ML, OH or Blue residual-transfer terms. `FLUX` is the observed minus that SKY. It is a residual of the fibers that build the median (and, for block, the LSF), so it is not an independent test. `LSF` holds the FWHM of the LSF used. Sky fibers are not in `LSF_FIBERS`, `LSF_COEF` or `LSF_QA`; `SkyMLReconstructor.sky(fiberid)` renders them in memory. Standard-star (`Spec`) and flagged fibers keep the observed CFrame flux.
+
 ## Stored extensions
 
 Example: exposure 59750, 1944 input fibers × 12401 wavelengths; 1754 processed Science fibers. Shapes are NumPy dimensions. Sizes include padded FITS data blocks, excluding headers.
@@ -21,7 +39,7 @@ Example: exposure 59750, 1944 input fibers × 12401 wavelengths; 1754 processed 
 | Extension | Type / shape | MiB | Meaning |
 |---|---|---:|---|
 | `PRIMARY` | header; — | 0.000 | Exposure header; SKYMFMT=COEFFICIENTS; internal format SKYMLVER=3. |
-| `FLUX` | f4; 1944 × 12401 | 91.964 | Delivered observed minus applied SKY on processed Science rows. |
+| `FLUX` | f4; 1944 × 12401 | 91.964 | Delivered observed minus applied SKY on processed Science and Sky rows. |
 | `IVAR` | f4; 1944 × 12401 | 91.964 | Observed-noise inverse variance; zero on invalid adopted-sky pixels. |
 | `MASK` | uint8; 1944 × 12401 | 22.992 | Input flags plus invalid adopted-sky flags. |
 | `WAVE` | f4; 12401 | 0.049 | Shared air wavelength (Angstrom). |
@@ -30,7 +48,7 @@ Example: exposure 59750, 1944 input fibers × 12401 wavelengths; 1754 processed 
 | `FLUXCAL_SCI` | table; 12401 | 1.609 | Input science calibration table. |
 | `FLUXCAL_MOD` | table; 12401 | 1.609 | Input model calibration table. |
 | `SLITMAP` | table; 1944 | 0.283 | Fiber identity/geometry/telescope/status and skyml_applied. |
-| `SKY` | f4; 1944 × 12401 | 91.964 | Final sky actually subtracted; the only stored full-resolution sky-model image. |
+| `SKY` | f4; 1944 × 12401 | 91.964 | Final sky actually subtracted (Science and Sky rows); the only stored full-resolution sky-model image. |
 | `GAIA` | table; 1944 | 0.368 | Fiber photometry, Gaia contamination ratios, eligibility/selection/reasons. |
 | `GAIA_SOURCES` | table; optional | — | Gaia source matches; present only when photometry came from ARI TAP rather than an aggregate cache. |
 | `MED_LABELS` | table; 3 | 0.003 | Median spectrum/state order: Sci, SkyE, SkyW. |
@@ -49,7 +67,7 @@ Example: exposure 59750, 1944 input fibers × 12401 wavelengths; 1754 processed 
 | `MED_LSF_COEF` | f8; 3 × 3 × 11 × 4 | 0.005 | LSF coefficients from each median decomposition. |
 | `MED_LSF_KNOTS` | f8; 3 × 3 × 8 | 0.003 | Median-fit wavelength knots. |
 | `MED_LSF_META` | table; 9 | 0.008 | Median-fit representation metadata. |
-| `LSF_QA` | table; 3508 | 0.711 | R/Z convergence/adoption/profile guards, observed line-information pass, counts/median contrast/median SNR in four quarters. |
+| `LSF_QA` | table; 3508 | 0.711 | R/Z (Science fibers) convergence/adoption/profile guards, observed line-information pass, counts/median contrast/median SNR in four quarters. |
 | `MED_FIT_MASK` | uint8; 12401 | 0.014 | Shared protected-line mask used in the median decomposition. |
 | `MED_COEF` | f8; 3 × 388 | 0.011 | Median decomposition coefficients, using internal 1e14 flux scaling. |
 | `COMPONENT_NAMES` | table; 7 | 0.003 | oh, moon, zodi, diffuse, atom, orc, o2. |
@@ -102,7 +120,7 @@ Robust fit weights are reconstructed from native CFrame IVAR, the stored pre-LSF
 
 ## Sky-only block LSF variant
 
-`skysub.sky_subtraction_block` writes `lvmSFrame-skyml-block-<exposure>.fits` with the same schema, except that individual Science fits are replaced. `CAND_LSF_*` and `FIT_LSF_HISTORY` are absent. `LSF_COEF/KNOTS/META` hold the B survey LSF and the R/Z block surfaces evaluated at each Science fiber, so `SkyMLReconstructor.sky()` applies unchanged. `LSF_QA` has only `input_row`, `fiberid`, `channel`, `accepted` and `reason` (`survey_fixed` for B, `sky_block_centered` for R/Z). Measured on exposure 59750:
+`skysub.sky_subtraction_block` writes `lvmSFrame-skyml-block-<exposure>.fits` with the shared layout above; individual Science fits are replaced by block surfaces. `LSF_COEF/KNOTS/META` hold the B survey LSF and the R/Z block surfaces evaluated at each Science fiber, so `SkyMLReconstructor.sky()` applies unchanged. `LSF_QA` is the in-fiber table (R/Z rows only). The following extensions are added before `SKYML_META`. Measured on exposure 59750:
 
 | Extension | Type / shape | MiB | Meaning |
 |---|---|---:|---|
@@ -112,7 +130,7 @@ Robust fit weights are reconstructed from native CFrame IVAR, the stored pre-LSF
 | `BLOCK_WAVE_KNOTS` | f8; 6 × 8 | 0.005 | Wavelength knots the block was fitted on; R/Z `LSF_KNOTS` of every Science fiber equal these. |
 | `SKY_FIBER_COEF` | table; 106 | 0.321 | Selected Sky fibers: input_row, fiberid, spectrograph, telescope, frozen component vector (internal 1e14 scaling) and QP status. |
 
-`SKYML_META` adds `method`, `preparation` path/SHA256, `block_settings`, `block_timing` and `block_code_sha256`. `SkyBlockReconstructor.global_state(fiberid)` evaluates the block surfaces at any fiber; `.sky_fiber(fiberid)` renders a selected Sky fiber's fit in memory.
+The block run computes its preparation in memory and writes it only with `--keep-preparation` (reusable with `--seed`; a supplied `--seed` is never modified). The product does not read it. `SKYML_META` adds `method`, `preparation` path/SHA256 (`in-memory` and null when not written), `block_settings`, `block_timing` and `block_code_sha256`. `SkyBlockReconstructor.global_state(fiberid)` evaluates the block surfaces at any fiber; `.sky_fiber(fiberid)` renders a selected Sky fiber's fit in memory.
 
 ## Storage boundary
 
