@@ -18,6 +18,7 @@ from astropy.time import Time
 
 from skysub.medians_computation.src.lvm_medians.metadata import median_meta
 from skysub.medians_computation.src.lvm_medians.stack import fiber_roles
+from skysub.sky_decomp import reliability as rel
 from skysub.sky_decomp.lsf_reference import load_survey_ascii_lsf
 
 from . import decomp_adapter as adapter
@@ -223,6 +224,14 @@ def build_stack(frame, path, medians, references, selected, settings=SETTINGS):
     return fits.HDUList(hdus), near, far
 
 
+def arm_slots(failed):
+    """Which telescope's fit fills each sky slot of the prediction: a failed arm is replaced by the other."""
+    good = [label for label in SKY_ARMS if label not in failed]
+    if not good:
+        raise ValueError('No usable sky arm')
+    return {label: (label if label in good else good[0]) for label in SKY_ARMS}
+
+
 def predict_ifu(ensemble_path, frame, median_fits):
     """One ML coefficient vector at the Science IFU center; the ensemble is released on return."""
     ensemble = serialization.load_ensemble(ensemble_path)
@@ -235,21 +244,25 @@ def predict_ifu(ensemble_path, frame, median_fits):
     fits_by_label = median_fits.results
     pos = {k: adapter.telescope_coords(header, k) for k in TELESCOPES}
     lsf = {k: fwhm_grid(fits_by_label[k].lsf_state, wave) for k in TELESCOPES}
+    slot = arm_slots(median_fits.failed_arms)
+    if median_fits.failed_arms:
+        LOG.warning('Sky arm %s is unusable (misfit or Moon glare); %s stands in for it in the prediction',
+                    ', '.join(median_fits.failed_arms), slot[median_fits.failed_arms[0]])
     date = str(header['OBSTIME']).strip()
     prediction = inference.predict_sky_from_minimal_inputs(
         ensemble,
         obstime_mjd=[Time(date, scale='utc').mjd],
         sci_ra=[pos['Sci'][0]],
         sci_dec=[pos['Sci'][1]],
-        sky_e_ra=[pos['SkyE'][0]],
-        sky_e_dec=[pos['SkyE'][1]],
-        sky_w_ra=[pos['SkyW'][0]],
-        sky_w_dec=[pos['SkyW'][1]],
-        coef_e=fits_by_label['SkyE'].coef[None, :],
-        coef_w=fits_by_label['SkyW'].coef[None, :],
+        sky_e_ra=[pos[slot['SkyE']][0]],
+        sky_e_dec=[pos[slot['SkyE']][1]],
+        sky_w_ra=[pos[slot['SkyW']][0]],
+        sky_w_dec=[pos[slot['SkyW']][1]],
+        coef_e=fits_by_label[slot['SkyE']].coef[None, :],
+        coef_w=fits_by_label[slot['SkyW']].coef[None, :],
         wave=wave,
-        lsf_e=lsf['SkyE'],
-        lsf_w=lsf['SkyW'],
+        lsf_e=lsf[slot['SkyE']],
+        lsf_w=lsf[slot['SkyW']],
         lsf_sci=lsf['Sci'],
         date_obs=date,
         expnum=int(header['EXPOSURE']),
@@ -265,6 +278,10 @@ def predict_ifu(ensemble_path, frame, median_fits):
         oh_coef=coef.copy(),
     )
     diagnostics = {k: v for k, v in prediction.items() if k not in ('coef', 'coef_std')}
+    # -1 means the prediction's own tests did not run; it stays -1 rather than reading as clean.
+    bits = np.asarray(diagnostics['reliability'], np.int32)
+    extra = rel.fallback_bits(median_fits.failed_arms, median_fits.labels['sky1'])
+    diagnostics['reliability'] = np.where(bits < 0, bits, bits | extra).astype(np.int32)
     return ml, diagnostics
 
 
@@ -305,7 +322,7 @@ def estimate_corrections(frame, median_fits, ml, medians, stack, near, settings=
     wave, model = frame.wave, median_fits.science_model
     fits_by_label = median_fits.results
     raw, components, matrices = render(model, ml.coef, fits_by_label['Sci'].lsf_state)
-    arms = [_sky_arm(medians[k], fits_by_label[k], wave) for k in SKY_ARMS]
+    arms = [_sky_arm(medians[k], fits_by_label[k], wave) for k in SKY_ARMS if k not in median_fits.failed_arms]
     velocities = protection_velocities(*adapter.telescope_coords(frame.header, 'Sci'))
     lines = exposure_line_masks(wave, fits_by_label['Sci'].lsf_state, velocities, settings)
     correction, residual_info = sky_arm_residual_correction(
@@ -531,7 +548,13 @@ def run(
         residual_correction=corrections.residual_info,
         oh_correction=corrections.oh_info,
         median_fits={
-            label: dict(status=fit.fit_status, summary=fit.fit_summary, reliability=median_fits.reliability[label])
+            label: dict(
+                status=fit.fit_status,
+                summary=fit.fit_summary,
+                reliability=median_fits.reliability[label],
+                r2=float(fit.r2),
+                failed=label in median_fits.failed_arms,
+            )
             for label, fit in median_fits.results.items()
         },
         selected_fiberids={k: work.fiberids[v] for k, v in selection.indices.items()},

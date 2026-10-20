@@ -38,7 +38,7 @@ Example: exposure 59750, 1944 input fibers × 12401 wavelengths; 1754 processed 
 
 | Extension | Type / shape | MiB | Meaning |
 |---|---|---:|---|
-| `PRIMARY` | header; — | 0.000 | Exposure header; SKYMFMT=COEFFICIENTS; internal format SKYMLVER=3. |
+| `PRIMARY` | header; — | 0.000 | Exposure header; SKYMFMT=COEFFICIENTS; internal format SKYMLVER=3; SKYMLREL = the prediction's `sky_decomp.reliability` bits (−1: not evaluated), including `one_arm_fallback` (warning) and `arm_misfit` (error) when a sky arm is unusable. A sky arm is unusable when its median fit carries `misfit` (weighted R² < 0.9) or `moon_glare` (within 15° of a bright Moon and redder than the other arm); `SKYML_META.median_fits[label].failed`, `.r2` and `.reliability` record it. |
 | `FLUX` | f4; 1944 × 12401 | 91.964 | Delivered observed minus applied SKY on processed Science and Sky rows. |
 | `IVAR` | f4; 1944 × 12401 | 91.964 | Observed-noise inverse variance; zero on invalid adopted-sky pixels. |
 | `MASK` | uint8; 1944 × 12401 | 22.992 | Input flags plus invalid adopted-sky flags. |

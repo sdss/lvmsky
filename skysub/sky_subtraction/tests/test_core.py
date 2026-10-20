@@ -447,3 +447,13 @@ def test_unfitted_qa_has_the_schema_of_a_fitted_channel():
         'quality_bin_snr', 'line_amplitude', 'solar_amplitude', 'downweighted', 'converged', 'median_width_change',
     ]
     assert [*unfitted_qa('R', 'sky_block')] == columns
+
+
+def test_a_failed_sky_arm_is_replaced_by_the_other_in_the_prediction():
+    from skysub.sky_subtraction.pipeline import arm_slots
+
+    assert arm_slots(()) == {'SkyE': 'SkyE', 'SkyW': 'SkyW'}
+    assert arm_slots(('SkyE',)) == {'SkyE': 'SkyW', 'SkyW': 'SkyW'}
+    assert arm_slots(('SkyW',)) == {'SkyE': 'SkyE', 'SkyW': 'SkyE'}
+    with pytest.raises(ValueError, match='No usable sky arm'):
+        arm_slots(('SkyE', 'SkyW'))

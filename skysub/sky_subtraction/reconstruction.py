@@ -70,7 +70,12 @@ class SkyMLReconstructor:
             science = self.labels.index('Sci')
             _, _, matrices = render(self.model_sci, self.coef, self.state('MED_', science))
             self.designs = sky_designs(self.model_sci, self.oh_coef, self.state('INIT_', science), matrices)
-            self.arms = [self._sky_arm(i, label) for i, label in enumerate(self.labels) if label != 'Sci']
+            # Arms recorded as failed did not enter the residual transfer (products before the flag: none).
+            self.failed_arms = tuple(
+                label for label, record in self.provenance.get('median_fits', {}).items() if record.get('failed')
+            )
+            self.arm_labels = [label for label in self.labels if label != 'Sci' and label not in self.failed_arms]
+            self.arms = [self._sky_arm(self.labels.index(label), label) for label in self.arm_labels]
             velocities = self.provenance.get('residual_correction', {}).get('line_protection_velocities_km_s', [])
             self.lines = exposure_line_masks(self.wave, self.state('MED_', science), velocities, self.settings)
         except BaseException:
