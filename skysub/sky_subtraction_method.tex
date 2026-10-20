@@ -2069,15 +2069,19 @@ transferred to the science from 48\% to 7, 1.4 and 0.3\%, while the median
 blue $\chi^2$ of the corrected science decomposition rises only from 0.129
 to 0.138. Smoothing does much worse at the same task: an 8\,\AA{} running
 median still transfers 15--25\% of such a line and doubles that $\chi^2$. A
-feature that appears in both sky fields passes, as it must, since it is then
-indistinguishable from the shared sky pattern.
+feature that appears in both sky fields passes, since it is then
+indistinguishable from the shared sky pattern. This includes diffuse
+nebular emission common to both fields, which we therefore suppress at the
+wavelengths of the nebular lines (Section~\ref{sec:lineprotect}).
 
-By default we apply the correction below 5000\,\AA{} and end it with a
-cosine taper over the following 100\,\AA{} rather than a step. The taper
-lies outside the corrected range on purpose, because one ending at
-5000\,\AA{} would lose about half of the gain over the last 100\,\AA{} of the
-range. The correction works equally well redward of 5000\,\AA{} and can be
-extended to the whole band, as in the evaluation above.
+Restricted to $\lambda<5000$\,\AA, as in Table~\ref{tab:armcorr}, the
+correction ends with a cosine taper over the following 100\,\AA{} rather
+than a step. The taper lies outside the corrected range on purpose, because
+one ending at 5000\,\AA{} would lose about half of the gain over the last
+100\,\AA{} of the range. The correction works equally well redward of
+5000\,\AA, and we apply it over the whole band, as in the evaluation above
+and in the sky subtraction of the reduced frames
+(Section~\ref{sec:fullband}).
 
 Table~\ref{tab:armcorr} summarises the effect on the 2852 held-out
 observations. Below 5000\,\AA{} the median $\chi^2$ falls from 0.63 to 0.23,
