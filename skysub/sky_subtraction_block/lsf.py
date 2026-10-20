@@ -130,5 +130,5 @@ def evaluate_block(base, blocks, spectrograph, position):
         state.coefficients[channel]=np.einsum('kqs,s->kq',block['coef'],basis)
         state.knot_vectors[channel]=np.array(block['wave_knots'],float)
         state.degrees[channel]=int(block['wave_degree'])
-        state.metrics[channel]=dict(status=block['qa']['status'],model='sky_block_centered' if block['qa'].get('centered',True) else 'sky_block',quality='measured')
+        state.metrics[channel]=dict(status=block['qa']['status'],model='sky_block_centered' if block['qa'].get('centered',True) else 'sky_block',quality='measured',converged=True)
     return state

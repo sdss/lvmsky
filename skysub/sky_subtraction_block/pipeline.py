@@ -1,4 +1,4 @@
-"""Reuse median/ML preparation; infer a sky-only LSF for every block."""
+"""Median/ML preparation (in memory or from a seed); infer a sky-only LSF for every block."""
 from concurrent.futures import ProcessPoolExecutor
 from copy import deepcopy
 from dataclasses import replace
@@ -16,12 +16,13 @@ from astropy.table import Table
 from skysub.sky_subtraction import decomp_adapter as adapter
 from skysub.sky_subtraction import pipeline as common
 from skysub.sky_subtraction.ml import protection_velocities
-from skysub.sky_subtraction.rendering import exposure_line_masks
 from skysub.sky_subtraction.settings import SETTINGS
 from skysub.sky_subtraction.io import read_cframe
+from skysub.sky_subtraction.fiber_lsf import unfitted_qa
+from skysub.sky_subtraction.product import lsf_hdus,lvmsframe_layout,publish_product
 from skysub.sky_subtraction.reconstruction import SkyMLReconstructor
-from skysub.sky_decomp.result_io import build_lsf_hdus
-from .lsf import FIT_CHANNELS,component_matrices,individual_coefficients,channel_tensors,fit_block
+from skysub.sky_subtraction.rendering import arm_sky,exposure_line_masks,fwhm_grid
+from .lsf import FIT_CHANNELS,component_matrices,individual_coefficients,channel_tensors,evaluate_block,fit_block
 from .science import evaluate_science
 
 LOG=logging.getLogger(__name__)
@@ -37,6 +38,12 @@ def _fit_sky(index):
     coef,status=individual_coefficients(model,state,flux,ivar,mask,w['matrices'][label])
     return dict(input_row=int(index),fiberid=int(w['slit']['fiberid'][index]),
         spectrograph=int(w['slit']['spectrographid'][index]),telescope=label,coef=coef,status=status)
+
+
+def _render_arm(index):
+    w=_WORK; r=w['renderer']; label=str(w['slit']['telescope'][index]).strip()
+    state=evaluate_block(w['templates'][label],w['blocks'],w['slit']['spectrographid'][index],w['slit']['fiberid'][index])
+    return state,arm_sky(r.model(label),r.h['MED_COEF'].data[r.labels.index(label)],state).astype('f4')
 
 
 def _keep_freed_memory():
@@ -56,7 +63,7 @@ def _mapped(function,indices,jobs):
             yield from pool.map(function,indices,chunksize=4)
 
 
-def run(input_path, *, output=None, seed=None, ensemble=None, gaia_dir=None, jobs=8, slit_count=4, centered=False):
+def run(input_path, *, output=None, seed=None, ensemble=None, gaia_dir=None, jobs=8, slit_count=4, centered=False, keep_preparation=False):
     global _WORK
     _keep_freed_memory()
     started=time.perf_counter(); input_path=Path(input_path).resolve()
@@ -67,16 +74,19 @@ def run(input_path, *, output=None, seed=None, ensemble=None, gaia_dir=None, job
         raise ValueError('Use lvmSFrame-skyml-block-* to protect the existing methods and DRP products')
     if output.exists():raise FileExistsError(output)
     output.parent.mkdir(parents=True,exist_ok=True)
-    if seed is None:
-        seed=output.parent/('lvmSFrame-skyml-preparation-'+input_path.name.removeprefix('lvmCFrame-').removesuffix('.gz'))
-        if not Path(seed).exists():
+    prepared=None; seed_path=Path(seed).resolve() if seed else None
+    if seed_path==output:raise ValueError('Seed and output must differ')
+    if seed_path is None:
+        default=output.parent/('lvmSFrame-skyml-preparation-'+input_path.name.removeprefix('lvmCFrame-').removesuffix('.gz'))
+        if default.exists():seed_path=default.resolve()
+        else:
             if ensemble is None:raise ValueError('Supply an ensemble for median/ML preparation or an existing --seed product')
-            common.run(input_path,ensemble,gaia_dir=gaia_dir,output=seed,jobs=jobs,survey_only=True,render_sky=False)
-    seed=Path(seed).resolve()
-    if seed==output:raise ValueError('Seed and output must differ')
+            # Median/ML/correction stage of the common pipeline, kept in memory; per-fiber LSF fits are off.
+            prepared=common.run(input_path,ensemble,gaia_dir=gaia_dir,output=default,jobs=jobs,survey_only=True,render_sky=False,return_hdus=True)
+            if keep_preparation:publish_product(prepared,default,input_path);seed_path=default.resolve()
     header,slit,wave,flux,ivar,mask,_=read_cframe(input_path)
-    with SkyMLReconstructor(seed,cframe=input_path) as r:
-        if common.sha256(input_path)!=r.provenance['input_sha256']:
+    with SkyMLReconstructor(prepared if prepared is not None else seed_path,cframe=input_path) as r:
+        if prepared is None and common.sha256(input_path)!=r.provenance['input_sha256']:
             raise ValueError('Preparation belongs to a different input CFrame')
         np.testing.assert_array_equal(slit['fiberid'],r.h['SLITMAP'].data['fiberid'])
         np.testing.assert_array_equal(wave,r.wave)
@@ -128,6 +138,12 @@ def run(input_path, *, output=None, seed=None, ensemble=None, gaia_dir=None, job
         LOG.info('Evaluating %s Science fibers from the global blocks',len(science))
         method='sky_block_centered' if centered else 'sky_block'
         sky,states,widths=evaluate_science(r,blocks,slit,science,lsf_row)
+        # Sky fibers: telescope median model with the block R/Z surface at the fiber; B is the telescope median LSF.
+        arm_rows=np.flatnonzero(np.isin(np.char.strip(np.asarray(slit['telescope']).astype(str)),list(common.SKY_ARMS))&(slit['fibstatus']==0))
+        _WORK['blocks']=blocks
+        arm=list(_mapped(_render_arm,arm_rows,jobs))
+        for row,(state,spectrum) in zip(arm_rows,arm,strict=True):sky[row]=spectrum
+        applied=np.concatenate([science,arm_rows])
         # Preserve the common compact schema and its coefficient-based diagnostic renderer.
         # A block product used as the seed brings its own block extensions; they are replaced too.
         remove={'FLUX','IVAR','MASK','LSF','SKY','LSF_FIBERS','LSF_COEF','LSF_KNOTS','LSF_META',
@@ -138,14 +154,16 @@ def run(input_path, *, output=None, seed=None, ensemble=None, gaia_dir=None, job
             image=fits.ImageHDU(values,name=name)
             image.header.update(r.h[name].header)
             product.append(image)
-        product['FLUX'].data[science]-=sky[science]
+        product['FLUX'].data[applied]-=sky[applied]
+        product['SLITMAP'].data['skyml_applied'][applied]=True
         lsf=np.array(r.h['LSF'].data,copy=True);lsf[science]=np.asarray(widths)
+        for row,(state,_) in zip(arm_rows,arm,strict=True):lsf[row]=fwhm_grid(state,wave)
         product.append(fits.ImageHDU(lsf,header=r.h['LSF'].header,name='LSF'))
         product.append(fits.ImageHDU(sky,header=r.h['SKY'].header,name='SKY'))
         product.append(fits.BinTableHDU(Table(dict(input_row=science,fiberid=np.asarray(slit['fiberid'])[science])),name='LSF_FIBERS'))
-        for extension in build_lsf_hdus(states):product.append(extension)
-        qa=[dict(input_row=int(i),fiberid=int(slit['fiberid'][i]),channel=ch,accepted=True,
-            reason='survey_fixed' if ch=='B' else method) for i in science for ch in 'BRZ']
+        # Every block profile is the adopted one, so the candidate extensions repeat it.
+        for prefix in ('','CAND_'):product.extend(lsf_hdus(prefix,states))
+        qa=[dict(unfitted_qa(ch,method),fiberid=int(slit['fiberid'][i]),input_row=int(i)) for i in science for ch in FIT_CHANNELS]
         product.append(fits.BinTableHDU(Table(rows=qa),name='LSF_QA'))
         block_rows=[]
         for (sp,ch),block in blocks.items():
@@ -160,19 +178,21 @@ def run(input_path, *, output=None, seed=None, ensemble=None, gaia_dir=None, job
         provenance['settings'].update(residual_max_angstrom=r.settings.residual_max_angstrom,
             residual_line_protection=r.settings.residual_line_protection)
         provenance.setdefault('residual_correction',{})['line_protection_velocities_km_s']=velocities
-        provenance.update(block_timing=block_timing,input=str(input_path),method=method,preparation=str(seed),preparation_sha256=common.sha256(seed),
+        provenance.update(block_timing=block_timing,input=str(input_path),method=method,preparation=str(seed_path) if seed_path else 'in-memory',preparation_sha256=common.sha256(seed_path) if seed_path else None,
             block_settings=dict(fitted_channels='RZ',blue_lsf='each Science fiber keeps its survey LSF from the preparation; B is not fitted',slit_basis=slit_count,slit_degree=3,coordinate='SLITMAP.fiberid within spectrograph',
                 wavelength_solution='input, unchanged',constraints='nonnegative, unit integral'+(', zero first moment' if centered else '; no centroid constraint')+' at all wavelength/slit control pairs',
                 regularization='none',fiber_coefficients='individual full-component QP, fixed telescope-median LSF and O2 temperature',
                 fit_weights='native observed IVAR and input/protected-line masks; 5 A trimmed channel edges',
-                science_lsf='R and Z evaluated exclusively from SkyE/SkyW blocks'),
+                science_lsf='R and Z evaluated exclusively from SkyE/SkyW blocks',
+                sky_fiber_model='SkyE/SkyW rows: telescope median decomposition rendered with the block R/Z surface at the fiber and the median B LSF; '
+                'FLUX is a residual of the fibers that build the LSF and the median, not an independent test'),
             block_code_sha256={p.name:common.sha256(p) for p in Path(__file__).parent.glob('*.py')},
             elapsed_seconds=time.perf_counter()-started)
         product.append(fits.ImageHDU(np.frombuffer(json.dumps(provenance,default=common._json).encode(),dtype='u1'),name='SKYML_META'))
         product[0].header['SKYMETH']='skyml-block'; product[0].header['LSFCENT']=centered; product[0].header['BLOCKCH']='RZ'
         fd,temporary=tempfile.mkstemp(prefix='.skyblock-',suffix='.fits',dir=output.parent);os.close(fd)
         try:
-            product.writeto(temporary,overwrite=True,checksum=True);os.chmod(temporary,0o644);os.link(temporary,output)
+            lvmsframe_layout(product,output,input_path).writeto(temporary,overwrite=True,checksum=True);os.chmod(temporary,0o644);os.link(temporary,output)
         finally:
             os.unlink(temporary);product.close();_WORK=None
     return output

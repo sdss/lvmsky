@@ -29,6 +29,10 @@ class SkyBlockReconstructor(SkyMLReconstructor):
             base=self.state('MED_',self.labels.index(label))
         return evaluate_block(base,self.blocks,data['spectrographid'][row],fiberid)
 
+    def arm_state(self,fiberid,label):
+        """R/Z block surfaces at this Sky fiber; B is its telescope's median LSF."""
+        return self.global_state(fiberid)
+
     def sky_fiber(self,fiberid):
         rows=self.h['SKY_FIBER_COEF'].data
         rows=rows[rows['fiberid']==fiberid]

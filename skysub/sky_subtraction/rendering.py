@@ -18,6 +18,7 @@ __all__ = [
     'FAMILIES',
     'SkyArm',
     'SkyParts',
+    'arm_sky',
     'channel_slices',
     'exposure_line_masks',
     'fwhm_grid',
@@ -54,6 +55,11 @@ def render(model, coefficient, state):
     matrices = model._assemble_refined_matrices()
     components = model._components_from_coef(coefficient, matrices)
     return sum((components[k] for k in FAMILIES), np.zeros_like(model.wave)), components, matrices
+
+
+def arm_sky(model, coefficient, state):
+    """Physical-unit sky of a Sky fiber: its telescope's median decomposition rendered with the fiber's LSF."""
+    return render(model, coefficient, state)[0] / FACTOR
 
 
 @dataclass

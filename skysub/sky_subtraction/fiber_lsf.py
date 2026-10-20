@@ -108,6 +108,16 @@ def _initial_qa(channel, active, covered, settings):
     )
 
 
+def unfitted_qa(channel, reason, settings=SETTINGS):
+    """LSF_QA record, with the schema of a fitted channel, for a profile that no per-fiber fit produced."""
+    qa = _initial_qa(channel, np.zeros(0, bool), np.zeros(0, bool), settings)
+    qa.update(accepted=True, reason=reason)
+    qa.update(
+        line_amplitude=np.nan, solar_amplitude=np.nan, downweighted=np.nan, converged=True, median_width_change=np.nan
+    )
+    return qa
+
+
 def _solve_amplitudes_and_continuum(line_model, solar_model, continuum, target, weight, good, settings):
     """Nonnegative line/solar amplitudes with a unit prior and source continuum; None if BVLS fails.
 

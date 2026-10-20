@@ -23,6 +23,7 @@ from .rendering import (
     FACTOR,
     FAMILIES,
     SkyArm,
+    arm_sky,
     channel_slices,
     exposure_line_masks,
     fit_pixels,
@@ -47,7 +48,7 @@ class SkyMLReconstructor:
     """One compact product plus its original CFrame; no fitting or ML inference."""
 
     def __init__(self, path, cframe=None):
-        self.h = fits.open(path, memmap=True)
+        self.h = path if isinstance(path, fits.HDUList) else fits.open(path, memmap=True)
         try:
             if self.h[0].header.get('SKYMFMT') != 'COEFFICIENTS':
                 raise ValueError('Expected a compact coefficient-based SkyML SFrame')
@@ -159,9 +160,27 @@ class SkyMLReconstructor:
             raise ValueError('Unknown physical fiber ID')
         return int(match[0])
 
+    def arm_state(self, fiberid, label):
+        """LSF of a Sky fiber: its telescope's median LSF."""
+        return self.state('MED_', self.labels.index(label))
+
+    def _arm_sky(self, row, fiberid, label):
+        """Telescope median model of a SkyE/SkyW fiber; no ML, OH or residual-transfer parts."""
+        if not self.h['SLITMAP'].data['skyml_applied'][row]:
+            raise ValueError('Fiber was not processed')
+        coef = self.h['MED_COEF'].data[self.labels.index(label)]
+        total = arm_sky(self.model(label), coef, self.arm_state(fiberid, label))
+        if not np.allclose(total * FACTOR, self.h['SKY'].data[row] * FACTOR, rtol=2e-5, atol=2e-5, equal_nan=True):
+            raise ValueError('Reconstructed SKY differs from recorded SKY; check renderer/model assets')
+        nan = np.full(len(self.wave), np.nan)
+        return dict(SKY_ML=total, SKY_OH=np.zeros_like(total), SKY_RES=np.zeros_like(total), SKY_EPI=nan, SKY=total)
+
     def sky(self, fiberid, survey=False):
         """Adopted sky and its parts; needs coefficients and model assets, not the CFrame."""
         row = self._row(fiberid)
+        label = str(self.h['SLITMAP'].data['telescope'][row]).strip()
+        if label in ('SkyE', 'SkyW'):
+            return self._arm_sky(row, fiberid, label)
         match = np.flatnonzero(self.h['LSF_FIBERS'].data['input_row'] == row)
         if len(match) != 1:
             raise ValueError('Fiber was not processed')

@@ -418,3 +418,32 @@ def test_settings_of_an_older_product_keep_its_residual_transfer():
     assert restored.residual_max_angstrom == 5000.0
     assert restored.residual_line_protection == 'none'
     assert SETTINGS.residual_line_protection == 'cores'
+
+
+def test_product_layout_follows_lvmsframe(tmp_path):
+    from astropy.io import fits
+
+    from skysub.sky_subtraction.product import SHARED_ORDER, lvmsframe_layout
+
+    source = tmp_path / 'lvmCFrame-1.fits'
+    cols = fits.ColDefs([fits.Column('x', 'D', unit='mm', array=np.zeros(2))])
+    fits.HDUList([fits.PrimaryHDU(), fits.BinTableHDU.from_columns(cols, name='SLITMAP')]).writeto(source)
+    names = ['SKYML_META', 'BLOCK_ONLY', *reversed(SHARED_ORDER)]
+    hdus = [fits.PrimaryHDU(), *(fits.ImageHDU(name=n) for n in names if n != 'SLITMAP')]
+    hdus.append(fits.BinTableHDU(Table({'x': np.zeros(2)}), name='SLITMAP'))
+    product = lvmsframe_layout(fits.HDUList(hdus), tmp_path / 'lvmSFrame-skyml-1.fits', source)
+    assert [x.name for x in product[1:]] == [*SHARED_ORDER, 'BLOCK_ONLY', 'SKYML_META']
+    assert product[0].header['FILENAME'] == 'lvmSFrame-skyml-1.fits'
+    assert product['SLITMAP'].columns['x'].unit == 'mm'
+
+
+def test_unfitted_qa_has_the_schema_of_a_fitted_channel():
+    from skysub.sky_subtraction.fiber_lsf import unfitted_qa
+
+    # Column order of LSF_QA in an in-fiber product (exposure 4108), before fiberid and input_row.
+    columns = [
+        'channel', 'accepted', 'reason', 'n_line_pixels', 'n_supported_basis', 'iterations', 'chi2_red',
+        'width_change', 'centroid_change', 'line_information_pass', 'quality_bin_counts', 'quality_bin_contrast',
+        'quality_bin_snr', 'line_amplitude', 'solar_amplitude', 'downweighted', 'converged', 'median_width_change',
+    ]
+    assert [*unfitted_qa('R', 'sky_block')] == columns

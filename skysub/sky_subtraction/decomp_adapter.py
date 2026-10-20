@@ -5,7 +5,7 @@ logic stays in the source modules. Model methods of the decomposer (``model._...
 used by rendering.py and fiber_lsf.py.
 """
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 import numpy as np
@@ -46,6 +46,7 @@ class MedianFits:
     fit_mask: np.ndarray  # science-line mask of the median fits (MED_FIT_MASK)
     render_context: dict  # constructor settings and per-median telluric parameters
     transmission: np.ndarray  # DRP telluric transmission for Sci, near, far
+    models: dict = field(default_factory=dict)  # telescope label -> decomposer with its median O2 temperature
 
 
 def fit_medians(stack, states, labels):
@@ -70,10 +71,13 @@ def fit_medians(stack, states, labels):
     settings['config'] = asdict(settings['config'])
     settings['base_dir'] = str(settings['base_dir'])
     models, transmission = [], []
+    by_label = {}
     science_model = None
     for kind in KINDS:
         label = labels[kind]
         model = dp._telluric_decomposer(kind, 0)
+        model.t_o2 = results[label].t_o2
+        by_label[label] = model
         models.append(
             dict(
                 telescope=label,
@@ -91,6 +95,7 @@ def fit_medians(stack, states, labels):
         results=results,
         reliability=reliability,
         science_model=science_model,
+        models=by_label,
         fit_mask=dp._science_line_mask_for_row(0).astype('u1'),
         render_context=dict(settings=settings, models=models),
         transmission=np.asarray(transmission),
