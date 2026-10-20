@@ -38,8 +38,11 @@ class Settings:
     line_side_angstrom: tuple = (4.0, 10.0)
     line_min_pixels: int = 6
     line_min_core_fraction: float = 0.8
-    # Rendering.
-    residual_max_angstrom: float = 5000.0
+    # Rendering.  The sky-arm residual transfer covers the full band; science
+    # lines are protected as described in mlp_predictor.sky_arm_correction
+    # ('cores', 'windows', or 'none').
+    residual_max_angstrom: float = 1e5
+    residual_line_protection: str = 'cores'
     fwhm_probes: int = 33
 
     def asdict(self):
@@ -47,14 +50,24 @@ class Settings:
 
     @classmethod
     def from_record(cls, record):
-        """Recorded values override defaults; unknown keys (older products) are ignored."""
+        """Recorded values override defaults; unknown keys (older products) are ignored.
+
+        A field a recorded product does not carry takes its value from before the
+        field existed, so that product reconstructs as it was written.
+        """
         names = {field.name for field in fields(cls)}
         values = {
             key: tuple(value) if isinstance(value, list) else value
             for key, value in (record or {}).items()
             if key in names
         }
+        if record is not None:
+            values = {**{k: v for k, v in LEGACY.items() if k not in values}, **values}
         return cls(**values)
+
+
+# Values for products written before a field was added.
+LEGACY = dict(residual_line_protection='none')
 
 
 SETTINGS = Settings()

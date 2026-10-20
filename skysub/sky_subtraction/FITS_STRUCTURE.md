@@ -74,7 +74,7 @@ with SkyMLReconstructor("/path/to/lvmSFrame-skyml-00059750.fits") as result:
     iteration_5 = result.fiber(680, iteration=5)
 ```
 
-- `sky()` renders the full final vector from recorded coefficients, LSF states, observation context and matching model/telluric assets. It needs neither the CFrame nor the trained ML archive (the `mlp_predictor` package is still imported for the residual transfer). The adopted rendering is checked against persisted SKY; incompatible rendering assets raise an error. Fit weights and the residual transfer use the operating points recorded in `SKYML_META.settings`.
+- `sky()` renders the full final vector from recorded coefficients, LSF states, observation context and matching model/telluric assets. It needs neither the CFrame nor the trained ML archive (the `mlp_predictor` package is still imported for the residual transfer). The adopted rendering is checked against persisted SKY; incompatible rendering assets raise an error. Fit weights and the residual transfer use the operating points recorded in `SKYML_META.settings` (`residual_max_angstrom`, `residual_line_protection`; a product without the latter predates it and is rendered unprotected). The science-line windows are rebuilt from the Science median LSF and `SKYML_META.residual_correction.line_protection_velocities_km_s`.
 - `fiber()` additionally reads the original CFrame (path and SHA256 recorded in SKYML_META) for observed spectra, native errors and masks. Supply `cframe=...` to the constructor after moving that input. It performs no fitting or ML inference.
 - `diagnostic_hdul()` supplies report generators with an in-memory view of reconstructed arrays. Those arrays are never written back into the compact file.
 

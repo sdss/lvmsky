@@ -24,6 +24,7 @@ from .rendering import (
     FAMILIES,
     SkyArm,
     channel_slices,
+    exposure_line_masks,
     fit_pixels,
     fit_variance,
     huber_factor,
@@ -69,6 +70,8 @@ class SkyMLReconstructor:
             _, _, matrices = render(self.model_sci, self.coef, self.state('MED_', science))
             self.designs = sky_designs(self.model_sci, self.oh_coef, self.state('INIT_', science), matrices)
             self.arms = [self._sky_arm(i, label) for i, label in enumerate(self.labels) if label != 'Sci']
+            velocities = self.provenance.get('residual_correction', {}).get('line_protection_velocities_km_s', [])
+            self.lines = exposure_line_masks(self.wave, self.state('MED_', science), velocities, self.settings)
         except BaseException:
             self.h.close()
             raise
@@ -166,7 +169,7 @@ class SkyMLReconstructor:
             state = load_survey_ascii_lsf(self.calibration, int(fiberid), allow_warning=True)
         else:
             state = self.state('', int(match[0]))
-        parts = sky_parts(self.model_sci, self.coef, self.oh_coef, state, self.arms, self.settings)
+        parts = sky_parts(self.model_sci, self.coef, self.oh_coef, state, self.arms, self.settings, self.lines)
         out = dict(SKY_ML=parts.ml, SKY_OH=parts.oh, SKY_RES=parts.residual)
         total = parts.total
         if not survey:

@@ -407,3 +407,14 @@ def test_settings_record_roundtrip_ignores_unknown_keys():
     assert Settings.from_record(record) == SETTINGS
     assert Settings.from_record(dict(variance_floor=0.05)).variance_floor == 0.05
     assert Settings.from_record(None) == SETTINGS
+
+
+def test_settings_of_an_older_product_keep_its_residual_transfer():
+    from skysub.sky_subtraction.settings import SETTINGS, Settings
+
+    old = {k: v for k, v in SETTINGS.asdict().items() if k != 'residual_line_protection'}
+    old['residual_max_angstrom'] = 5000.0
+    restored = Settings.from_record(old)
+    assert restored.residual_max_angstrom == 5000.0
+    assert restored.residual_line_protection == 'none'
+    assert SETTINGS.residual_line_protection == 'cores'

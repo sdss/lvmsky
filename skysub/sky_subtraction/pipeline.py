@@ -32,12 +32,22 @@ from .ml import (
     inference,
     line_templates,
     oh_group_labels,
+    protection_velocities,
     serialization,
     sky_arm_residual_correction,
     sky_line_scaling_correction,
 )
 from .product import MLCoefficients, ProductInputs, _json, sha256, write_product
-from .rendering import FACTOR, FAMILIES, channel_slices, fwhm_grid, render, sky_parts
+from .rendering import (
+    FACTOR,
+    FAMILIES,
+    channel_slices,
+    exposure_line_masks,
+    fwhm_grid,
+    render,
+    residual_protection,
+    sky_parts,
+)
 from .settings import SETTINGS
 
 # Names also used by skysub.sky_subtraction_block and analysis scripts.
@@ -87,6 +97,7 @@ class FiberWork:
     arms: list
     survey_only: bool
     settings: object
+    lines: object = None
 
 
 @dataclass
@@ -104,6 +115,7 @@ class Corrections:
     oh_coef: np.ndarray
     residual_info: dict
     oh_info: dict
+    lines: object = None
 
 
 def resolve_paths(input_path, output):
@@ -293,14 +305,19 @@ def estimate_corrections(frame, median_fits, ml, medians, stack, near, settings=
     fits_by_label = median_fits.results
     raw, components, matrices = render(model, ml.coef, fits_by_label['Sci'].lsf_state)
     arms = [_sky_arm(medians[k], fits_by_label[k], wave) for k in SKY_ARMS]
+    velocities = protection_velocities(*adapter.telescope_coords(frame.header, 'Sci'))
+    lines = exposure_line_masks(wave, fits_by_label['Sci'].lsf_state, velocities, settings)
     correction, residual_info = sky_arm_residual_correction(
         wave,
         raw / FACTOR,
         (components['moon'] + components['zodi']) / FACTOR,
         arms,
         max_wavelength=settings.residual_max_angstrom,
+        **residual_protection(settings, lines, components['oh'] / FACTOR),
         return_info=True,
     )
+    # Reconstruction rebuilds the line masks from the Science median LSF and these velocities.
+    residual_info['line_protection_velocities_km_s'] = list(velocities)
     science = medians['Sci']
     science_mask = data.science_line_mask_rows(
         stack,
@@ -328,7 +345,7 @@ def estimate_corrections(frame, median_fits, ml, medians, stack, near, settings=
         except ValueError as error:
             oh_info.update(accepted=False, reason=str(error))
             LOG.warning('OH correction reverted to prediction: %s', error)
-    return Corrections(matrices, arms, science_mask, oh_coef, residual_info, oh_info)
+    return Corrections(matrices, arms, science_mask, oh_coef, residual_info, oh_info, lines)
 
 
 def _survey_fit(reference, reason):
@@ -351,7 +368,7 @@ def _fiber_task(index):
             # One failing fiber keeps its survey LSF instead of stopping the exposure.
             LOG.warning('Fiber %s: LSF fit failed, survey LSF kept: %r', fiberid, error)
             fit = _survey_fit(reference, f'fiber_error:{type(error).__name__}')
-    sky = sky_parts(w.model, w.coef, w.oh_coef, fit.adopted, w.arms, w.settings).total
+    sky = sky_parts(w.model, w.coef, w.oh_coef, fit.adopted, w.arms, w.settings, w.lines).total
     for record in fit.qa:
         record.update(fiberid=fiberid, input_row=index)
         channel = record['channel']
@@ -435,6 +452,7 @@ def run(input_path, ensemble_path, *, gaia_dir=None, lsf_calibration=None, outpu
         arms=corrections.arms,
         survey_only=survey_only,
         settings=settings,
+        lines=corrections.lines,
     )
     rows = np.array([i for i in references if str(frame.slit['telescope'][i]).strip() == 'Sci'], int)
     LOG.info('Fitting and rendering %s Science fibers using %s processes', len(rows), jobs)

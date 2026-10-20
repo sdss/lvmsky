@@ -11,7 +11,7 @@ from scipy.interpolate import BSpline
 from skysub.sky_decomp.lsf_spline2d import mspline_basis
 from skysub.sky_decomp.lsf_surface_iterative import evaluate_bspline_basis
 from skysub.sky_subtraction import pipeline as common
-from skysub.sky_subtraction.rendering import channel_slices
+from skysub.sky_subtraction.rendering import channel_slices,residual_protection
 from mlp_predictor.sky_arm_correction import sky_arm_residual_correction
 from .lsf import FIT_CHANNELS, evaluate_block
 
@@ -19,10 +19,10 @@ CHANNELS = 'BRZ'
 
 
 def _outputs(r, state):
-    """Raw ML sky, OH correction and Moon + zodiacal light of the Science model, in physical units."""
+    """Raw ML sky, OH correction, Moon + zodiacal light and raw OH of the Science model, in physical units."""
     raw, components, matrices = common.render(r.model_sci, r.coef, state)
     oh = r.model_sci._components_from_coef(r.oh_coef, matrices)['oh'] - components['oh']
-    return np.stack([raw, oh, components['moon'] + components['zodi']]) / common.FACTOR
+    return np.stack([raw, oh, components['moon'] + components['zodi'], components['oh']]) / common.FACTOR
 
 
 def affine_sky(r, template):
@@ -112,8 +112,9 @@ def evaluate_science(r, blocks, slit, science, lsf_row, chunk=128):
     sky = np.zeros((len(slit), len(r.wave)), dtype='f4')
     for start in range(0, len(science), chunk):
         part = slice(start, start + chunk)
-        raw, oh, solar = (h[part] @ D).reshape(-1, 3, len(r.wave)).transpose(1, 0, 2) + offset[:, None, :]
-        residual = sky_arm_residual_correction(r.wave, raw, solar, r.arms, max_wavelength=5000.)
+        raw, oh, solar, raw_oh = (h[part] @ D).reshape(-1, 4, len(r.wave)).transpose(1, 0, 2) + offset[:, None, :]
+        residual = sky_arm_residual_correction(r.wave, raw, solar, r.arms, max_wavelength=r.settings.residual_max_angstrom,
+            **residual_protection(r.settings, r.lines, raw_oh))
         sky[science[part]] = (raw + oh + residual).astype('f4')
 
     # One LSF state per fiber for the product; B metadata is common to all fibers (checked), coefficients differ.

@@ -1,6 +1,7 @@
 """Reuse median/ML preparation; infer a sky-only LSF for every block."""
 from concurrent.futures import ProcessPoolExecutor
 from copy import deepcopy
+from dataclasses import replace
 from pathlib import Path
 import json
 import logging
@@ -12,7 +13,11 @@ import ctypes
 import numpy as np
 from astropy.io import fits
 from astropy.table import Table
+from skysub.sky_subtraction import decomp_adapter as adapter
 from skysub.sky_subtraction import pipeline as common
+from skysub.sky_subtraction.ml import protection_velocities
+from skysub.sky_subtraction.rendering import exposure_line_masks
+from skysub.sky_subtraction.settings import SETTINGS
 from skysub.sky_subtraction.io import read_cframe
 from skysub.sky_subtraction.reconstruction import SkyMLReconstructor
 from skysub.sky_decomp.result_io import build_lsf_hdus
@@ -76,6 +81,11 @@ def run(input_path, *, output=None, seed=None, ensemble=None, gaia_dir=None, job
         np.testing.assert_array_equal(slit['fiberid'],r.h['SLITMAP'].data['fiberid'])
         np.testing.assert_array_equal(wave,r.wave)
         templates={label:r.state('MED_',r.labels.index(label)) for label in r.labels}
+        # The residual transfer follows the current settings, whatever the preparation recorded.
+        r.settings=replace(r.settings,residual_max_angstrom=SETTINGS.residual_max_angstrom,
+            residual_line_protection=SETTINGS.residual_line_protection)
+        velocities=list(protection_velocities(*adapter.telescope_coords(header,'Sci')))
+        r.lines=exposure_line_masks(wave,templates['Sci'],velocities,r.settings)
         for label in r.labels:
             for ch in 'BRZ':
                 np.testing.assert_array_equal(templates[label].knot_vectors[ch],templates['Sci'].knot_vectors[ch])
@@ -119,8 +129,10 @@ def run(input_path, *, output=None, seed=None, ensemble=None, gaia_dir=None, job
         method='sky_block_centered' if centered else 'sky_block'
         sky,states,widths=evaluate_science(r,blocks,slit,science,lsf_row)
         # Preserve the common compact schema and its coefficient-based diagnostic renderer.
+        # A block product used as the seed brings its own block extensions; they are replaced too.
         remove={'FLUX','IVAR','MASK','LSF','SKY','LSF_FIBERS','LSF_COEF','LSF_KNOTS','LSF_META',
-            'CAND_LSF_COEF','CAND_LSF_KNOTS','CAND_LSF_META','LSF_QA','FIT_LSF_HISTORY','SKYML_META'}
+            'CAND_LSF_COEF','CAND_LSF_KNOTS','CAND_LSF_META','LSF_QA','FIT_LSF_HISTORY','SKYML_META',
+            'BLOCK_LSF_META','BLOCK_LSF_COEF','BLOCK_SLIT_KNOTS','BLOCK_WAVE_KNOTS','SKY_FIBER_COEF'}
         product=fits.HDUList([x.copy() for x in r.h if x.name not in remove])
         for name,values in [('FLUX',flux.astype('f4')),('IVAR',ivar.astype('f4')),('MASK',mask.copy())]:
             image=fits.ImageHDU(values,name=name)
@@ -145,6 +157,9 @@ def run(input_path, *, output=None, seed=None, ensemble=None, gaia_dir=None, job
         product.append(fits.ImageHDU(np.stack([v['wave_knots'] for v in blocks.values()]),name='BLOCK_WAVE_KNOTS'))
         product.append(fits.BinTableHDU(Table(rows=fiber_rows),name='SKY_FIBER_COEF'))
         provenance=deepcopy(r.provenance)
+        provenance['settings'].update(residual_max_angstrom=r.settings.residual_max_angstrom,
+            residual_line_protection=r.settings.residual_line_protection)
+        provenance.setdefault('residual_correction',{})['line_protection_velocities_km_s']=velocities
         provenance.update(block_timing=block_timing,input=str(input_path),method=method,preparation=str(seed),preparation_sha256=common.sha256(seed),
             block_settings=dict(fitted_channels='RZ',blue_lsf='each Science fiber keeps its survey LSF from the preparation; B is not fitted',slit_basis=slit_count,slit_degree=3,coordinate='SLITMAP.fiberid within spectrograph',
                 wavelength_solution='input, unchanged',constraints='nonnegative, unit integral'+(', zero first moment' if centered else '; no centroid constraint')+' at all wavelength/slit control pairs',

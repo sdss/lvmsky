@@ -25,7 +25,7 @@ Supported inputs are calibrated CFrames on the bundled native DRP 1.3.2 waveleng
 
 1. Join Gaia to SLITMAP by fiber ID, recompute the observed G-band flux, select Gaia-clean fibers (Science falls back to its 50 lowest-ratio fibers) and form masked medians with contributor counts.
 2. Fit the Science, SkyE and SkyW medians with the corpus decomposition: Blue fixed, R/Z seeded with the selected fibers' mean survey LSF.
-3. Predict one coefficient vector at the Science IFU centre. Estimate the Blue sky-arm residual transfer (tapered off at 5000–5100 Å) and common OH band scales/upper-level-energy tilts on the Science median. OH proposals with negative populations revert to the raw prediction.
+3. Predict one coefficient vector at the Science IFU centre. Estimate the full-band sky-arm residual transfer and common OH band scales/upper-level-energy tilts on the Science median. Inside windows around the nebular lines the transfer is interpolated (blueward of 5800 Å) or reduced to its OH part with the line cores zeroed (redward), so emission common to both sky fields does not reach the Science sky; for a pointing in the Magellanic Clouds the cores are also centred at their systemic velocity (`mlp_predictor.sky_arm_correction`). OH proposals with negative populations revert to the raw prediction.
 4. Fit the R/Z LSF of every usable Science fiber against the full sky model (emission plus lunar/zodiacal continuum) with a nonnegative source spline; adopt it only if it passes the checks below, else keep the fiber's survey LSF.
 5. Render each fiber's sky with its adopted LSF, add both corrections, subtract and publish atomically.
 

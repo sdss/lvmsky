@@ -7,7 +7,13 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from mlp_predictor.sky_arm_correction import SkyArm, sky_arm_residual_correction  # noqa: E402
+from mlp_predictor.sky_arm_correction import (  # noqa: E402
+    SkyArm,
+    line_protection_masks,
+    protect_science_lines,
+    protection_velocities,
+    sky_arm_residual_correction,
+)
 
 WAVE = np.arange(3600.0, 6000.0, 0.5)
 AIRGLOW = 1.0
@@ -138,3 +144,67 @@ def test_a_narrow_feature_in_one_arm_is_not_transferred():
     away = (np.abs(WAVE - 4500.0) > 10) & (WAVE < 5900)
     assert np.allclose(on[away], (p * (s + AIRGLOW))[away], atol=5e-3)
     assert 0 < info["clipped_fraction"] < 0.05
+
+
+# --- Science-line protection over the full band ---------------------------
+
+FULL = np.arange(3600.0, 9800.0, 0.5)
+C_KM_S = 299792.458
+
+
+def _gauss(centre, amplitude, sigma=1.0):
+    return amplitude * np.exp(-0.5 * ((FULL - centre) / sigma) ** 2)
+
+
+def test_line_masks_cover_the_lines_at_rest_and_at_the_cloud_velocity():
+    windows, cores = line_protection_masks(FULL, 1.5, velocities=(262.0,))
+    at = lambda lam: windows[np.argmin(np.abs(FULL - lam))]
+    assert at(6562.8) and at(9068.6) and at(4861.3)
+    assert at(6562.8 * (1 + 262.0 / C_KM_S))
+    assert not at(6450.0)
+    assert np.all(windows[cores])                       # every core lies inside its window
+    # Interpolated blue windows are narrower (300 km/s) than the red ones (500 km/s).
+    rest, _ = line_protection_masks(FULL, 1.5)
+    run = lambda lam: rest[np.abs(FULL - lam) < 15].sum() * 0.5
+    assert abs(run(4861.33) - 2 * 4861.33 * 300 / C_KM_S) < 1.0
+    assert abs(run(6678.15) - 2 * 6678.15 * 500 / C_KM_S) < 1.0
+    assert 0.1 < windows.mean() < 0.3
+    assert protection_velocities(81.0, -69.7) == (262.0,)
+    assert protection_velocities(14.0, -73.0) == (146.0,)
+    assert protection_velocities(180.0, 10.0) == ()
+
+
+def test_emission_in_both_arms_is_not_transferred():
+    # Diffuse emission common to both fields passes the consistency clip; the
+    # line protection must stop it, also where it sits on an OH line.
+    continuum = np.full(FULL.size, 10.0)
+    oh = _gauss(9068.6, 30.0, 1.0) + _gauss(6562.0, 5.0, 1.0)
+    model = continuum + oh
+    lines = sum(_gauss(lam, 10.0, 1.0) for lam in (4861.33, 6562.80, 6583.45, 9068.60))
+    arm = lambda: SkyArm(model + lines, model, continuum, np.full(FULL.size, 1e-4))
+    kw = dict(smoothing=0, max_wavelength=np.inf, scale=None)
+    off = sky_arm_residual_correction(FULL, model, continuum, [arm(), arm()], **kw)
+    on = sky_arm_residual_correction(FULL, model, continuum, [arm(), arm()], sci_oh=oh,
+                                     line_masks=line_protection_masks(FULL, 1.5), **kw)
+    for lam in (4861.33, 6562.80, 6583.45, 9068.60):
+        w = np.abs(FULL - lam) < 4
+        assert off[w].sum() > 0.9 * lines[w].sum()
+        assert abs(on[w].sum()) < 1e-6 * lines[w].sum()
+
+
+def test_blue_windows_are_interpolated_and_red_windows_keep_the_oh_part():
+    windows, cores = line_protection_masks(FULL, 1.5)
+    corr = 0.01 * (FULL - 3600.0)                        # a correction linear in wavelength
+    oh_frac = np.where(np.abs(FULL - 6575.0) < 1.0, 0.8, 0.0)   # an OH line inside the Halpha window
+    out = protect_science_lines(corr, FULL, windows, cores, oh_frac)
+    blue = FULL < 5800
+    assert np.allclose(out[blue], corr[blue], atol=1e-9)   # a linear correction survives interpolation
+    red = (FULL >= 5800) & windows & ~cores
+    assert np.allclose(out[red], (corr * oh_frac)[red])
+    assert np.all(out[cores & (FULL >= 5800)] == 0.0)
+    assert np.array_equal(out[~windows], corr[~windows])
+    zeroed = protect_science_lines(corr, FULL, windows, cores, oh_frac, mode="windows")
+    assert np.all(zeroed[windows & (FULL >= 5800)] == 0.0)
+    with pytest.raises(ValueError):
+        sky_arm_residual_correction(FULL, np.ones(FULL.size), np.ones(FULL.size),
+                                    [SkyArm(*(np.ones(FULL.size),) * 4)], line_masks=(windows, cores))

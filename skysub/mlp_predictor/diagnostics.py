@@ -536,10 +536,7 @@ class Diagnostics:
     # Hand-written overrides that accept per-call arguments.
     # ------------------------------------------------------------------
 
-    def _resolve_row_from_expnum(self, expnum: int) -> int:
-        """Look up the every10-corpus row index matching ``expnum``."""
-        import numpy as _np
-        from astropy.io import fits as _fits
+    def _decomp_data_root_and_stem(self) -> tuple[str, str]:
         data_root = self._globals.get("DECOMP_DATA_ROOT")
         stem = self._globals.get("DECOMP_STEM")
         if data_root is None or stem is None:
@@ -547,18 +544,88 @@ class Diagnostics:
                 "expnum lookup needs DECOMP_DATA_ROOT and DECOMP_STEM in the "
                 "diagnostics context (add both to DiagnosticsContext.extras)."
             )
-        e10_input = f"{data_root}/{stem}_every10.fits"
-        with _fits.open(e10_input) as h:
+        return str(data_root), str(stem)
+
+    @staticmethod
+    def _rows_matching_expnum(meta_fits: str, expnum: int) -> np.ndarray:
+        with fits.open(meta_fits, memmap=True) as h:
             meta = h["META"].data
             colname = next(
                 (c for c in meta.columns.names if c.lower() == "expnum"), None,
             )
             if colname is None:
-                raise KeyError(f"{e10_input} META has no expnum column")
-            matches = _np.flatnonzero(_np.asarray(meta[colname]) == int(expnum))
+                raise KeyError(f"{meta_fits} META has no expnum column")
+            return np.flatnonzero(np.asarray(meta[colname]) == int(expnum))
+
+    def _resolve_row_from_expnum(self, expnum: int) -> int | None:
+        """Look up the every10-corpus row index matching ``expnum``.
+
+        None when the exposure is not in the every10 sample.
+        """
+        data_root, stem = self._decomp_data_root_and_stem()
+        matches = self._rows_matching_expnum(
+            f"{data_root}/{stem}_every10.fits", expnum)
+        return int(matches[0]) if matches.size else None
+
+    def _extract_corpus_expnum(self, expnum: int) -> str:
+        """Cut the full-corpus row for ``expnum`` into a one-row file set.
+
+        Writes ``<root>/single_rows/<stem>_expnum<N>{.fits,_decomp_*.fits}``,
+        laid out exactly like the every10 products (same HDUs, sliced by
+        ``decompose_parallel.thin_fits_rows``), and returns that prefix so the
+        single-row cell can run on it unchanged with row 0.  The full files are
+        memory-mapped, so only this row is read.  Files are reused until a
+        source is newer; then they and the row's moon-model cache are rebuilt.
+        """
+        from .data import DECOMP_SUFFIX, _decompose_parallel_module
+        from . import moon_model_cache as _mmc
+
+        data_root, stem = self._decomp_data_root_and_stem()
+        full_prefix = f"{data_root}/{stem}"
+        meta_fits = f"{full_prefix}_meta_only.fits"
+        if not Path(meta_fits).exists():
+            meta_fits = f"{full_prefix}.fits"
+        matches = self._rows_matching_expnum(meta_fits, expnum)
         if matches.size == 0:
-            raise ValueError(f"expnum {expnum} not found in {e10_input}")
-        return int(matches[0])
+            raise ValueError(
+                f"expnum {expnum} is in neither the every10 sample nor "
+                f"the full corpus ({meta_fits})")
+        corpus_row = int(matches[0])
+
+        out_dir = Path(data_root) / "single_rows"
+        out_dir.mkdir(exist_ok=True)
+        prefix = str(out_dir / f"{stem}_expnum{int(expnum)}")
+        pairs = [(f"{full_prefix}.fits", f"{prefix}.fits")] + [
+            (f"{full_prefix}_decomp_{kind}{DECOMP_SUFFIX}.fits",
+             f"{prefix}_decomp_{kind}{DECOMP_SUFFIX}.fits")
+            for kind in ("sky1", "sky2", "sci")
+        ]
+        missing = [src for src, _ in pairs if not Path(src).exists()]
+        if missing:
+            raise FileNotFoundError(
+                f"expnum {expnum} is not in the every10 sample, and the full "
+                f"corpus files needed to extract it are missing: {missing}")
+        dp = _decompose_parallel_module()
+        rebuilt = False
+        for src, dst in pairs:
+            if (not Path(dst).exists()
+                    or Path(dst).stat().st_mtime < Path(src).stat().st_mtime):
+                dp.thin_fits_rows(src, dst, [corpus_row])
+                rebuilt = True
+
+        cache = _mmc.cache_path(prefix)
+        if rebuilt and cache.exists():
+            cache.unlink()
+        if (not cache.exists()
+                and self._globals.get("USE_MOON_MODEL_FEATURE", False)
+                and _mmc.cache_path(full_prefix).exists()):
+            # Slice the parent's cache rather than letting the cell build a
+            # one-row cache from scratch on every core.
+            _mmc.derive_from_parent(prefix, parent_prefix=full_prefix,
+                                    n_check=1)
+        print(f"  expnum {expnum} is not in every10: using full-corpus row "
+              f"{corpus_row}, extracted to {prefix}*")
+        return prefix
 
     def full_spectrum_single_row(self, row: int | None = None,
                                  expnum: int | None = None,
@@ -571,7 +638,10 @@ class Diagnostics:
                                  line_prior_sigma: float = 0.1,
                                  line_tilt: bool = True) -> dict:
         """Reconstruct a single every10 row.  Pass ``row`` (every10 index)
-        or ``expnum`` (looked up via the every10 META FITS).
+        or ``expnum`` (looked up via the every10 META FITS).  An ``expnum``
+        that is not in every10 is taken from the full corpus instead: its row
+        is extracted once into ``<DECOMP_DATA_ROOT>/single_rows/`` (see
+        `_extract_corpus_expnum`) and the cell runs on that.
 
         ``residual_correction`` subtracts, in the 4th panel (observed -
         predicted), the sky arms' own decomposition residual: near and far,
@@ -592,13 +662,18 @@ class Diagnostics:
         """
         if expnum is not None and row is not None:
             raise TypeError("pass row OR expnum, not both")
+        stem_patch = []
         if expnum is not None:
             row = self._resolve_row_from_expnum(expnum)
+            if row is None:
+                prefix = self._extract_corpus_expnum(expnum)
+                stem_patch = [(r"^_e10_stem\s*=.*$", f"_e10_stem = {prefix!r}")]
+                row = 0
         if row is None:
             row = 978
         return self._run(
             "full_spectrum_single_row",
-            source_patches=[
+            source_patches=stem_patch + [
                 (r"^REQUESTED_ROW\s*=\s*\d+", f"REQUESTED_ROW = {int(row)}"),
                 (r"^SHOW_MOON_ZODI_MODEL\s*=\s*(?:True|False)",
                  f"SHOW_MOON_ZODI_MODEL = {bool(show_moon_zodi_model)}"),
