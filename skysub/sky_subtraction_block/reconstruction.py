@@ -5,16 +5,24 @@ from skysub.sky_subtraction.pipeline import render,FACTOR
 from .lsf import evaluate_block
 
 
+def load_lsf_blocks(hdus):
+    """Read recorded blocks and support decisions without loading spectral models."""
+    blocks={}
+    for i,row in enumerate(hdus['BLOCK_LSF_META'].data):
+            blocks[(int(row['spectrograph']),str(row['channel']))]=dict(
+                coef=np.asarray(hdus['BLOCK_LSF_COEF'].data[i],float),
+                slit_knots=np.asarray(hdus['BLOCK_SLIT_KNOTS'].data[i],float),
+                wave_knots=np.asarray(hdus['BLOCK_WAVE_KNOTS'].data[i],float),
+                wave_degree=int(row['wave_degree']),qa=dict(status=str(row['status']),centered=bool(row['centered']) if 'centered' in row.array.names else True,
+                    adopted=bool(row['adopted']) if 'adopted' in row.array.names else True,
+                    fallback_reason=str(row['fallback_reason']) if 'fallback_reason' in row.array.names else ''))
+    return blocks
+
+
 class SkyBlockReconstructor(SkyMLReconstructor):
     def __init__(self,path,cframe=None):
         super().__init__(path,cframe)
-        self.blocks={}
-        for i,row in enumerate(self.h['BLOCK_LSF_META'].data):
-            self.blocks[(int(row['spectrograph']),str(row['channel']))]=dict(
-                coef=np.asarray(self.h['BLOCK_LSF_COEF'].data[i],float),
-                slit_knots=np.asarray(self.h['BLOCK_SLIT_KNOTS'].data[i],float),
-                wave_knots=np.asarray(self.h['BLOCK_WAVE_KNOTS'].data[i],float),
-                wave_degree=int(row['wave_degree']),qa=dict(status=str(row['status']),centered=bool(row['centered']) if 'centered' in row.array.names else True))
+        self.blocks=load_lsf_blocks(self.h)
 
     def global_state(self,fiberid):
         """R/Z block surfaces at this physical fiber; B is the Science fiber's survey LSF or the Sky telescope median."""
@@ -38,6 +46,8 @@ class SkyBlockReconstructor(SkyMLReconstructor):
         rows=rows[rows['fiberid']==fiberid]
         if len(rows)!=1:raise ValueError('Fiber was not selected for the Sky-only fit')
         row=rows[0];i=int(row['input_row']);label=str(row['telescope'])
+        if 'usable' in rows.dtype.names and not row['usable']:
+            raise ValueError('Sky-fiber component fit is unavailable: '+str(row['reason']))
         total,components,_=render(self.model(label),row['coef'],self.global_state(fiberid))
         valid=(self.mask[i]==0)&(self.ivar[i]>0)&np.isfinite(self.observed[i])&~self.h['MED_FIT_MASK'].data.astype(bool)
         sigma=np.divide(1,np.sqrt(np.maximum(self.ivar[i],0)),out=np.full(len(self.wave),np.nan),where=self.ivar[i]>0)

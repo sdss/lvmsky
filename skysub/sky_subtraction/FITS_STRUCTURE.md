@@ -83,6 +83,15 @@ Example: exposure 59750, 1944 input fibers × 12401 wavelengths; 1754 processed 
 
 ## Reconstruction API
 
+Block basis searches can use distinct offset dimensions in B and R/Z.
+`LSF_META.n_offset` records the actual offset count for each channel;
+`LSF_COEF` is NaN-padded to the largest channel count. The reader accepts older
+products without this column using the full stored offset axis. The existing
+`n_basis` and `n_knots` columns likewise delimit wavelength coefficients and knots.
+`SKYML_META.block_settings` records all three basis counts and the dimensionless
+offset/wavelength/slit roughness and median-profile prior strengths, with their
+Hessian scaling. Median and initial states retain their original bases.
+
 ```python
 from skysub.sky_subtraction.reconstruction import SkyMLReconstructor
 
@@ -149,3 +158,29 @@ Each variable-length spline vector is padded with NaNs and has an explicit `_n` 
 All five compact products were checked against their previous full-diagnostic products for complete median models and representative individual sky/fit components/weights. Additional user-selected 59750 fibers 680, 1447 and 971 reproduce stored spectral/weight arrays to <2e-6 of each array's peak; measured errors are at float32 rounding scale. Report generation checks reconstructed final SKY for every processed fiber. These are serialization/reconstruction checks, not independent LSF-recovery accuracy measurements.
 
 Native observed-noise IVAR is retained. Full sky-model uncertainty is uncalibrated; there is no all-zero SKY_IVAR image. Exact reconstruction uses the matching shipped/configured numerical model and telluric assets.
+
+## Block-LSF support decisions
+
+Updated block products retain all six entries in `BLOCK_LSF_META`, including
+reference fallbacks. `adopted=True` means the fitted surface passed the block
+support/solver checks; `False` means its stored coefficients are the projected
+Science-median reference, repeated across pseudo-slit. `fallback_reason` records
+the decision. `input_fibers`, `rejected_channel_fibers`, `slit_condition`,
+`expected_max_gap` and `selected_max_gap` accompany the existing counts/rank/range.
+Fallback χ² fields are NaN. These fields assess support, not physical recovery.
+`centered` describes the stored block; `requested_centered` records the CLI request.
+The primary `LSFCENT` remains the requested run mode. A reference fallback is
+never silently recentered. Science `LSF_QA.accepted/converged=False` and its reason
+identify reference fallback. `SKY_FIBER_COEF.usable/reason` preserve unavailable
+individual fits explicitly; their coefficients are NaN. Old products without
+the new columns remain readable as historical fitted blocks.
+
+Block likelihood diagnostics additionally store `data_chi2`, `data_n_pixels`,
+`nominal_df`, `effective_df`, `active_coefficients`, `active_threshold` and
+`df_seconds`. Data chi-square is unpenalized and includes evaluation of fixed
+reference fallbacks; their nominal/effective dimension is zero. The older `chi2`
+fit-status field stays NaN for a reference fallback. Local effective degrees of
+freedom condition on the current positivity face and fixed preparation/component
+coefficients; they do not describe the complete decomposition pipeline.
+`hessian_bytes`, `penalized_bytes`, `coefficient_bytes` and `sample_design_bytes`
+give array payload sizes in bytes. These are distinct from FITS size and peak RSS.

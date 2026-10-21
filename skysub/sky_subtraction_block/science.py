@@ -91,7 +91,8 @@ def uniform_metadata(r):
 
 def evaluate_science(r, blocks, slit, science, lsf_row, chunk=128):
     """``(sky, states, lsf_rows)`` of the Science rows; replaces one full render per fiber by a matrix product."""
-    template = r.state('MED_', r.labels.index('Sci'))
+    first = int(science[0])
+    template = evaluate_block(r.state('MED_', r.labels.index('Sci')), blocks, int(slit['spectrographid'][first]), float(slit['fiberid'][first]))
     offset, D = affine_sky(r, template)
     D = D.reshape(len(D), -1)
     shapes = {c: template.coefficients[c].shape for c in CHANNELS}
@@ -100,7 +101,7 @@ def evaluate_science(r, blocks, slit, science, lsf_row, chunk=128):
     spectrograph = np.asarray(slit['spectrographid'])[science]
     cube_rows = np.array([lsf_row[int(i)] for i in science])
     coefficients = {c: np.empty((len(science),) + shapes[c]) for c in CHANNELS}
-    coefficients['B'][:] = cube[cube_rows, 0, :, :shapes['B'][1]]
+    coefficients['B'][:] = cube[cube_rows, 0, :shapes['B'][0], :shapes['B'][1]]
     for sp_id in np.unique(spectrograph):
         take = spectrograph == sp_id
         for c in FIT_CHANNELS:

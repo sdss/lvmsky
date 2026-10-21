@@ -16,10 +16,87 @@ python -m skysub.sky_subtraction_block /path/lvmCFrame-00059750.fits \
 
 For a controlled LSF comparison, add `--seed /path/lvmSFrame-skyml-00059750.fits` to reuse that exact exposure's saved median/ML/correction preparation. The input SHA256 and row/wavelength identities must match. The seed's individual Science LSF fits are replaced completely. A run without a seed computes the same median/ML/correction stage (survey-only, no per-fiber LSF fits) in memory and writes no preparation file; `--keep-preparation` also writes it beside the output for reuse with `--seed`. A `--seed` file, or a preparation that already exists at that default path, is used as is and never modified or deleted. Existing destinations are protected; working filenames have no version suffixes.
 
+## Basis dimensions and regularization
+
+`--offset-count` (default 11, odd and ≥5), `--wave-count` (default 4, ≥4),
+and `--slit-count` (default 4, ≥4) set the R/Z cubic tensor dimensions.
+The offset support stays ±2.5 Å; B retains its exact original survey profile.
+Sky-fiber component coefficients are fitted with the original median profiles;
+the R/Z profiles are then projected onto the trial basis to construct the block
+designs. Rendering and reconstruction use each channel's actual dimensions.
+
+`--offset-roughness`, `--wave-roughness`, and `--slit-roughness` add squared
+second-difference penalties on the corresponding coefficient axis.
+`--reference-prior` adds squared distance to the Science-median profile projected
+onto the requested basis, repeated across slit controls. Each strength multiplies
+the mean diagonal of the native-IVAR data Hessian. All four defaults are zero.
+The reported block χ² remains the data-only objective, excluding these penalties.
+The older `roughness_fraction`, `offset_roughness_fraction`,
+`fallback_prior_fraction`, and numerical ridge belong to other LSF fitters;
+they were not regularizers of the block QP.
+
+For example, run an independent single-core trial with:
+
+```sh
+taskset -c 0 python -m skysub.sky_subtraction_block /path/lvmCFrame-00014350.fits \
+  --ensemble /path/trusted_ensemble.pt --gaia-dir /path/gaia/fibers \
+  --jobs 1 --offset-count 11 --wave-count 4 --slit-count 4 \
+  --offset-roughness 0.01 --wave-roughness 0 --slit-roughness 0 --reference-prior 0 \
+  --output /separate/trial/lvmSFrame-skyml-block-00014350.fits
+```
+
 ## Compact storage and diagnostics
 
 The shared [compact product contract](../sky_subtraction/FITS_STRUCTURE.md) applies. `BLOCK_LSF_COEF` stores the six blocks × offset × wavelength × slit controls; `BLOCK_SLIT_KNOTS`, `BLOCK_WAVE_KNOTS` and `BLOCK_LSF_META` store exact domains, degrees, solver status, rank, input counts, chi-square, and moment checks. `SKY_FIBER_COEF` records every selected Sky fiber's identity, component vector and decomposition status. The usual `LSF_COEF/KNOTS/META` contain evaluations of the R/Z global solution at Science fibers together with their survey B LSF, so existing `SkyMLReconstructor.sky()` works directly. No intermediate model images are persisted. `SKYML_META` records preparation/input hashes, settings and implementation hashes. `SkyBlockReconstructor.global_state()` and `.sky_fiber()` reconstruct block profiles and selected Sky-fiber fits in memory.
 
-Input IVAR describes observed noise only. Fixed decomposition coefficients and common calibration errors induce correlations not propagated by this QP. Strictly centered LSFs can broaden or distort when individual wavelength offsets exist; comparison with measured Science profiles therefore retains their original centroids. Slit intervals outside the selected Sky range are extrapolation relative to the data, even though the B-spline evaluation stays inside the full spectrograph domain. Rank and coverage are recorded; QP success establishes numerical feasibility, not recovery accuracy. Slit flexibility and additional regularization remain empirical choices for subsequent tests.
+## Sky coverage and explicit reference fallback
+
+Channel-valid Sky fibers determine each R/Z block independently. An unavailable
+individual Sky-component fit is recorded in `SKY_FIBER_COEF` with `usable=False`,
+its reason and NaN coefficients. It does not enter the surface fit.
+The coverage checks require at least twice the slit-basis count in distinct
+positions, full slit rank, condition number ≤1000, a selected-fiber convex hull
+covering the full physical spectrograph domain, and a maximum gap no larger than
+twice the maximum physical Sky-fiber spacing in the spectrograph. The gap scale
+comes from all Sky positions in SLITMAP, before photometric/hardware selection.
+
+An unsupported or numerically unavailable block adopts the projected
+Science-median reference LSF, constant across pseudo-slit. Fallback applies to
+the whole block, avoiding a seam between fitted and reference intervals. This
+is a reference profile, not a surface measured from the unavailable data.
+The reference retains its centroid, including in a requested centered run.
+The compact coefficient shapes remain the requested dimensions and B is unchanged.
+`BLOCK_LSF_META` records `adopted`, `fallback_reason`, requested centering,
+channel input/rejection counts, slit condition and gap diagnostics.
+`LSF_QA` marks fitted-block acceptance separately from reference adoption.
+Every stored fallback is reconstructed by the same block evaluator.
+
+These are conservative support checks, not physical-profile validation.
+Input IVAR describes observed noise only; coefficient/model covariance is not
+propagated. A numerically feasible block and a lower subtraction χ² do not
+establish physical LSF recovery. The 15 × 16 × 6 χ² minimum found on exposures
+14350, 14771 and 14414 is withdrawn because of excessive flexibility and severe
+channel-edge artifacts. No replacement is recommended from that ranking alone.
+The fallback addresses the block stage: median/ML preparation still needs its
+own usable input data.
+
+## Conditional likelihood and tensor diagnostics
+
+`BLOCK_LSF_META.data_chi2/data_n_pixels` evaluate the auxiliary Sky-component
+model on channel-fit pixels for either a fitted block or the fixed reference
+fallback. They exclude regularization penalties. `chi2` remains NaN for an
+unfitted reference block. `nominal_df` is `(n_offset-1-centered)*n_wave*n_slit`
+for a fitted block and zero for a fixed reference. `effective_df` is the local
+active-face smoother trace on the equality tangent, using the data and penalized
+Hessians. Active-face selection and shared median/component fitting uncertainty
+are not included; this is not the effective dimension of the complete pipeline.
+The positivity threshold and calculation time are also recorded.
+
+The fixed-eleven analysis reports conditional Gaussian AIC/BIC with nominal and
+effective dimensions as diagnostics, plus delivered Science/Sky residual scores.
+The data likelihood is conditional on the preparation and individual component
+coefficients. The analysis records full CLI wall/CPU time independently of its
+later profile checks. `hessian_bytes`, `penalized_bytes`, `coefficient_bytes` and
+`sample_design_bytes` describe named fitter arrays, not process peak memory.
 
 Validation: `python -m pytest skysub/sky_subtraction_block/tests -q`. The injected test recovers a varying global surface from multiple fibers and checks continuous positivity, normalization and centering between control nodes.

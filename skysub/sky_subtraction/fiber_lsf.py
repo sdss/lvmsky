@@ -28,10 +28,10 @@ def channel_design(model, coefficient, state, channel):
     knots, degree = state.knot_vectors[channel], state.degrees[channel]
     coordinates = np.clip(model._line_wave[indices], knots[degree], knots[-degree - 1])
     design = line_design(
-        model._line_components[channel],
+        model._state_components(channel, state.coefficients[channel].shape[0])[0],
         line_flux,
         evaluate_bspline_basis(coordinates, knots, degree),
-        model.offset_basis_count,
+        state.coefficients[channel].shape[0],
     )
     take = channel_slices(model.wave, state, (channel,))[channel]
     return take, design[take].toarray()
@@ -53,7 +53,8 @@ def sky_designs(model, coefficient, state, matrices):
         knots, degree = state.knot_vectors[channel], state.degrees[channel]
         basis = evaluate_bspline_basis(np.clip(model.wave[take], knots[degree], knots[-degree - 1]), knots, degree)
         solar = line_design(
-            model._continuum_components[channel], solar_source[take] * widths[take], basis, model.offset_basis_count
+            model._state_components(channel, state.coefficients[channel].shape[0])[1],
+            solar_source[take] * widths[take], basis, state.coefficients[channel].shape[0]
         )[take].toarray()
         # Continuum rendering has small cross-channel edge contributions from neighboring source bins.
         edge = expected_solar[take] - solar @ state.coefficients[channel].ravel()

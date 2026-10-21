@@ -110,3 +110,128 @@ def test_fwhm_batch_matches_profile_diagnostics():
                                 legacy_kernel_representation='lsf-spline2d')
         expected = evaluate_lsf_diagnostics(state, wave)['fwhm_angstrom']
         np.testing.assert_allclose(fwhm_batch(basis @ c.T, 2.5), expected, rtol=0, atol=1e-12)
+
+
+def test_regularization_preserves_data_objective_and_shrinks_roughness():
+    from skysub.sky_subtraction_block.lsf import regularized_normal
+    shape = (7, 4, 4)
+    rng = np.random.default_rng(8)
+    truth = rng.uniform(.01, 1, shape); truth /= truth.sum(axis=0)
+    hessian = np.eye(truth.size); linear = -truth.ravel()
+    reference = np.ones(shape[:2])/shape[0]
+    zero, vector = regularized_normal(hessian, linear, shape, reference)
+    np.testing.assert_array_equal(zero, hessian)
+    np.testing.assert_array_equal(vector, linear)
+    penalized, vector = regularized_normal(hessian, linear, shape, reference, 100., 10., 10., 0.)
+    fitted, _ = solve_normal(penalized, vector, shape)
+    assert np.linalg.norm(np.diff(fitted, n=2, axis=0)) < np.linalg.norm(np.diff(truth, n=2, axis=0))
+    np.testing.assert_array_equal(hessian, np.eye(truth.size))
+    np.testing.assert_allclose(fitted.sum(axis=0), 1., atol=1e-8)
+
+
+def _coverage_samples():
+    rng=np.random.default_rng(52); no,nw,ns=7,4,4
+    truth=rng.uniform(.05,1,(no,nw,ns));truth/=truth.sum(axis=0)
+    positions=np.linspace(1,648,16);basis,_=slit_basis(positions,1,648,ns)
+    wave=np.linspace(6000,7000,100);samples=[]
+    for position,b in zip(positions,basis):
+        design=rng.uniform(.1,2,(len(wave),no*nw))
+        flux=design@np.einsum('kqs,s->kq',truth,b).ravel()
+        samples.append(dict(position=position,wave=wave,flux=flux,ivar=np.ones(len(wave)),mask=np.zeros(len(wave)),
+            designs={c:(np.ones(len(wave),bool),design,np.zeros(len(wave))) for c in 'RZ'}))
+    state=SimpleNamespace(coefficients={c:truth[:,:,0] for c in 'RZ'},config={'offset_half_width_angstrom':2.5})
+    return samples,state,truth,positions
+
+
+def test_local_effective_df_handles_smoothing_equalities_and_active_faces():
+    from skysub.sky_subtraction_block.lsf import local_effective_df
+    coef=np.full((3,2,2),1/3);hessian=np.eye(coef.size)
+    for penalty in [0.,.1,1.,100.]:
+        df,active,_=local_effective_df(hessian,hessian*(1+penalty),coef)
+        assert active==12
+        np.testing.assert_allclose(df,8/(1+penalty),atol=1e-12)
+    df,_,_=local_effective_df(hessian,hessian,coef,np.array([-1.,0.,1.]))
+    np.testing.assert_allclose(df,4,atol=1e-12)
+    coef[:]=0;coef[1]=1
+    df,active,_=local_effective_df(hessian,hessian,coef)
+    assert df==0 and active==4
+
+
+@pytest.mark.parametrize('case,reason',[
+    ('empty','insufficient_independent_sky_positions'),
+    ('few','insufficient_independent_sky_positions'),
+    ('boundary','unsupported_slit_boundary'),
+    ('gap','large_sky_coverage_gap'),
+    ('bad_channel','insufficient_independent_sky_positions')])
+def test_sparse_or_masked_sky_uses_explicit_reference(case,reason):
+    from skysub.sky_subtraction_block.lsf import fit_supported_block
+    samples,state,truth,positions=_coverage_samples()
+    if case=='empty':samples=[]
+    elif case=='few':samples=samples[:3]
+    elif case=='boundary':samples=samples[1:]
+    elif case=='gap':samples=samples[:4]+samples[-4:]
+    elif case=='bad_channel':
+        for s in samples:s['ivar'][:]=0
+    result,_,qa=fit_supported_block(samples,state,'R',1,648,expected_positions=positions)
+    np.testing.assert_array_equal(result,np.repeat(state.coefficients['R'][:,:,None],4,axis=2))
+    assert not qa['adopted'] and not qa['centered'] and qa['fallback_reason']==reason
+    assert qa['status']=='ReferenceFallback' and np.isnan(qa['chi2_per_pixel'])
+    np.testing.assert_allclose(result.sum(axis=0),1,atol=1e-12)
+
+
+def test_supported_sky_fit_matches_original_and_survives_one_fiber_loss():
+    from skysub.sky_subtraction_block.lsf import fit_supported_block
+    samples,state,truth,positions=_coverage_samples()
+    supported,_,qa=fit_supported_block(samples,state,'R',1,648,expected_positions=positions)
+    original,_,_=fit_block(samples,state,'R',1,648)
+    np.testing.assert_array_equal(supported,original)
+    assert qa['adopted'] and qa['fallback_reason']==''
+    samples.pop(7)
+    partial,_,qa=fit_supported_block(samples,state,'R',1,648,expected_positions=positions)
+    assert qa['adopted']
+    np.testing.assert_allclose(partial,truth,atol=3e-4)
+
+
+def test_channel_coverage_and_solver_fallback_are_independent(monkeypatch):
+    import skysub.sky_subtraction_block.lsf as module
+    samples,state,_,positions=_coverage_samples()
+    # A fully masked R design is unusable while Z keeps the same physical fiber.
+    take,design,fixed=samples[0]['designs']['R']
+    samples[0]['designs']['R']=(take,design,np.full_like(fixed,np.nan))
+    _,_,red=module.fit_supported_block(samples,state,'R',1,648,expected_positions=positions)
+    _,_,zed=module.fit_supported_block(samples,state,'Z',1,648,expected_positions=positions)
+    assert red['fallback_reason']=='unsupported_slit_boundary' and red['rejected_channel_fibers']==1
+    assert zed['adopted'] and zed['rejected_channel_fibers']==0
+    def unavailable(*args,**kwargs):raise RuntimeError('injected solver failure')
+    monkeypatch.setattr(module,'fit_block',unavailable)
+    _,_,qa=module.fit_supported_block(samples,state,'Z',1,648,expected_positions=positions)
+    assert not qa['adopted'] and qa['fallback_reason']=='block_solver_failure'
+
+
+@pytest.mark.parametrize('offset_count', [7, 15])
+def test_mixed_basis_roundtrip_and_exact_native_rendering(offset_count):
+    from pathlib import Path
+    from skysub.sky_decomp.lsf_reference import load_survey_ascii_lsf
+    from skysub.sky_decomp.result_io import build_lsf_hdus, lsf_surface_state_from_cubes
+    from skysub.sky_decomp.lsf_spline2d import evaluate_lsf_diagnostics, evaluate_lsf_density
+    from skysub.sky_subtraction_block.lsf import resize_state
+    from skysub.sky_subtraction.tests.test_product import _small_model
+    from skysub.sky_subtraction.rendering import render
+    from skysub.sky_subtraction.fiber_lsf import sky_designs
+    base = load_survey_ascii_lsf(Path(__file__).parents[2]/'sky_decomp/data/lsf', 500)
+    state = resize_state(base, offset_count, 6)
+    hdus = build_lsf_hdus([state])
+    restored = lsf_surface_state_from_cubes(tuple(h.data for h in hdus), 0)
+    for ch in 'BRZ':
+        np.testing.assert_array_equal(restored.coefficients[ch], state.coefficients[ch])
+    np.testing.assert_array_equal(state.coefficients['B'], base.coefficients['B'])
+    probes = np.array([4500., 6500., 8500.])
+    diagnostics = evaluate_lsf_diagnostics(state, probes)
+    density = evaluate_lsf_density(state, probes, np.linspace(-2.5, 2.5, 1201))
+    np.testing.assert_allclose(trapezoid(density, np.linspace(-2.5, 2.5, 1201)), 1., atol=1e-8)
+    assert np.isfinite(diagnostics['fwhm_angstrom']).all()
+    model = _small_model(); coef = np.full(len(model.design_names), .001)
+    expected, _, matrices = render(model, coef, restored)
+    for ch, (take, parts) in sky_designs(model, coef, restored, matrices).items():
+        actual = (parts['lines']+parts['solar'])@restored.coefficients[ch].ravel()+parts['fixed']
+        np.testing.assert_allclose(actual, expected[take], rtol=1e-10, atol=1e-12)

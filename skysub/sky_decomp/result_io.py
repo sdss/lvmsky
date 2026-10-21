@@ -77,6 +77,7 @@ def _lsf_meta_row(spectrum_index, state, channel, *, available=True, reason=None
         "upper": np.nan if upper is None else upper,
         "degree": state.degrees[channel],
         "n_basis": coefficient.shape[1],
+        "n_offset": coefficient.shape[0],
         "n_knots": knot_vector.size,
         "tap_offsets": state.tap_offsets.copy(),
         "status": str(metric.get("status", "")),
@@ -164,7 +165,7 @@ def build_lsf_hdus(states):
         for channel_index, channel in enumerate(CHANNEL_NAMES):
             coefficient = state.coefficients[channel]
             knot_vector = state.knot_vectors[channel]
-            coefficient_cube[spectrum_index, channel_index, :, : coefficient.shape[1]] = (
+            coefficient_cube[spectrum_index, channel_index, :coefficient.shape[0], : coefficient.shape[1]] = (
                 coefficient
             )
             knot_cube[spectrum_index, channel_index, : knot_vector.size] = knot_vector
@@ -267,8 +268,11 @@ def lsf_surface_state_from_cubes(cubes, spectrum_index: int = 0):
         n_knots = int(row["n_knots"])
         if n_basis < 1 or n_knots < 2:
             raise ValueError(f"Invalid stored LSF dimensions for channel {channel}")
+        n_offset = int(row['n_offset']) if 'n_offset' in meta.dtype.names else coefficient_cube.shape[2]
+        if not 1 <= n_offset <= coefficient_cube.shape[2]:
+            raise ValueError(f'Invalid stored offset dimension for channel {channel}')
         coefficients[channel] = coefficient_cube[
-            spectrum_index, channel_index, :, :n_basis
+            spectrum_index, channel_index, :n_offset, :n_basis
         ].copy()
         knots[channel] = knot_cube[spectrum_index, channel_index, :n_knots].copy()
         degrees[channel] = int(row["degree"])

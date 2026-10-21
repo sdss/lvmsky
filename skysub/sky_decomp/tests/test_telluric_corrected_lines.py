@@ -179,5 +179,12 @@ def test_corrected_domain_operator_divides_only_after_lsf():
             rtol=2.0e-14,
             atol=1.0e-14,
         )
-
-
+    # Resizing the R/Z offset basis must retain the same post-convolution DRP division.
+    for count in (7, 15):
+        for channel in ('R', 'Z'):
+            intrinsic, continuum = pre._state_components(channel, count)
+            actual, actual_continuum = corrected._state_components(channel, count)
+            probe = np.linspace(.5, 1.5, intrinsic.shape[1])
+            np.testing.assert_allclose(actual@probe, (intrinsic@probe)/drp_transmission,
+                rtol=2e-14, atol=1e-14)
+            assert (continuum != actual_continuum).nnz == 0

@@ -265,6 +265,17 @@ class SkyDecompTelluricCorrectedLinesLSFSpline2D(
             for channel, matrix in self._line_components.items()
         }
 
+    def _state_components(self, channel, count):
+        if count == self.offset_basis_count:
+            return super()._state_components(channel, count)
+        cache = self.__dict__.setdefault('_corrected_state_component_cache', {})
+        if (channel, count) not in cache:
+            lines, continuum = super()._state_components(channel, count)
+            cache[channel, count] = (
+                lines.multiply((1./self.drp_transmission)[:, None]).tocsc(), continuum,
+            )
+        return cache[channel, count]
+
     def _rebuild_family(self, family: str) -> None:
         super()._rebuild_family(family)
         setattr(

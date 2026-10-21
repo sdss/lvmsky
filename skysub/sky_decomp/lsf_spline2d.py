@@ -281,11 +281,11 @@ def evaluate_lsf_density(
     delta_wavelength = np.atleast_1d(np.asarray(delta_wavelength, dtype=float))
     result = np.zeros((wavelength.size, delta_wavelength.size))
     covered = np.zeros(wavelength.size, dtype=bool)
-    offset_basis = mspline_basis(delta_wavelength, n_basis=state.coefficients["B"].shape[0],
-        half_width=state.config.get("offset_half_width_angstrom", 3.0))
     for channel, lower, upper in LSF_CHANNELS:
         mask = _channel_mask(wavelength, lower, upper)
         if np.any(mask):
+            offset_basis = mspline_basis(delta_wavelength, n_basis=state.coefficients[channel].shape[0],
+                half_width=state.config.get("offset_half_width_angstrom", 3.0))
             result[mask] = _component_masses(state, channel, wavelength[mask]) @ offset_basis.T
             covered |= mask
     if not np.all(covered):
@@ -305,6 +305,23 @@ def evaluate_lsf_diagnostics(
     Quantiles use the analytic spline CDF, inverted on a 1201-point diagnostic grid.
     """
     wavelength = np.atleast_1d(np.asarray(wavelength, dtype=float))
+    if len({c.shape[0] for c in state.coefficients.values()}) > 1:
+        # Each channel can keep its own offset basis (in particular the unchanged survey B).
+        from copy import copy
+        result = {}
+        for channel, lower, upper in LSF_CHANNELS:
+            take = _channel_mask(wavelength, lower, upper)
+            if not np.any(take):
+                continue
+            local = copy(state)
+            # The homogeneous path allocates by B's size; only this channel is evaluated.
+            local.coefficients = {c: state.coefficients[channel] for c in state.coefficients}
+            local.knot_vectors = {c: state.knot_vectors[channel] for c in state.coefficients}
+            local.degrees = {c: state.degrees[channel] for c in state.coefficients}
+            values = evaluate_lsf_diagnostics(local, wavelength[take], convergence_only=convergence_only)
+            for key, value in values.items():
+                result.setdefault(key, np.full(wavelength.size, np.nan))[take] = value
+        return result
     count = state.coefficients["B"].shape[0]
     half_width = getattr(state, "config", {}).get("offset_half_width_angstrom", 3.0)
     offset_knots = _offset_knots(count, half_width)
@@ -518,19 +535,20 @@ class SkyDecompLSFSpline2D(SkyDecompLSFSurfaceIterative):
         widths = np.diff(native_pixel_edges(self.wave))
         blocks = []
         for channel, lower, upper in LSF_CHANNELS:
+            count = state.coefficients[channel].shape[0]
             source = np.flatnonzero(_channel_mask(self.wave, lower, upper))
             masses = _component_masses(state, channel, self.wave[source])
             transform = sp.coo_matrix(
                 (
                     (masses * widths[source, None]).ravel(),
                     (
-                        np.arange(source.size * self.offset_basis_count),
-                        np.repeat(np.arange(source.size), self.offset_basis_count),
+                        np.arange(source.size * count),
+                        np.repeat(np.arange(source.size), count),
                     ),
                 ),
-                shape=(source.size * self.offset_basis_count, source.size),
+                shape=(source.size * count, source.size),
             ).tocsc()
-            block = (self._continuum_components[channel] @ transform).tocoo()
+            block = (self._state_components(channel, count)[1] @ transform).tocoo()
             blocks.append((block.row, source[block.col], block.data))
         return sp.coo_matrix(
             (
@@ -553,9 +571,8 @@ class SkyDecompLSFSpline2D(SkyDecompLSFSurfaceIterative):
         self._lsf_operator = self._build_continuum_operator(state)
         self.lsf_metrics = state.metrics
         edges = np.linspace(-self.offset_half_width_angstrom, self.offset_half_width_angstrom, self.offset_basis_count + 1)
-        bins = mspline_bin_integrals(edges[:-1], edges[1:], n_basis=self.offset_basis_count, half_width=self.offset_half_width_angstrom)
         self.lsf_kernels = {
-            channel: bins
+            channel: mspline_bin_integrals(edges[:-1], edges[1:], n_basis=state.coefficients[channel].shape[0], half_width=self.offset_half_width_angstrom)
             @ np.median(
                 _component_masses(
                     state,
@@ -700,10 +717,25 @@ class SkyDecompLSFSpline2D(SkyDecompLSFSurfaceIterative):
         self._set_lsf_state(state)
         return state
 
+    def _state_components(self, channel, count):
+        """Native-bin operators for a channel's actual offset dimension."""
+        if count == self.offset_basis_count:
+            return self._line_components[channel], self._continuum_components[channel]
+        cache = self.__dict__.setdefault('_state_component_cache', {})
+        if (channel, count) not in cache:
+            bounds = next((lo, hi) for c, lo, hi in LSF_CHANNELS if c == channel)
+            take = _channel_mask(self.wave, *bounds)
+            cache[channel, count] = (
+                _integrated_components(self.wave, self._line_wave[self._line_indices[channel]], take, count, self.offset_half_width_angstrom),
+                _integrated_components(self.wave, self.wave[take], take, count, self.offset_half_width_angstrom),
+            )
+        return cache[channel, count]
+
     def _render_lines(self) -> dict[str, np.ndarray]:
         weights = self._line_weights()
         grouped = np.zeros((self._n_groups, self.wave.size))
         for channel, _, _ in LSF_CHANNELS:
+            count = self.lsf_surface_state.coefficients[channel].shape[0]
             indices = self._line_indices[channel]
             masses = _component_masses(
                 self.lsf_surface_state,
@@ -714,13 +746,13 @@ class SkyDecompLSFSpline2D(SkyDecompLSFSurfaceIterative):
                 (
                     (masses * weights[indices, None]).ravel(),
                     (
-                        np.arange(indices.size * self.offset_basis_count),
-                        np.repeat(self._line_group[indices], self.offset_basis_count),
+                        np.arange(indices.size * count),
+                        np.repeat(self._line_group[indices], count),
                     ),
                 ),
-                shape=(indices.size * self.offset_basis_count, self._n_groups),
+                shape=(indices.size * count, self._n_groups),
             ).tocsc()
-            grouped += (self._line_components[channel] @ transform).T.toarray()
+            grouped += (self._state_components(channel, count)[0] @ transform).T.toarray()
         return {key: grouped[where] for key, where in self._group_slices.items()}
 
     def _assemble_refined_matrices(self) -> dict[str, np.ndarray]:
