@@ -6,7 +6,7 @@ import numpy as np
 
 from skysub.sky_decomp.lsf_spline2d import evaluate_lsf_diagnostics
 
-from .ml import SkyArm, sky_arm_residual_correction
+from .ml import SkyArm, line_protection_masks, sky_arm_residual_correction
 from .settings import SETTINGS
 
 # Decomposition coefficients and matrices work in flux units of 1e-14 erg/s/cm2/A.
@@ -20,7 +20,9 @@ __all__ = [
     'SkyParts',
     'arm_sky',
     'channel_slices',
+    'exposure_line_masks',
     'fwhm_grid',
+    'residual_protection',
     'render',
     'sky_parts',
     'fit_variance',
@@ -74,13 +76,33 @@ class SkyParts:
         return self.ml + self.oh + self.residual
 
 
-def sky_parts(model, coefficient, oh_coefficient, state, arms, settings=SETTINGS):
-    """The subtracted sky of one fiber; identical for the pipeline and reconstruction."""
+def exposure_line_masks(wave, state, velocities, settings=SETTINGS):
+    """Science-line ``(windows, cores)`` of one exposure from the Science median LSF, or None when off."""
+    if settings.residual_line_protection == 'none':
+        return None
+    return line_protection_masks(wave, fwhm_grid(state, wave, settings), velocities)
+
+
+def residual_protection(settings, lines, sci_oh):
+    """Keyword arguments of ``sky_arm_residual_correction`` for the science-line protection."""
+    if settings.residual_line_protection == 'none':
+        return {}
+    if lines is None:
+        raise ValueError('Science-line protection needs the exposure line masks')
+    return dict(line_masks=lines, sci_oh=sci_oh, line_mode=settings.residual_line_protection)
+
+
+def sky_parts(model, coefficient, oh_coefficient, state, arms, settings=SETTINGS, lines=None):
+    """The subtracted sky of one fiber; identical for the pipeline and reconstruction.
+
+    ``lines`` are the exposure's ``exposure_line_masks``.
+    """
     raw, components, matrices = render(model, coefficient, state)
     corrected = model._components_from_coef(oh_coefficient, matrices)
     continuum = (components['moon'] + components['zodi']) / FACTOR
     residual = sky_arm_residual_correction(
-        model.wave, raw / FACTOR, continuum, arms, max_wavelength=settings.residual_max_angstrom
+        model.wave, raw / FACTOR, continuum, arms, max_wavelength=settings.residual_max_angstrom,
+        **residual_protection(settings, lines, components['oh'] / FACTOR),
     )
     return SkyParts(raw / FACTOR, (corrected['oh'] - components['oh']) / FACTOR, residual, matrices)
 

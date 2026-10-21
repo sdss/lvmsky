@@ -57,6 +57,9 @@ RELIABILITY_FIT_FAILED = 1 << 0           # fit_status is not 'Solved'
 RELIABILITY_REVERSED = 1 << 1             # moon/zodi roles swapped, AS WRITTEN
 RELIABILITY_DIFFUSE_COLLAPSED = 1 << 2    # diffuse block zero, not merely faint
 RELIABILITY_SCI_COLOUR_EXCESS = 1 << 3    # sci continuum is redder than the sky
+RELIABILITY_MISFIT = 1 << 4               # solved, but the model does not describe the data
+RELIABILITY_ARM_MISFIT = 1 << 5           # prediction: rests on a misfit sky arm (see below)
+RELIABILITY_MOON_GLARE = 1 << 6           # sky arm near a bright Moon and redder than the other arm
 
 RELIABILITY_REVERSAL_UNTESTABLE = 1 << 16  # one family off: no colour ordering
 RELIABILITY_REVERSAL_RETRIED = 1 << 17     # a tighter-bound refit was run
@@ -66,6 +69,7 @@ RELIABILITY_MOON_SHARE_PINNED = 1 << 20    # moon share on its geometry bracket
 RELIABILITY_DIFFUSE_OH_CAP_BINDING = 1 << 21   # diffuse/OH block cap active
 RELIABILITY_DIFFUSE_RATIO_PINNED = 1 << 22     # a species ratio on its bracket
 RELIABILITY_SHAPE_BOUND_ACTIVE = 1 << 23   # moon/zodi adjacent-knot bound active
+RELIABILITY_ONE_ARM_FALLBACK = 1 << 24     # prediction: one sky arm stood in for a misfit one
 
 # MEASURED OCCUPANCY, so a near-universal warning is not misread as a rare
 # event (24 every10 telluric rows, sci arm, verified against the solver's own
@@ -89,7 +93,64 @@ RELIABILITY_SHAPE_BOUND_ACTIVE = 1 << 23   # moon/zodi adjacent-knot bound activ
 #                            reversal retry at a tighter bound typically moves
 #                            the fit OFF these bounds entirely.
 
+# MISFIT: a QP can solve and still describe nothing -- 'Solved' only says the
+# optimisation converged.  The test is the fit's own inverse-variance-weighted
+# R2 = 1 - chi2 / sum(ivar (y - <y>)^2).  Unlike chi2 it does not grow with the
+# brightness of the sky.  Measured on the gaia-stars-solarblue sky-arm fits
+# (near + far, 37304 rows), median fractional residual |obs - model| / model:
+#
+#     R2 < 0          112 fits   0.99   93% moon up, 5-8 deg from a full Moon
+#     0    - 0.5      235        1.5-1.8   mostly moon down; negative flux
+#     0.5  - 0.9      538        0.56-0.64  (p90 3.6-3.8)
+#     0.9  - 0.95     197        0.08-0.16
+#     0.95 - 0.98    2456        0.05-0.06
+#     >= 0.98       33766        0.023-0.030
+#
+# Below 0.9 the model misses the data by more than half: the fit failed.  The
+# first group is the sky field within ~10 deg of a full Moon (exposure 13190:
+# SkyE 8.9 deg away, uniform light 11-121x the other arm, R2 = -16).  Science
+# fits fall below 0.9 far more often (1654 rows), from the target's own light
+# rather than a failed fit, so a consumer reads this bit for the SKY arms.
+MISFIT_R2_MIN = 0.9
+
+# MOON_GLARE: a sky field a few degrees from a bright Moon can be flooded by a
+# smooth, red light that is not sky (exposures 13190-13201, 13247-13248, 11549-
+# 11559, 15001-15014: 11-121x the other arm, redder than moonlight, uniform over
+# the fibres).  Where the decomposition cannot fit it R2 flags the arm; where it
+# can (13248: R2 0.96, obs/model 1.00) the coefficients describe a sky that is
+# not there, and the prediction from both arms is 4-43% too bright.  The test:
+# the arm within MOON_GLARE_SEP_MAX of a Moon above the horizon with
+# illumination > MOON_GLARE_FLI_MIN, and redder than the OTHER arm of the same
+# exposure, c = log10[(arm/other) in ARM_COLOUR_RED_BAND / in ARM_COLOUR_BLUE_BAND]
+# > MOON_GLARE_COLOUR_MIN.  On gaia-stars-solarblue it adds 39 far arms to the
+# 461 R2 misfits and no near arm, none of them in the training or held-out
+# rows; arms within 6 deg of a bright Moon all have c > 0.3, arms beyond 30 deg
+# almost never.  On 9 of the added exposures the near arm alone moved the
+# prediction from 1.04-1.43x to 0.93-1.07x the science fit on 7; on one
+# (11627, both arms already within 3%) it cost 5-7%.  98 red arms away from a
+# bright Moon (moon down: other causes) are left alone.
+MOON_GLARE_SEP_MAX = 15.0
+MOON_GLARE_FLI_MIN = 0.5
+MOON_GLARE_COLOUR_MIN = 0.3
+ARM_COLOUR_BLUE_BAND = (4000.0, 5000.0)
+ARM_COLOUR_RED_BAND = (8000.0, 9000.0)
+
+# PREDICTION bits for a misfit sky arm.  Production replaces the misfit arm by
+# the other one in both input slots of the transfer.  Measured on the 2852
+# held-out gaia-stars-solarblue rows, median single-fibre chi2 after all
+# corrections (both arms 0.17, bright Moon 0.15):
+#
+#     near arm in both slots   0.35   bright Moon 0.30    (far arm failed)
+#     far arm in both slots    1.32   bright Moon 3.05    (near arm failed)
+#
+# ONE_ARM_FALLBACK (warning) is set for either.  ARM_MISFIT (error) is added
+# when the near arm failed, about 5x worse than two arms, and when the
+# prediction used the misfit arm itself (a preparation written before the
+# fallback existed).
+
 RELIABILITY_ERROR_MASK = 0x0000FFFF
+# Either makes a sky arm unusable as an input to the transfer.
+ARM_FAILURE_MASK = RELIABILITY_MISFIT | RELIABILITY_MOON_GLARE
 RELIABILITY_WARNING_MASK = 0x7FFF0000
 
 RELIABILITY_BITS = (
@@ -97,6 +158,9 @@ RELIABILITY_BITS = (
     (RELIABILITY_REVERSED, "reversed"),
     (RELIABILITY_DIFFUSE_COLLAPSED, "diffuse_collapsed"),
     (RELIABILITY_SCI_COLOUR_EXCESS, "sci_colour_excess"),
+    (RELIABILITY_MISFIT, "misfit"),
+    (RELIABILITY_ARM_MISFIT, "arm_misfit"),
+    (RELIABILITY_MOON_GLARE, "moon_glare"),
     (RELIABILITY_REVERSAL_UNTESTABLE, "reversal_untestable"),
     (RELIABILITY_REVERSAL_RETRIED, "reversal_retried"),
     (RELIABILITY_REVERSAL_RECOVERED, "reversal_recovered"),
@@ -105,7 +169,23 @@ RELIABILITY_BITS = (
     (RELIABILITY_DIFFUSE_OH_CAP_BINDING, "diffuse_oh_cap_binding"),
     (RELIABILITY_DIFFUSE_RATIO_PINNED, "diffuse_ratio_pinned"),
     (RELIABILITY_SHAPE_BOUND_ACTIVE, "shape_bound_active"),
+    (RELIABILITY_ONE_ARM_FALLBACK, "one_arm_fallback"),
 )
+
+
+def misfit(r2):
+    """True when a solved fit's weighted R2 is below MISFIT_R2_MIN (NaN is not a misfit)."""
+    return bool(np.isfinite(r2) and float(r2) < MISFIT_R2_MIN)
+
+
+def fallback_bits(failed, near):
+    """Prediction bits for the sky arms in ``failed`` (labels) when ``near`` is the near arm's label."""
+    if not failed:
+        return 0
+    bits = RELIABILITY_ONE_ARM_FALLBACK
+    if near in failed:
+        bits |= RELIABILITY_ARM_MISFIT
+    return bits
 
 
 def has_error(bits):
@@ -256,7 +336,7 @@ def _band_median(flux, wave, band):
     return float(np.median(flux[use]))
 
 
-def _colour(flux, wave):
+def _colour(flux, wave, blue_band=SCI_COLOUR_BLUE_BAND, red_band=SCI_COLOUR_RED_BAND):
     # A colour that cannot be measured returns NaN rather than raising: this is
     # a diagnostic, and an exception here would fail the whole ROW (and, before
     # `_fit_worker_row` catches it, potentially the chunk) over a flag.  A
@@ -264,11 +344,28 @@ def _colour(flux, wave):
     # spectrum's, which is exactly such a case.
     if np.asarray(flux).shape != np.asarray(wave).shape:
         return float("nan")
-    blue = _band_median(flux, wave, SCI_COLOUR_BLUE_BAND)
-    red = _band_median(flux, wave, SCI_COLOUR_RED_BAND)
+    blue = _band_median(flux, wave, blue_band)
+    red = _band_median(flux, wave, red_band)
     if not (np.isfinite(blue) and np.isfinite(red) and blue > 0.0 and red > 0.0):
         return float("nan")
     return float(np.log10(red / blue))
+
+
+def arm_colour_excess(flux_arm, flux_other, wave):
+    """``c``: how much redder one sky arm is than the other arm of the same exposure."""
+    c_arm = _colour(flux_arm, wave, ARM_COLOUR_BLUE_BAND, ARM_COLOUR_RED_BAND)
+    c_other = _colour(flux_other, wave, ARM_COLOUR_BLUE_BAND, ARM_COLOUR_RED_BAND)
+    return float(c_arm - c_other) if np.isfinite(c_arm) and np.isfinite(c_other) else float("nan")
+
+
+def moon_glare(colour_excess, moon_sep_deg, moon_alt_deg, moon_fli):
+    """True for a sky arm near a bright Moon that is redder than the other arm (see MOON_GLARE)."""
+    values = (colour_excess, moon_sep_deg, moon_alt_deg, moon_fli)
+    if not all(np.isfinite(float(v)) for v in values):
+        return False
+    return bool(float(moon_alt_deg) > 0.0 and float(moon_fli) > MOON_GLARE_FLI_MIN
+                and float(moon_sep_deg) < MOON_GLARE_SEP_MAX
+                and float(colour_excess) > MOON_GLARE_COLOUR_MIN)
 
 
 def sci_colour_excess(flux_sci, flux_near, flux_far, wave):
@@ -446,6 +543,10 @@ def describe(bits):
 __all__ = [
     "RELIABILITY_FIT_FAILED", "RELIABILITY_REVERSED",
     "RELIABILITY_DIFFUSE_COLLAPSED", "RELIABILITY_SCI_COLOUR_EXCESS",
+    "RELIABILITY_MISFIT", "MISFIT_R2_MIN", "misfit",
+    "RELIABILITY_ARM_MISFIT", "RELIABILITY_ONE_ARM_FALLBACK", "fallback_bits",
+    "RELIABILITY_MOON_GLARE", "MOON_GLARE_SEP_MAX", "MOON_GLARE_FLI_MIN", "MOON_GLARE_COLOUR_MIN",
+    "ARM_COLOUR_BLUE_BAND", "ARM_COLOUR_RED_BAND", "arm_colour_excess", "moon_glare", "ARM_FAILURE_MASK",
     "RELIABILITY_REVERSAL_UNTESTABLE", "RELIABILITY_REVERSAL_RETRIED",
     "RELIABILITY_REVERSAL_RECOVERED", "RELIABILITY_ZODI_ANCHOR_PINNED",
     "RELIABILITY_MOON_SHARE_PINNED", "RELIABILITY_DIFFUSE_OH_CAP_BINDING",

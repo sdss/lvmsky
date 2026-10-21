@@ -235,3 +235,30 @@ def test_mixed_basis_roundtrip_and_exact_native_rendering(offset_count):
     for ch, (take, parts) in sky_designs(model, coef, restored, matrices).items():
         actual = (parts['lines']+parts['solar'])@restored.coefficients[ch].ravel()+parts['fixed']
         np.testing.assert_allclose(actual, expected[take], rtol=1e-10, atol=1e-12)
+
+
+def test_failed_arms_from_the_flag_or_from_older_preparations_r2():
+    from skysub.sky_subtraction_block.pipeline import failed_arms
+
+    summary=lambda r2:f'status=Solved | npar=388 | ngood=12307 | chi2_red=19.7 | R2={r2} | line_weight=0.0005'
+    # Recorded flag wins over the summary.
+    assert failed_arms({'median_fits':{'SkyE':dict(failed=True,summary=summary(0.99)),
+                                       'SkyW':dict(failed=False,summary=summary(-5.0))}})==('SkyE',)
+    # Preparations written before the flag: the R2 of the fit summary (13190: SkyE -16.35033).
+    old={'median_fits':{'SkyE':dict(summary=summary(-16.35033)),'SkyW':dict(summary=summary(0.99628))}}
+    assert failed_arms(old)==('SkyE',)
+    assert failed_arms({'median_fits':{'SkyE':dict(summary=summary(0.9)),'SkyW':dict(summary=summary('nan'))}})==()
+    with pytest.raises(ValueError,match='Both'):
+        failed_arms({'median_fits':{l:dict(failed=True) for l in ('SkyE','SkyW')}})
+
+
+def test_older_preparations_get_the_moon_glare_test_from_their_medians():
+    from skysub.sky_subtraction_block.pipeline import failed_arms
+
+    wave=np.linspace(3600,9800,2000); sky=(wave/4500)**-1.5; glare=sky*(wave/4500)**2.5
+    summary=lambda r2:f'status=Solved | chi2_red=2 | R2={r2} | line_weight=0.0005'
+    prov={'median_fits':{'SkyE':dict(summary=summary(0.96)),'SkyW':dict(summary=summary(0.997))}}   # exposure 13248
+    meta={'skye_moon_sep':6.0,'skyw_moon_sep':62.3,'moon_alt':47.6,'moon_fli':0.94}
+    assert failed_arms(prov)==()                                            # R2 alone misses it
+    assert failed_arms(prov,(wave,{'SkyE':glare,'SkyW':sky},meta))==('SkyE',)
+    assert failed_arms(prov,(wave,{'SkyE':glare,'SkyW':sky},dict(meta,moon_alt=-5.0)))==()

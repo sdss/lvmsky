@@ -245,8 +245,16 @@ def build_product(input_path, inputs, provenance):
     """Preserve CFrame rows; processed Science rows carry the subtraction and model validity."""
     product, fiberids = _frame_hdus(input_path, inputs)
     product.extend(_model_hdus(inputs, fiberids))
+    bits = provenance.get('prediction_diagnostics', {}).get('reliability')
+    if bits is not None:
+        set_prediction_reliability(product[0].header, int(np.asarray(bits).ravel()[0]))
     product.append(json_hdu('SKYML_META', provenance, indent=2, allow_nan=True))
     return product
+
+
+def set_prediction_reliability(header, bits):
+    """SKYMLREL: the prediction's sky_decomp.reliability bits (-1: not evaluated)."""
+    header['SKYMLREL'] = (int(bits), 'prediction reliability bits, sky_decomp.reliability')
 
 
 def publish_product(product, output, input_path):

@@ -11,6 +11,7 @@ from pathlib import Path
 import numpy as np
 
 from skysub import decompose_parallel as dp
+from skysub.sky_decomp import reliability as rel
 from skysub.medians_computation.src.lvm_medians import gaia
 from skysub.medians_computation.src.lvm_medians.stack import _coords, _separation
 from skysub.sky_decomp.lsf_spline2d import _line_design
@@ -19,6 +20,7 @@ from skysub.sky_decomp.lsf_surface_iterative import _fit_bspline_channel, _wave_
 from .rendering import FACTOR
 
 KINDS = ('sci', 'sky1', 'sky2')
+SKY_LABELS = ('SkyE', 'SkyW')
 GAIA_TAP_TIMEOUT_SECONDS = 120
 GAIA_TAP_MAX_RECORDS = 1_000_000
 
@@ -47,6 +49,7 @@ class MedianFits:
     render_context: dict  # constructor settings and per-median telluric parameters
     transmission: np.ndarray  # DRP telluric transmission for Sci, near, far
     models: dict = field(default_factory=dict)  # telescope label -> decomposer with its median O2 temperature
+    failed_arms: tuple = ()  # sky telescopes whose median fit is a misfit; the other arm stands in
 
 
 def fit_medians(stack, states, labels):
@@ -67,6 +70,16 @@ def fit_medians(stack, states, labels):
             raise RuntimeError(f'{label} median decomposition: {fit.fit_status} {fit.fit_summary}')
         if not np.array_equal(fit.lsf_state.coefficients['B'], states[kind].coefficients['B']):
             raise RuntimeError('Blue LSF changed during median fit')
+    # A solved fit can still describe nothing, and a good fit can describe Moon glare instead of sky
+    # (exposures 13190, 13248).  Science fits are exempt: their R2 is low whenever the target is bright.
+    failed = tuple(
+        label for label in SKY_LABELS if int(reliability[label]['reliability']) & rel.ARM_FAILURE_MASK
+    )
+    if len(failed) == len(SKY_LABELS):
+        raise RuntimeError(
+            'Both sky-arm median decompositions are unusable: '
+            + '; '.join(f'{label} {results[label].fit_summary}' for label in failed)
+        )
     settings = dict(dp._WORKER_DECOMPOSER_KWARGS)
     settings['config'] = asdict(settings['config'])
     settings['base_dir'] = str(settings['base_dir'])
@@ -99,6 +112,7 @@ def fit_medians(stack, states, labels):
         fit_mask=dp._science_line_mask_for_row(0).astype('u1'),
         render_context=dict(settings=settings, models=models),
         transmission=np.asarray(transmission),
+        failed_arms=failed,
     )
 
 

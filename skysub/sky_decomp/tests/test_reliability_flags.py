@@ -233,3 +233,74 @@ def test_prediction_reliability_reports_not_evaluated_without_a_reference():
     bits = prediction_reliability(coef, names, upper, groups)
     assert bits[0] == rel.RELIABILITY_DIFFUSE_COLLAPSED
     assert bits[1] == 0
+
+
+def test_misfit_bit_marks_a_solved_fit_that_describes_nothing(monkeypatch):
+    from types import SimpleNamespace
+
+    from skysub import decompose_parallel
+
+    monkeypatch.setattr(decompose_parallel, "_WORKER_LOG_WAVE", LOG_WAVE)
+    components = {"moon": _power_law(WAVE, -1.0, 0.5), "zodi": _power_law(WAVE, 0.5, 0.5),
+                  **{k: np.full(WAVE.size, 1e-3) for k in rel.DIFFUSE_COMPONENT_KEYS}}
+
+    def bits(r2, status="Solved"):
+        result = SimpleNamespace(fit_status=status, r2=r2, components=components,
+                                 bestfit_lsf=np.ones(WAVE.size))
+        return int(decompose_parallel._reliability_flags(result)["reliability"])
+
+    # Exposure 13190's SkyE fit: solved, R2 = -16.35.
+    assert bits(-16.35) & rel.RELIABILITY_MISFIT
+    assert rel.has_error(bits(-16.35))
+    assert bits(rel.MISFIT_R2_MIN - 1e-6) & rel.RELIABILITY_MISFIT
+    assert not bits(rel.MISFIT_R2_MIN) & rel.RELIABILITY_MISFIT
+    assert not bits(0.99374) & rel.RELIABILITY_MISFIT
+    assert not bits(float("nan")) & rel.RELIABILITY_MISFIT          # unknown is not a misfit
+    # A fit that did not solve is FIT_FAILED, not MISFIT.
+    failed = bits(-16.35, status="failed:solver")
+    assert failed & rel.RELIABILITY_FIT_FAILED and not failed & rel.RELIABILITY_MISFIT
+    assert rel.describe(rel.RELIABILITY_MISFIT) == "misfit"
+
+
+def test_fallback_bits_warn_for_a_failed_far_arm_and_err_for_a_failed_near_arm():
+    assert rel.fallback_bits((), near="SkyW") == 0
+    far_failed = rel.fallback_bits(("SkyE",), near="SkyW")       # exposure 13190
+    assert far_failed == rel.RELIABILITY_ONE_ARM_FALLBACK
+    assert rel.has_warning(far_failed) and not rel.has_error(far_failed)
+    near_failed = rel.fallback_bits(("SkyW",), near="SkyW")
+    assert near_failed & rel.RELIABILITY_ONE_ARM_FALLBACK and rel.has_error(near_failed)
+    assert rel.describe(near_failed) == "arm_misfit|one_arm_fallback"
+
+
+def test_moon_glare_needs_a_bright_moon_nearby_and_a_red_arm(monkeypatch):
+    from skysub import decompose_parallel
+
+    sky = _power_law(WAVE, -1.5)                    # the other arm: blue, moonlit sky
+    glare = sky * (WAVE / 4500.0) ** 2.5            # redder than it, as in exposure 13248
+    excess = rel.arm_colour_excess(glare, sky, WAVE)
+    assert excess > rel.MOON_GLARE_COLOUR_MIN
+    assert rel.arm_colour_excess(3.0 * sky, sky, WAVE) == pytest.approx(0.0, abs=1e-12)   # brightness alone is not colour
+    assert rel.moon_glare(excess, 6.0, 47.6, 0.94)
+    assert not rel.moon_glare(excess, rel.MOON_GLARE_SEP_MAX + 1, 47.6, 0.94)   # far from the Moon
+    assert not rel.moon_glare(excess, 6.0, -10.0, 0.94)                          # Moon down
+    assert not rel.moon_glare(excess, 6.0, 47.6, 0.3)                            # faint Moon
+    assert not rel.moon_glare(0.1, 6.0, 47.6, 0.94)                              # not red
+    assert not rel.moon_glare(float("nan"), 6.0, 47.6, 0.94)
+
+    # The decomposition sets the bit on the glared arm's row only, from the stack it fits.
+    from types import SimpleNamespace
+    meta = np.zeros(1, dtype=[("sky_near_label", "U4"), ("sky_far_label", "U4"), ("skye_moon_sep", "f8"),
+                              ("skyw_moon_sep", "f8"), ("moon_alt", "f8"), ("moon_fli", "f8")])
+    meta[0] = ("SkyW", "SkyE", 6.0, 62.3, 47.6, 0.94)
+    monkeypatch.setattr(decompose_parallel, "_WORKER_FLUX", {"sky1": sky[None], "sky2": glare[None]})
+    monkeypatch.setattr(decompose_parallel, "_WORKER_META", meta)
+    monkeypatch.setattr(decompose_parallel, "_WORKER_WAVE", WAVE)
+    monkeypatch.setattr(decompose_parallel, "_WORKER_LOG_WAVE", LOG_WAVE)
+    components = {"moon": _power_law(WAVE, -1.0, 0.5), "zodi": _power_law(WAVE, 0.5, 0.5),
+                  **{k: np.full(WAVE.size, 1e-3) for k in rel.DIFFUSE_COMPONENT_KEYS}}
+    result = SimpleNamespace(fit_status="Solved", r2=0.96, components=components, bestfit_lsf=np.ones(WAVE.size))
+    far = int(decompose_parallel._reliability_flags(result, row_index=0, kind="sky2")["reliability"])
+    near = int(decompose_parallel._reliability_flags(result, row_index=0, kind="sky1")["reliability"])
+    assert far & rel.RELIABILITY_MOON_GLARE and far & rel.ARM_FAILURE_MASK
+    assert not near & rel.RELIABILITY_MOON_GLARE
+    assert not far & rel.RELIABILITY_MISFIT            # R2 0.96: a good fit to the glare

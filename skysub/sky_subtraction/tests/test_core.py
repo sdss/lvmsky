@@ -409,6 +409,17 @@ def test_settings_record_roundtrip_ignores_unknown_keys():
     assert Settings.from_record(None) == SETTINGS
 
 
+def test_settings_of_an_older_product_keep_its_residual_transfer():
+    from skysub.sky_subtraction.settings import SETTINGS, Settings
+
+    old = {k: v for k, v in SETTINGS.asdict().items() if k != 'residual_line_protection'}
+    old['residual_max_angstrom'] = 5000.0
+    restored = Settings.from_record(old)
+    assert restored.residual_max_angstrom == 5000.0
+    assert restored.residual_line_protection == 'none'
+    assert SETTINGS.residual_line_protection == 'cores'
+
+
 def test_product_layout_follows_lvmsframe(tmp_path):
     from astropy.io import fits
 
@@ -436,3 +447,13 @@ def test_unfitted_qa_has_the_schema_of_a_fitted_channel():
         'quality_bin_snr', 'line_amplitude', 'solar_amplitude', 'downweighted', 'converged', 'median_width_change',
     ]
     assert [*unfitted_qa('R', 'sky_block')] == columns
+
+
+def test_a_failed_sky_arm_is_replaced_by_the_other_in_the_prediction():
+    from skysub.sky_subtraction.pipeline import arm_slots
+
+    assert arm_slots(()) == {'SkyE': 'SkyE', 'SkyW': 'SkyW'}
+    assert arm_slots(('SkyE',)) == {'SkyE': 'SkyW', 'SkyW': 'SkyW'}
+    assert arm_slots(('SkyW',)) == {'SkyE': 'SkyE', 'SkyW': 'SkyE'}
+    with pytest.raises(ValueError, match='No usable sky arm'):
+        arm_slots(('SkyE', 'SkyW'))

@@ -1,6 +1,7 @@
 """Median/ML preparation (in memory or from a seed); infer a sky-only LSF for every block."""
 from concurrent.futures import ProcessPoolExecutor
 from copy import deepcopy
+from dataclasses import replace
 from pathlib import Path
 import json
 import logging
@@ -12,12 +13,18 @@ import ctypes
 import numpy as np
 from astropy.io import fits
 from astropy.table import Table
+from skysub.sky_subtraction import decomp_adapter as adapter
 from skysub.sky_subtraction import pipeline as common
+from skysub.sky_subtraction.ml import protection_velocities
+from skysub.sky_subtraction.settings import SETTINGS
+from skysub.sky_decomp.reliability import misfit
+import re
 from skysub.sky_subtraction.io import read_cframe
 from skysub.sky_subtraction.fiber_lsf import unfitted_qa
-from skysub.sky_subtraction.product import lsf_hdus,lvmsframe_layout,publish_product
+from skysub.sky_subtraction.product import lsf_hdus,lvmsframe_layout,publish_product,set_prediction_reliability
+from skysub.sky_decomp import reliability as rel
 from skysub.sky_subtraction.reconstruction import SkyMLReconstructor
-from skysub.sky_subtraction.rendering import arm_sky,fwhm_grid
+from skysub.sky_subtraction.rendering import arm_sky,exposure_line_masks,fwhm_grid
 from .lsf import FIT_CHANNELS,component_matrices,individual_coefficients,channel_tensors,evaluate_block,fit_supported_block,resize_state
 from .science import evaluate_science
 
@@ -45,6 +52,29 @@ def _render_arm(index):
     w=_WORK; r=w['renderer']; label=str(w['slit']['telescope'][index]).strip()
     state=evaluate_block(w['templates'][label],w['blocks'],w['slit']['spectrographid'][index],w['slit']['fiberid'][index])
     return state,arm_sky(r.model(label),r.h['MED_COEF'].data[r.labels.index(label)],state).astype('f4')
+
+
+def failed_arms(provenance,medians=None):
+    """Unusable sky telescopes: the recorded flag, else (older preparations) the misfit and Moon-glare tests.
+
+    ``medians`` is ``(wave, {label: median flux}, stack META row)`` for the glare test.
+    """
+    out=[]
+    for label in common.SKY_ARMS:
+        record=provenance['median_fits'][label]
+        if 'failed' in record:
+            failed=bool(record['failed'])
+        else:  # preparations written before the flag
+            match=re.search(r'R2=([-+0-9.eE]+|nan)',record.get('summary',''))
+            failed=misfit(float(match.group(1))) if match else False
+            if not failed and medians is not None:
+                wave,flux,meta=medians
+                other,=[l for l in common.SKY_ARMS if l!=label]
+                excess=rel.arm_colour_excess(flux[label],flux[other],wave)
+                failed=rel.moon_glare(excess,meta[label.lower()+'_moon_sep'],meta['moon_alt'],meta['moon_fli'])
+        if failed:out.append(label)
+    if len(out)==len(common.SKY_ARMS):raise ValueError('Both sky arms are unusable')
+    return tuple(out)
 
 
 def _keep_freed_memory():
@@ -96,11 +126,25 @@ def run(input_path, *, output=None, seed=None, ensemble=None, gaia_dir=None, job
         np.testing.assert_array_equal(slit['fiberid'],r.h['SLITMAP'].data['fiberid'])
         np.testing.assert_array_equal(wave,r.wave)
         templates={label:r.state('MED_',r.labels.index(label)) for label in r.labels}
+        # The residual transfer follows the current settings, whatever the preparation recorded.
+        r.settings=replace(r.settings,residual_max_angstrom=SETTINGS.residual_max_angstrom,
+            residual_line_protection=SETTINGS.residual_line_protection)
+        velocities=list(protection_velocities(*adapter.telescope_coords(header,'Sci')))
+        r.lines=exposure_line_masks(wave,templates['Sci'],velocities,r.settings)
         for label in r.labels:
             for ch in 'BRZ':
                 np.testing.assert_array_equal(templates[label].knot_vectors[ch],templates['Sci'].knot_vectors[ch])
+        # A misfit sky arm describes neither the sky nor the LSF: its fibers stay out of the block fit.
+        failed=failed_arms(r.provenance,(r.wave,{l:np.asarray(r.h['MED_FLUX'].data[r.labels.index(l)],float) for l in common.SKY_ARMS},r.h['MED_META'].data[0]))
+        stale=bool(failed) and not any('failed' in r.provenance['median_fits'][l] for l in common.SKY_ARMS)
+        if stale:
+            LOG.warning('Preparation predates the failed-arm flag: its ML prediction used the unusable arm %s',', '.join(failed))
+        if failed:
+            LOG.warning('Sky arm %s is unusable (misfit or Moon glare); excluded from the block LSF and the residual transfer',', '.join(failed))
+            r.arms=[a for a,label in zip(r.arms,r.arm_labels) if label not in failed]
+            r.arm_labels=[label for label in r.arm_labels if label not in failed]
         selected=r.provenance['selected_fiberids']
-        skyids=set(selected['SkyE'])|set(selected['SkyW'])
+        skyids=set().union(*(selected[label] for label in common.SKY_ARMS if label not in failed))
         indices=np.flatnonzero(np.isin(slit['fiberid'],list(skyids)))
         matrices={label:component_matrices(r.model(label),templates[label]) for label in {str(slit['telescope'][i]).strip() for i in indices}}
         _WORK=dict(renderer=r,slit=slit,flux=flux,ivar=ivar,mask=mask,templates=templates,matrices=matrices)
@@ -142,14 +186,16 @@ def run(input_path, *, output=None, seed=None, ensemble=None, gaia_dir=None, job
         method='sky_block_centered' if centered else 'sky_block'
         sky,states,widths=evaluate_science(r,blocks,slit,science,lsf_row)
         # Sky fibers: telescope median model with the block R/Z surface at the fiber; B is the telescope median LSF.
-        arm_rows=np.flatnonzero(np.isin(np.char.strip(np.asarray(slit['telescope']).astype(str)),list(common.SKY_ARMS))&(slit['fibstatus']==0))
+        arm_rows=np.flatnonzero(np.isin(np.char.strip(np.asarray(slit['telescope']).astype(str)),[l for l in common.SKY_ARMS if l not in failed])&(slit['fibstatus']==0))
         _WORK['blocks']=blocks
         arm=list(_mapped(_render_arm,arm_rows,jobs))
         for row,(state,spectrum) in zip(arm_rows,arm,strict=True):sky[row]=spectrum
         applied=np.concatenate([science,arm_rows])
         # Preserve the common compact schema and its coefficient-based diagnostic renderer.
+        # A block product used as the seed brings its own block extensions; they are replaced too.
         remove={'FLUX','IVAR','MASK','LSF','SKY','LSF_FIBERS','LSF_COEF','LSF_KNOTS','LSF_META',
-            'CAND_LSF_COEF','CAND_LSF_KNOTS','CAND_LSF_META','LSF_QA','FIT_LSF_HISTORY','SKYML_META'}
+            'CAND_LSF_COEF','CAND_LSF_KNOTS','CAND_LSF_META','LSF_QA','FIT_LSF_HISTORY','SKYML_META',
+            'BLOCK_LSF_META','BLOCK_LSF_COEF','BLOCK_SLIT_KNOTS','BLOCK_WAVE_KNOTS','SKY_FIBER_COEF'}
         product=fits.HDUList([x.copy() for x in r.h if x.name not in remove])
         for name,values in [('FLUX',flux.astype('f4')),('IVAR',ivar.astype('f4')),('MASK',mask.copy())]:
             image=fits.ImageHDU(values,name=name)
@@ -185,6 +231,14 @@ def run(input_path, *, output=None, seed=None, ensemble=None, gaia_dir=None, job
             dtype=['i8','i8','i8','U8',('f8',(len(r.model('Sci').design_names),)),'U24','bool','U128'])
         product.append(fits.BinTableHDU(fiber_table,name='SKY_FIBER_COEF'))
         provenance=deepcopy(r.provenance)
+        for label in common.SKY_ARMS:provenance['median_fits'][label]['failed']=label in failed
+        if stale:  # the preparation's prediction used the misfit arm: no fallback took place
+            diag=provenance.setdefault('prediction_diagnostics',{})
+            bits=np.asarray(diag.get('reliability',[0]),np.int32)
+            diag['reliability']=np.where(bits<0,bits,bits|rel.RELIABILITY_ARM_MISFIT).astype(np.int32)
+        provenance['settings'].update(residual_max_angstrom=r.settings.residual_max_angstrom,
+            residual_line_protection=r.settings.residual_line_protection)
+        provenance.setdefault('residual_correction',{})['line_protection_velocities_km_s']=velocities
         provenance.update(block_timing=block_timing,input=str(input_path),method=method,preparation=str(seed_path) if seed_path else 'in-memory',preparation_sha256=common.sha256(seed_path) if seed_path else None,
             block_settings=dict(fitted_channels='RZ',blue_lsf='each Science fiber keeps its survey LSF from the preparation; B is not fitted',offset_basis=offset_count,wave_basis=wave_count,slit_basis=slit_count,slit_degree=3,coordinate='SLITMAP.fiberid within spectrograph',
                 wavelength_solution='input, unchanged',constraints='nonnegative, unit integral'+(', zero first moment' if centered else '; no centroid constraint')+' at all wavelength/slit control pairs',
@@ -200,6 +254,8 @@ def run(input_path, *, output=None, seed=None, ensemble=None, gaia_dir=None, job
             block_code_sha256={p.name:common.sha256(p) for p in Path(__file__).parent.glob('*.py')},
             elapsed_seconds=time.perf_counter()-started)
         product.append(fits.ImageHDU(np.frombuffer(json.dumps(provenance,default=common._json).encode(),dtype='u1'),name='SKYML_META'))
+        if 'reliability' in provenance.get('prediction_diagnostics',{}):
+            set_prediction_reliability(product[0].header,int(np.asarray(provenance['prediction_diagnostics']['reliability']).ravel()[0]))
         product[0].header['SKYMETH']='skyml-block'; product[0].header['LSFCENT']=centered; product[0].header['BLOCKCH']='RZ'
         fd,temporary=tempfile.mkstemp(prefix='.skyblock-',suffix='.fits',dir=output.parent);os.close(fd)
         try:

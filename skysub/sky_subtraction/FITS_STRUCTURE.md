@@ -38,7 +38,7 @@ Example: exposure 59750, 1944 input fibers × 12401 wavelengths; 1754 processed 
 
 | Extension | Type / shape | MiB | Meaning |
 |---|---|---:|---|
-| `PRIMARY` | header; — | 0.000 | Exposure header; SKYMFMT=COEFFICIENTS; internal format SKYMLVER=3. |
+| `PRIMARY` | header; — | 0.000 | Exposure header; SKYMFMT=COEFFICIENTS; internal format SKYMLVER=3; SKYMLREL = the prediction's `sky_decomp.reliability` bits (−1: not evaluated), including `one_arm_fallback` (warning) and `arm_misfit` (error) when a sky arm is unusable. A sky arm is unusable when its median fit carries `misfit` (weighted R² < 0.9) or `moon_glare` (within 15° of a bright Moon and redder than the other arm); `SKYML_META.median_fits[label].failed`, `.r2` and `.reliability` record it. |
 | `FLUX` | f4; 1944 × 12401 | 91.964 | Delivered observed minus applied SKY on processed Science and Sky rows. |
 | `IVAR` | f4; 1944 × 12401 | 91.964 | Observed-noise inverse variance; zero on invalid adopted-sky pixels. |
 | `MASK` | uint8; 1944 × 12401 | 22.992 | Input flags plus invalid adopted-sky flags. |
@@ -101,7 +101,7 @@ with SkyMLReconstructor("/path/to/lvmSFrame-skyml-00059750.fits") as result:
     iteration_5 = result.fiber(680, iteration=5)
 ```
 
-- `sky()` renders the full final vector from recorded coefficients, LSF states, observation context and matching model/telluric assets. It needs neither the CFrame nor the trained ML archive (the `mlp_predictor` package is still imported for the residual transfer). The adopted rendering is checked against persisted SKY; incompatible rendering assets raise an error. Fit weights and the residual transfer use the operating points recorded in `SKYML_META.settings`.
+- `sky()` renders the full final vector from recorded coefficients, LSF states, observation context and matching model/telluric assets. It needs neither the CFrame nor the trained ML archive (the `mlp_predictor` package is still imported for the residual transfer). The adopted rendering is checked against persisted SKY; incompatible rendering assets raise an error. Fit weights and the residual transfer use the operating points recorded in `SKYML_META.settings` (`residual_max_angstrom`, `residual_line_protection`; a product without the latter predates it and is rendered unprotected). The science-line windows are rebuilt from the Science median LSF and `SKYML_META.residual_correction.line_protection_velocities_km_s`.
 - `fiber()` additionally reads the original CFrame (path and SHA256 recorded in SKYML_META) for observed spectra, native errors and masks. Supply `cframe=...` to the constructor after moving that input. It performs no fitting or ML inference.
 - `diagnostic_hdul()` supplies report generators with an in-memory view of reconstructed arrays. Those arrays are never written back into the compact file.
 

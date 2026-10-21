@@ -1,0 +1,161 @@
+%======================================================================
+\section{Sky subtraction of the reduced frames}
+\label{sec:cframes}
+
+We now turn the prediction into a sky spectrum for each of the 1801 science
+fibers of a reduced, flux-calibrated frame of the DRP, subtract it, and write
+a sky-subtracted frame in the DRP format. A frame takes under a minute on
+eight cores.
+
+\subsection{From one prediction to every fiber}
+\label{sec:perfiber}
+
+We form the three median spectra of Section~\ref{sec:inputs} from the frame
+itself, decompose them (Section~\ref{sec:decomp}), predict one vector of
+science coefficients at the center of the IFU (Section~\ref{sec:ml}), and
+estimate both corrections of Section~\ref{sec:postcorr} on the median
+science spectrum. All fibers share these coefficients and corrections; they
+differ only in their LSF, which matters, since a sky line rendered with the
+nominal profile leaves a residual of about 20\% of its peak
+(Section~\ref{sec:linescale}).
+
+The sky fibers constrain the LSF best, because they contain only sky. We
+decompose each Gaia-clean sky fiber (49 to 117 of the 119 in the frames
+below) with its telescope's median LSF held fixed, and fit one surface per
+spectrograph and channel to all of them,
+\begin{equation}
+  \phi(\Delta\lambda;\lambda,f)=\sum_{k,q,s}H_{kqs}\,M_k(\Delta\lambda)\,
+  B_q(\lambda)\,S_s(f),
+\end{equation}
+with the M-splines $M_k$ of Section~\ref{sec:lsf} and four cubic B-splines
+each in wavelength, $B_q$, and in the fiber position along the slit, $S_s$.
+We require $H\ge0$ and $\sum_k H_{kqs}=1$, which keep the profile
+nonnegative and of unit integral, and solve one quadratic program per block,
+weighted by the observed inverse variance. We fit the $r$ and $z$ channels
+and keep the survey LSF in $b$. No science spectrum enters the fit, so no
+science signal can shape the profile used to subtract its sky. The rendered
+sky is linear in the LSF coefficients, so all science fibers are rendered
+by one matrix product.
+
+The sky-subtracted frame keeps the DRP extensions, with \texttt{FLUX} the
+sky-subtracted spectra and \texttt{SKY} the subtracted sky, and stores the
+medians, their decompositions, the predicted coefficients, the corrections
+and each fiber's LSF, from which any fiber's sky can be reconstructed. The
+sky fibers are rendered with their telescope's median model; their residual
+is no independent test, since they built that median and the LSF.
+
+\subsection{The sky-arm correction over the full band}
+\label{sec:fullband}
+
+The reduced frames show a red counterpart of the solar pattern of
+Section~\ref{sec:armcorr}. With the Moon up, the O$_2$ A and B bands leave
+a residual of the same fractional depth in every decomposition. On a
+full-Moon exposure it is $-2.4$, $-2.3$ and $-2.0\%$ of the sky continuum at
+the head of the B band in the science, east and west medians, and $-9$ to
+$-11\%$ at the A band, while the continuum around them is fitted to better
+than 1\%; with the Moon down it is absent. We attribute it to the path of the
+moonlight. The DRP divides every fiber by the transmission along the
+science line of sight (Section~\ref{sec:inputs}), and the model's moonlight
+has no absorption of its own, but scattered moonlight crosses more O$_2$,
+along a path set mostly by the altitude of the Moon. The sky arms measure
+the deficit, so we apply the correction over the whole band. On the held-out
+observations, followed by the line scaling, this lowers the median $\chi^2$
+from 0.139 to 0.077 at 5000--5800\,\AA, from 0.244 to 0.111 in the red and
+from 0.366 to 0.125 in $z$, and on the OH-line pixels of the red from 0.493
+to 0.064; 91\% of the observations improve. The fitted OH band scales move
+by a median of 0.005, so the two corrections do not compete. Leaving the OH
+lines out of the transfer gains nothing in the continuum and is four times
+worse on the lines.
+
+\subsection{Protecting the science lines}
+\label{sec:lineprotect}
+
+The safeguard of Section~\ref{sec:armcorr} rejects emission seen by one sky
+field, not by both. Diffuse Galactic H$\alpha$, [N\,\textsc{ii}],
+[S\,\textsc{ii}], [S\,\textsc{iii}], [O\,\textsc{ii}] or [O\,\textsc{iii}]
+emission common to both fields, injected into both arms at the local
+continuum level, reaches the science sky at 94--116\% of its flux, below
+5000\,\AA{} as over the full band, and would be subtracted from the target.
+We therefore treat 59 nebular lines from H12 to P8 in windows of
+$\pm\max(500\,{\rm km\,s^{-1}},\,3\,{\rm FWHM})$ redward of 5800\,\AA{} and
+$\pm\max(300\,{\rm km\,s^{-1}},\,2\,{\rm FWHM})$ blueward, 15\% of the
+pixels. Dropping the correction there would leave the sky under the lines
+uncorrected, so we keep what does not come from the lines. In the blue, where
+the correction is the slowly varying solar pattern, we interpolate it across
+each window between the medians of the clean pixels beside it; narrower
+windows let a line at $\pm150$\,km\,s$^{-1}$ reach those pixels. In the red
+the windows hold OH and [O\,\textsc{i}] airglow, which interpolation cannot
+follow. There we keep the correction in proportion to the OH fraction of the
+predicted sky and set it to zero in a core of $\pm(150\,{\rm
+km\,s^{-1}}+1.5\,{\rm FWHM})$, where a nebular line on an OH line would
+pass. For pointings in the LMC and SMC we add cores at their systemic
+velocities, 262 and 146\,km\,s$^{-1}$.
+
+Of 18 lines injected into both arms of 400 held-out observations, at rest,
+at $\pm150$\,km\,s$^{-1}$ and at 262\,km\,s$^{-1}$ with the LMC cores, none
+is transferred by more than 0.2\% at the 90th percentile, including
+[O\,\textsc{i}]\,6300 on its airglow line and [S\,\textsc{iii}]\,9069, 9531
+on OH lines. Inside the windows, on observations without nebular emission,
+the median $\chi^2$ in the blue, green, red and $z$ is 0.114, 0.070, 0.204
+and 0.245, against 0.240, 0.149, 0.235 and 0.309 with the correction dropped
+and 0.076, 0.064, 0.095 and 0.118 without protection. We cannot center the
+cores on the emission of each frame: the OH residual under H$\alpha$ in the
+sky arms exceeded five times the photon noise on all 400 observations, so no
+threshold detects nebular emission there. Gas beyond $\pm150$\,km\,s$^{-1}$
+outside the Magellanic Clouds can therefore pass on OH lines in the red, a
+quarter of its flux at the median at 260\,km\,s$^{-1}$.
+
+\subsection{Results}
+\label{sec:cframe-results}
+
+Figure~\ref{fig:cframe} shows a frame before and after sky subtraction.
+After it, the stars of the field remain as horizontal bands and its nebular
+emission as vertical lines, and faint sky residuals remain only among the
+strongest OH lines beyond 9300\,\AA. In three frames
+(Table~\ref{tab:cframes}) the full-band correction lowers the residual of
+the sky by factors of 1.3 to 5 in the red and $z$, most at the O$_2$ bands
+and with the Moon bright. It worsens the A band in one frame, whose west sky
+median holds a single Gaia-clean fiber. Two residuals remain on the
+full-Moon frame. The median continuum after subtraction falls from $-0.3$ to
+$-1.1\%$ of the sky at 6960--7580\,\AA, and since the median of the science
+fibers includes the field's own light, the sky is over-subtracted by at
+least that much. The residual continuum also differs by up to 2.4\% of the
+sky between the three spectrographs, each of which sees one third of the
+IFU, while the sky fibers of every spectrograph agree with their medians to
+within 0.8\%. A gradient of the moonlight across the half-degree field,
+which one prediction at its center cannot follow, would produce such a
+pattern, but we have not established the cause.
+
+\begin{deluxetable}{lccc}
+\tablecaption{High-frequency residual of the median science spectrum, in
+percent of the sky continuum, with the sky-arm correction below 5000\,\AA{}
+/ over the full band.\label{tab:cframes}}
+\tablehead{\colhead{} & \colhead{12619} & \colhead{13020} &
+\colhead{14168}}
+\startdata
+$h_{\rm moon}$, illumination & $4^\circ$, 0.44 & $46^\circ$, 1.00 &
+$-55^\circ$, 0.11 \\
+5800--6850\,\AA & 3.4 / 2.4 & 2.3 / 0.5 & 3.8 / 2.3 \\
+O$_2$ B band & 8.9 / 4.2 & 2.4 / 0.6 & 11.5 / 4.0 \\
+6960--7580\,\AA & 11.5 / 5.0 & 3.1 / 0.9 & 16.3 / 4.9 \\
+O$_2$ A band & 6.5 / 9.4 & 3.8 / 1.5 & 8.7 / 5.1 \\
+7720--8900\,\AA & 9.0 / 6.8 & 2.5 / 1.5 & 10.5 / 6.5 \\
+\enddata
+\tablecomments{RMS after subtracting a 15\,\AA{} running median, outside the
+science-line windows; B band 6855--6960\,\AA, A band 7585--7720\,\AA.}
+\end{deluxetable}
+
+\begin{figure*}
+\centering
+\includegraphics[width=\textwidth]{figures/cframe_before_after.pdf}
+\caption{The science fibers of exposure 12619 (Moon at $4^\circ$ altitude,
+illumination 0.44, $84^\circ$ from the field) before (top) and after
+(bottom) sky subtraction, in fiber order along the slit; horizontal lines
+separate the three spectrographs. Columns: the $b$, $r$ and $z$ channels and
+a 400\,\AA{} window around H$\alpha$. The top row uses one logarithmic
+scale, the bottom row one zero-centered asinh scale; gray marks masked
+pixels and fibers. After subtraction the stars of the field remain as
+horizontal bands and its nebular emission as vertical lines, most clearly
+[O\,\textsc{ii}]\,3727, H$\alpha$, [N\,\textsc{ii}] and [S\,\textsc{ii}].}
+\label{fig:cframe}
+\end{figure*}

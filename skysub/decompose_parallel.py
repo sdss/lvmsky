@@ -1774,9 +1774,28 @@ def _row_colour_excess(row_index):
     return rel.sci_colour_excess(sci, near, far, _WORKER_WAVE)
 
 
+def _row_moon_glare(row_index, kind):
+    """(flag, colour excess) of this sky arm against the other arm of the row."""
+    from skysub.sky_decomp import reliability as rel
+
+    try:
+        arm = _WORKER_FLUX[kind][int(row_index)]
+        other = _WORKER_FLUX["sky2" if kind == "sky1" else "sky1"][int(row_index)]
+        row = _WORKER_META[int(row_index)]
+        label = _text_value(row["sky_near_label" if kind == "sky1" else "sky_far_label"]).lower()
+        sep = float(row[{"skye": "skye_moon_sep", "skyw": "skyw_moon_sep"}[label]])
+        moon_alt, moon_fli = float(row["moon_alt"]), float(row["moon_fli"])
+    except (KeyError, IndexError, TypeError, ValueError):
+        return False, float("nan")
+    if _WORKER_WAVE is None:
+        return False, float("nan")
+    excess = rel.arm_colour_excess(arm, other, _WORKER_WAVE)
+    return rel.moon_glare(excess, sep, moon_alt, moon_fli), excess
+
+
 def _reliability_flags(result, retried=False, retry_bound=float("nan"),
                        was_reversed=False, decomposer=None, ivar=None,
-                       row_index=None):
+                       row_index=None, kind=None):
     """Per-row reliability columns for one finished fit.
 
     Computed here rather than in the writer because only the fitter knows
@@ -1811,6 +1830,10 @@ def _reliability_flags(result, retried=False, retry_bound=float("nan"),
         if rel.diffuse_collapsed(components,
                                  getattr(result, "bestfit_lsf", None)):
             bits |= rel.RELIABILITY_DIFFUSE_COLLAPSED
+        if rel.misfit(getattr(result, "r2", float("nan"))):
+            bits |= rel.RELIABILITY_MISFIT
+        if kind in ("sky1", "sky2") and row_index is not None and _row_moon_glare(row_index, kind)[0]:
+            bits |= rel.RELIABILITY_MOON_GLARE
         if retried:
             bits |= rel.RELIABILITY_REVERSAL_RETRIED
             if was_reversed and not is_reversed:
@@ -1928,7 +1951,7 @@ def _fit_worker_row(kind, idx, flux_row, ivar_row, fixed_lsf_state=None, initial
     except _FailedInputError as error:
         schema = _telluric_decomposer(kind, idx, schema_only=True)
         result = schema.failed_input_result(str(error))
-        return result, _reliability_flags(result, row_index=idx)
+        return result, _reliability_flags(result, row_index=idx, kind=kind)
     # Tracing allocations costs ~2.8x the fit; only on request (LVMSKY_MEASURE_PEAK_MEMORY=1).
     decomposer._measure_peak_memory = _WORKER_COMPACT_CACHE_DIR is None and peak_memory_requested()
     if _WORKER_BLUE_REFERENCE_FILE is not None:
@@ -1940,7 +1963,7 @@ def _fit_worker_row(kind, idx, flux_row, ivar_row, fixed_lsf_state=None, initial
         decomposer, flux_row, ivar_row, fixed_lsf_state=fixed_lsf_state)
     return result, _reliability_flags(
         result, retried, bound, was_reversed,
-        decomposer=decomposer, ivar=ivar_row, row_index=idx)
+        decomposer=decomposer, ivar=ivar_row, row_index=idx, kind=kind)
 
 
 def fit_chunk_worker(args):

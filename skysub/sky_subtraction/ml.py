@@ -14,7 +14,12 @@ if _SKYSUB not in sys.path:
     sys.path.insert(0, _SKYSUB)
 
 from mlp_predictor import data, inference, serialization  # noqa: E402
-from mlp_predictor.sky_arm_correction import SkyArm, sky_arm_residual_correction  # noqa: E402
+from mlp_predictor.sky_arm_correction import (  # noqa: E402
+    SkyArm,
+    line_protection_masks,
+    protection_velocities,
+    sky_arm_residual_correction,
+)
 from mlp_predictor.sky_line_scaling import (  # noqa: E402
     _E_SCALE,
     NEBULAR_LINES_RED,
@@ -29,6 +34,8 @@ __all__ = [
     'inference',
     'serialization',
     'SkyArm',
+    'line_protection_masks',
+    'protection_velocities',
     'sky_arm_residual_correction',
     'E_SCALE',
     'NEBULAR_LINES_RED',
