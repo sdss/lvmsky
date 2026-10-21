@@ -108,10 +108,31 @@ quarter of its flux at the median at 260\,km\,s$^{-1}$.
 \subsection{Results}
 \label{sec:cframe-results}
 
-Figure~\ref{fig:cframe} shows a frame before and after sky subtraction.
-After it, the stars of the field remain as horizontal bands and its nebular
-emission as vertical lines, and faint sky residuals remain only among the
-strongest OH lines beyond 9300\,\AA. In three frames
+Figure~\ref{fig:cframe} compares, for one exposure with the Moon up, the
+sky subtraction of version 1.3.2 of the DRP with ours. We measure both on the
+median science spectrum, outside the science-line windows, in percent of the
+local sky. After our subtraction the stars of the field remain as horizontal
+bands and its nebular emission as vertical lines, and faint sky residuals
+remain only among the strongest OH lines beyond 9300\,\AA.
+
+The DRP over-subtracts the continuum. Its median science spectrum lies 5.0
+to 6.4\% of the sky below zero at all wavelengths, which no field can
+produce. Ours lies between $+0.3\%$ at 3600--4300\,\AA{} and $+4.6\%$ in
+the A band, rising to the red, as the starlight of a field at
+$b=-13^\circ$ should. In the blue the solar pattern
+(Section~\ref{sec:armcorr}) is removed: the RMS after subtracting a
+15\,\AA{} running median falls from 1.5 to 1.0\% at 3600--4300\,\AA{} and
+from 1.1 to 0.7\% at 4300--5000\,\AA. Toward the red the gain grows, to
+5.8 against 1.5\% at 7720--8900\,\AA{} and 4.3 against 2.4\% in the A band.
+The sky lines are removed more completely. On the sky-line pixels the
+absolute residual of the median is 3.1, 3.4 and 2.6\% of the line flux in
+the DRP frame at 5800--7580, 7580--8900 and 8900--9800\,\AA, and 1.5, 0.8
+and 1.2\% in ours; in single fibers beyond 7580\,\AA{} it is 5.3 against
+3.4\%. The DRP leaves $-4.9\%$ of [O\,\textsc{i}]\,5577 and removes
+[O\,\textsc{i}]\,6300 and 6364 twice, leaving $-105$ and $-110\%$ of their
+flux; we leave $-0.6$, $-6$ and $-10\%$.
+
+In three frames
 (Table~\ref{tab:cframes}) the full-band correction lowers the residual of
 the sky by factors of 1.3 to 5 in the red and $z$, most at the O$_2$ bands
 and with the Moon bright. It worsens the A band in one frame, whose west sky
@@ -147,15 +168,22 @@ science-line windows; B band 6855--6960\,\AA, A band 7585--7720\,\AA.}
 
 \begin{figure*}
 \centering
-\includegraphics[width=\textwidth]{figures/cframe_before_after.pdf}
-\caption{The science fibers of exposure 12619 (Moon at $4^\circ$ altitude,
-illumination 0.44, $84^\circ$ from the field) before (top) and after
-(bottom) sky subtraction, in fiber order along the slit; horizontal lines
-separate the three spectrographs. Columns: the $b$, $r$ and $z$ channels and
-a 400\,\AA{} window around H$\alpha$. The top row uses one logarithmic
-scale, the bottom row one zero-centered asinh scale; gray marks masked
-pixels and fibers. After subtraction the stars of the field remain as
-horizontal bands and its nebular emission as vertical lines, most clearly
-[O\,\textsc{ii}]\,3727, H$\alpha$, [N\,\textsc{ii}] and [S\,\textsc{ii}].}
+\includegraphics[width=\textwidth]{figures/cframe_before_after_12781.pdf}
+\caption{The science fibers of exposure 12781 (Moon at $31^\circ$ altitude,
+illumination 0.74, $74^\circ$ from the field) before sky subtraction (top),
+after the sky subtraction of DRP version 1.3.2 (middle) and after ours
+(bottom). In each block, the first row shows every second fiber in four
+400\,\AA{} windows, at [O\,\textsc{ii}]\,3727, H$\alpha$, the O$_2$ A band
+and the OH lines around [S\,\textsc{iii}]\,9069 (marked by bars above the
+second row); the second row the 200 fibers at the center of the slit over
+the full range; the third the median science spectrum. Fibers are in order
+along the slit, and horizontal lines separate the three spectrographs; gray
+marks pixels and fibers masked in any of the three frames. The top block
+uses a logarithmic scale; the two sky-subtracted blocks share one
+zero-centered asinh scale, and their median spectra one asinh axis. Flux in
+$10^{-14}$\,erg\,s$^{-1}$\,cm$^{-2}$\,\AA$^{-1}$. The DRP frame is
+negative across the continuum, and its sky lines leave residuals, most
+clearly at [O\,\textsc{i}]\,6300 and in $z$; ours leaves the stars of the
+field as horizontal bands and its nebular emission as vertical lines.}
 \label{fig:cframe}
 \end{figure*}
