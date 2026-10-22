@@ -27,7 +27,7 @@ def build_parser():
 
 Examples:
   python -m skysub.sky_subtraction_block /data/lvmCFrame-00011017.fits \\
-    --ml-model-file /models/sky.pt --jobs 1 \\
+    --ml-model-file /models/sky.pt --nproc 1 \\
     --output /results/lvmSFrame-skyml-block-00011017.fits
 
   python -m skysub.sky_subtraction_block /data/lvmCFrame-00011017.fits \\
@@ -45,7 +45,7 @@ SFrame; saved-state reuse is a special optional mode.
     parser.add_argument("--ml-model-file", "--ensemble", dest="ensemble", help=HELP["ensemble"])
     parser.add_argument("--gaia-dir", help=HELP["gaia_dir"])
     parser.add_argument("--reuse-state", "--seed", dest="seed", help=HELP["seed"])
-    parser.add_argument("--jobs", type=int, default=8, help=HELP["jobs"])
+    parser.add_argument("--nproc", "--jobs", dest="jobs", type=int, default=8, help=HELP["jobs"])
     for name in ("slit_count", "offset_count", "wave_count"):
         parser.add_argument("--" + name.replace("_", "-"), type=int, default=DEFAULTS[name], help=HELP[name])
     for name in ("offset_roughness", "wave_roughness", "slit_roughness", "reference_prior"):

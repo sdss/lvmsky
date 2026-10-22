@@ -181,7 +181,7 @@ def test_dry_run_uses_new_and_compatible_model_flags(cframe, model, tmp_path, mo
     destination = tmp_path / "dry-output"
     for flag in ("--ml-model-file", "--ensemble"):
         result = RUNNER.invoke(cli.app, ["batch", str(path), flag, str(model["ensemble"]),
-            "--flat-output", "--output-dir", str(destination), "--processes", "1", "--cpus", "1", "--dry-run"])
+            "--flat-output", "--output-dir", str(destination), "--cpus", "1", "--dry-run"])
         assert result.exit_code == 0, result.output
         assert str(destination / "lvmSFrame-skyml-block-00011017.fits") in result.output
         assert "compute state in memory" in result.output
@@ -470,3 +470,39 @@ def test_all_explicit_inputs_skipped_are_recorded(tmp_path, model, monkeypatch):
     records = Table.read(Path(result['run_dir']) / 'results.ecsv')
     assert str(records['input'][0]) == str(path)
     assert entries[0].output is None and entries[0].mjd == -1
+
+
+@pytest.mark.parametrize("cpus,nproc,concurrent", [(1,1,1),(8,1,8),(8,2,4),(8,4,2),(7,2,3)])
+def test_automatic_batch_concurrency(monkeypatch, cpus, nproc, concurrent):
+    monkeypatch.setattr(resources.os, "sched_getaffinity", lambda _: set(range(16)))
+    budget = resources.cpu_budget(jobs=nproc, cpus=cpus)
+    assert budget["processes"] == concurrent
+    assert len(budget["subsets"]) == concurrent
+    assert all(len(ids) == nproc for ids in budget["subsets"])
+    assert len(set().union(*map(set, budget["subsets"]))) == concurrent * nproc
+
+
+def test_nproc_aliases():
+    assert build_parser().parse_args(["input", "--nproc", "2"]).jobs == 2
+    result = RUNNER.invoke(cli.app, ["batch", "--help"])
+    assert result.exit_code == 0
+    assert "--nproc" in result.output
+    assert "--processes" not in result.output
+
+
+def test_batch_nproc_controls_automatic_slots(cframe, model, tmp_path, monkeypatch):
+    from skysub.sky_subtraction_block import batch as scheduler
+    captured = {}
+    monkeypatch.setattr(resources.os, 'sched_getaffinity', lambda _: set(range(8)))
+    monkeypatch.setattr(cli, 'apply_affinity', lambda _: None)
+    def run(entries, options, budget, **kwargs):
+        captured.update(budget=budget, jobs=options['jobs'])
+        return dict(state='complete', counts={}, run_dir='records')
+    monkeypatch.setattr(scheduler, 'run_batch', run)
+    source = cframe()
+    for flag in ('--nproc', '--jobs'):
+        result = RUNNER.invoke(cli.app, ['batch', str(source), *model_arguments(model),
+            '--output-dir', str(tmp_path / 'out'), '--cpus', '8', flag, '2'])
+        assert result.exit_code == 0, result.output
+        assert captured['budget']['processes'] == 4
+        assert captured['jobs'] == 2

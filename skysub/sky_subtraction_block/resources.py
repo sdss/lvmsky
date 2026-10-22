@@ -37,9 +37,12 @@ def parse_cpu_list(value):
     return sorted(cpus)
 
 
-def cpu_budget(processes=1, jobs=1, cpus=None, cpu_list=None, *, strict=True):
+def cpu_budget(processes=None, jobs=1, cpus=None, cpu_list=None, *, strict=True):
+    if processes is None:
+        count = jobs if cpus is None else cpus
+        processes = max(1, count // jobs) if strict and jobs > 0 else 1
     if processes < 1 or jobs < 1 or (cpus is not None and cpus < 1):
-        raise ValueError("--processes, --jobs and --cpus must be positive integers")
+        raise ValueError("CPU allocation, --nproc and --cpus must be positive integers")
     required = processes * jobs
     if cpu_list is not None and cpus is None:
         raise ValueError("Supply --cpus COUNT with --cpu-list IDS")
@@ -52,7 +55,7 @@ def cpu_budget(processes=1, jobs=1, cpus=None, cpu_list=None, *, strict=True):
         return dict(processes=1, jobs=jobs, cpus=len(allowed), cpu_ids=None, subsets=[None])
     count = required if cpus is None else cpus
     if required > count:
-        raise ValueError(f"Need processes * jobs = {required} CPUs; --cpus supplies {count}")
+        raise ValueError(f"Need at least {required} CPUs for --nproc {jobs}; --cpus supplies {count}")
     ids = parse_cpu_list(cpu_list) if cpu_list is not None else allowed[:count]
     if len(ids) != count or not set(ids).issubset(allowed):
         raise ValueError(f"Requested {count} CPUs/IDs must fit the allowed set {allowed}")

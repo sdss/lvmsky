@@ -35,7 +35,7 @@ HELP = {
         "Off by default: ordinary runs write only the final SFrame."
     ),
     "jobs": (
-        "Internal fiber-worker PROCESSES per exposure on parallel stages; 1 runs in the "
+        "Worker processes per exposure (--jobs is a compatible alias) on parallel stages; 1 runs in the "
         "exposure process. Each process has one native numerical thread. Serial stages "
         "remain serial. Batch defaults to 1; single/legacy to 8."
     ),

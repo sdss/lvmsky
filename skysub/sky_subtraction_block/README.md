@@ -19,27 +19,29 @@ and short description, before detailed option descriptions.
 ```sh
 # The explicit one-exposure command; --ensemble remains a compatible alias.
 python -m skysub.sky_subtraction_block.cli single /data/lvmCFrame-00011017.fits \
-  --ml-model-file /models/trained-sky.pt --jobs 1 --cpus 1 \
+  --ml-model-file /models/trained-sky.pt --nproc 1 --cpus 1 \
   --output /results/lvmSFrame-skyml-block-00011017.fits
 
 # Discover exposures through the standard SAS mirror and its DRP catalogue.
-SAS_BASE_DIR=/data/sas python -m skysub.sky_subtraction_block.cli batch \
+python -m skysub.sky_subtraction_block.cli batch \
   --expnum 11017,11018 --ml-model-file /models/trained-sky.pt \
-  --gaia-dir /cache/gaia/fibers --processes 2 --jobs 1 --cpus 2 \
+  --gaia-dir /cache/gaia/fibers --nproc 1 --cpus 2 \
   --output-dir /results --preserve-drp-tree
 
 # Inspect the plan before any fitting, network queries or output creation.
-SAS_BASE_DIR=/data/sas python -m skysub.sky_subtraction_block.cli batch \
+python -m skysub.sky_subtraction_block.cli batch \
   --mjd 60325:60330 --max-exposures 3 --ml-model-file /models/trained-sky.pt --dry-run
 ```
 
-`single` retains the existing one-exposure scientific defaults, including
-`--jobs 8`. Batch defaults to `--jobs 1`: one computational thread per exposure.
-`--processes P` controls simultaneous exposures, `--jobs J` controls internal
-fiber-worker processes per exposure, and `--cpus C` bounds the whole descendant
-process tree. Require `P * J <= C`; increasing C alone does not increase J.
-Native numerical threads remain one per process. Use `--cpu-list 8-11` with
-`--cpus 4` to choose exact scheduler-allowed logical CPUs.
+`--cpus C` sets the total logical-CPU budget. `--nproc N` sets workers per
+exposure (default: 1 in batch, 8 in single/legacy). Batch automatically runs up to
+`floor(C / N)` exposures simultaneously, with disjoint N-CPU allocations.
+For example, `--cpus 16 --nproc 1` runs up to 16 exposures; `--cpus 16 --nproc 2`
+runs up to 8 exposures with two workers each. Require N <= C. When C is omitted,
+batch uses N CPUs and runs one exposure at a time. Serial stages use one worker;
+native numerical threads remain one per process. Memory grows with concurrent
+exposures. `--jobs` remains a compatible alias for `--nproc`.
+Use `--cpu-list 8-11 --cpus 4` to select exact scheduler-allowed logical CPUs.
 
 The trained model is selected by `--ml-model-file FILE`; `--ensemble FILE`
 remains accepted by all three entry points. Ordinary operation computes
@@ -76,7 +78,7 @@ Local real-data commands and product checks are stored under
 ```sh
 python -m skysub.sky_subtraction_block /path/lvmCFrame-00059750.fits \
   --ml-model-file /path/trusted_ensemble.pt --gaia-dir /path/gaia/fibers \
-  --output /separate/products/lvmSFrame-skyml-block-00059750.fits --jobs 8
+  --output /separate/products/lvmSFrame-skyml-block-00059750.fits --nproc 8
 ```
 
 For a controlled LSF comparison, add `--seed /path/lvmSFrame-skyml-00059750.fits` to reuse that exact exposure's saved median/ML/correction preparation. The input SHA256 and row/wavelength identities must match. The seed's individual Science LSF fits are replaced completely. A run without a seed computes the same median/ML/correction stage (survey-only, no per-fiber LSF fits) in memory and writes no preparation file; `--keep-preparation` also writes it beside the output for reuse with `--seed`. A `--seed` file, or a preparation that already exists at that default path, is used as is and never modified or deleted. Existing destinations are protected; working filenames have no version suffixes.
@@ -105,7 +107,7 @@ For example, run an independent single-core trial with:
 ```sh
 taskset -c 0 python -m skysub.sky_subtraction_block /path/lvmCFrame-00014350.fits \
   --ml-model-file /path/trusted_ensemble.pt --gaia-dir /path/gaia/fibers \
-  --jobs 1 --offset-count 11 --wave-count 4 --slit-count 4 \
+  --nproc 1 --offset-count 11 --wave-count 4 --slit-count 4 \
   --offset-roughness 0.01 --wave-roughness 0 --slit-roughness 0 --reference-prior 0 \
   --output /separate/trial/lvmSFrame-skyml-block-00014350.fits
 ```

@@ -8,7 +8,7 @@ The current entry point uses standard-library argparse, not Typer:
 
 ~~~sh
 python -m skysub.sky_subtraction_block /data/lvmCFrame-00011017.fits \
-  --ml-model-file /models/ensemble.pt --gaia-dir /cache/gaia/fibers --jobs 8
+  --ml-model-file /models/ensemble.pt --gaia-dir /cache/gaia/fibers --nproc 8
 ~~~
 
 It reads observed object-plus-sky flux from one calibrated lvmCFrame and calls pipeline.run(). It writes sky-subtracted flux and the applied sky, adopted LSF and reconstruction state to a compact lvmSFrame-skyml-block product. The current reader requires a CFrame; a previously sky-subtracted DRP SFrame is not an interchangeable input.
@@ -86,7 +86,7 @@ Existing spellings remain supported by the legacy parser. Shared scientific opti
 | --gaia-dir DIR | Unset | Direct parent of lvmGAIA-fibers-<exposure:08d>.fits, e.g. /cache/gaia/fibers. Exact schema and network behavior are in section 4. |
 | --reuse-state FILE, alias --seed FILE | Unset | Special same-exposure reuse mode in section 2. Example: --seed /results/lvmSFrame-skyml-preparation-00011017.fits. The descriptive spelling is new; --seed retains its old meaning. |
 | --keep-preparation | Off | Also save newly computed median/ML/correction state beside the final result as lvmSFrame-skyml-preparation-<input suffix>. Useful for subsequent controlled block reruns. Reused input state remains unchanged. |
-| --jobs INTEGER | 8 in legacy/single; 1 in batch | Internal fiber-worker process limit per exposure on stages supporting it. At 1 those operations stay in the exposure process. Native numerical threads remain 1 per process. Section 8 defines the total CPU budget separately. |
+| --nproc INTEGER | 8 in legacy/single; 1 in batch | Internal fiber-worker process limit per exposure on stages supporting it. At 1 those operations stay in the exposure process. Native numerical threads remain 1 per process. Section 8 defines the total CPU budget separately. |
 | --slit-count INTEGER | 4 | Cubic spline controls across physical fiber position within a spectrograph; integer >=4. More controls allow finer slit variation and require stronger Sky-fiber coverage. Example: --slit-count 4. |
 | --offset-count INTEGER | 11 | Cubic offset M-spline controls for R/Z profile shape; odd integer >=5. Support remains +/-2.5 Angstrom. This changes shape flexibility, not support width. Example: --offset-count 11. |
 | --wave-count INTEGER | 4 | Cubic spline controls for R/Z profile variation with wavelength; integer >=4. More controls allow faster wavelength variation. Example: --wave-count 4. |
@@ -241,38 +241,27 @@ These snapshots were explicitly written beside prior final results using --keep-
 
 Without this option, exposures compute state in memory or follow the compatible adjacent-snapshot lookup. A mixed batch needs an ensemble for exposures computing state anew. --keep-preparation can save those newly computed snapshots beside their final results.
 
-## 8. Three independent CPU controls
+## 8. CPU budget and workers per exposure
 
-| Option | Single default | Batch default | Precise meaning |
-| --- | --- | --- | --- |
-| --processes P | Not applicable: one exposure | 1 | Maximum simultaneously active exposures. Not the child workers within an exposure. |
-| --jobs J | 8, as in the current command | 1 | Fiber-worker process limit inside each exposure. At 1, work stays in the exposure process. Parallel stages use up to J child workers when J>1. |
-| --cpus C | Unset: inherit the allowed CPU set | Omitted value resolves to P times J | Total allowed logical-CPU count for the entire command and descendants, including coordination. A count, not CPU IDs or CPUs per exposure. |
-| --cpu-list IDS | Unset | Unset | Optional exact IDs within the scheduler's allowed set, e.g. --cpus 4 --cpu-list 8-11. Must contain C distinct CPUs. |
+Use two controls: `--cpus C` is the whole-run logical-CPU budget; `--nproc N`
+is the worker-process count per exposure. Batch automatically runs up to
+`floor(C / N)` exposures at once on disjoint N-CPU subsets. N must be <= C.
+Batch defaults to N=1 and, when C is omitted, C=N (one concurrent exposure).
+Single/legacy retain N=8; single without C inherits the allowed CPU set.
+`--jobs` remains a compatible alias for `--nproc`. There is no `--processes` option.
 
-P, J and explicit C are positive integers. For batch require P times J <= C, with C available in the inherited allowed CPU set. For single with explicit C require J <= C. The legacy command retains its current arguments and scheduling behavior; CPU-budget flags are new Typer options.
+| Options | Concurrent exposures | Workers per exposure |
+| --- | ---: | ---: |
+| --cpus 16 --nproc 1 | 16 | 1 |
+| --cpus 16 --nproc 2 | 8 | 2 |
+| --cpus 16 --nproc 4 | 4 | 4 |
+| --cpus 7 --nproc 2 | 3 | 2 |
 
-**Increasing C never increases J or P automatically.** Extra CPU allowance is permitted and shown in the plan. Batch therefore remains one CPU per exposure by default even when a larger server allocation is available.
-
-| Batch invocation fragment | Concurrent exposures | CPU allowance per exposure | Whole-run allowance |
-| --- | --- | --- | --- |
-| --processes 10 --cpus 10 | Up to 10 | 1; J defaults to 1 | 10 logical CPUs |
-| --processes 10 --cpus 20 | Up to 10 | Still 1; J remains 1 | 20; extra allowance creates no workers |
-| --processes 10 --jobs 2 --cpus 20 | Up to 10 | Up to 2 on supported stages | 20 |
-| --processes 2 --jobs 8 --cpus 16 | Up to 2 | Up to 8 on supported stages | 16 |
-| --processes 10 --jobs 2 --cpus 10 | Planning error | Requested budget exceeds total | Report required 20, supplied 10 |
-
-Jobs describe processes, not native library threads. At J=2 the existing two-process fiber pool is used; each process still has one computational thread. Serial stages can use only one CPU even when J is larger. These settings promise a resource bound rather than continuous utilization or linear speedup.
-
-Implement strict Linux resource enforcement as follows:
-
-1. Run each exposure in a fresh interpreter, using the chosen J and a disjoint J-CPU subset. Reuse the existing runner and isolate its module globals between exposures.
-2. Set native-thread environment limits before numerical imports, including BLAS/OpenMP/MKL/BLIS, NumExpr, Rayon, TBB and Numba. Apply threadpoolctl limits to supported loaded pools and explicit PyTorch/solver limits, including Clarabel max_threads, before computation.
-3. Constrain the coordinator and all descendants to C allowed CPU IDs. Each exposure's coordinator and internal workers share its J-CPU subset; the exposure parent does not add another CPU outside it. --cpu-list must respect the current taskset/scheduler allocation.
-4. Default batch J=1 creates no internal fiber pool. J>1 is an explicit opt-in to controlled intra-exposure parallelism. The same budget covers median processing, inference, block solving and rendering.
-5. Record requested P/J/C, effective concurrency, chosen IDs/subsets and verified backend limits. Report unavailable strict-affinity support before batch execution.
-
-The whole process tree, including small coordination overhead, shares the selected budget. Logical CPUs differ from physical cores; topology and exclusive reservation belong to the scheduler. Memory scales with active exposures and stage-specific allocations; a CPU budget is not a RAM limit. Fewer selected exposures than P means fewer active workers.
+Serial stages use one worker. Each native numerical pool uses one thread.
+The coordinator and descendants share the total CPU affinity. CPU allocation
+bounds usage; it does not guarantee continuous utilization or linear speedup.
+Memory scales with concurrent exposures. Fewer queued exposures use fewer slots.
+Optional `--cpu-list IDS` selects exactly C scheduler-allowed CPU IDs.
 
 ## 9. Run controls and help requirements
 
@@ -303,9 +292,9 @@ Ordinary operation writes final products; saved-state reuse is optional.
 EXAMPLES
   skyml-block batch --expnum 11017,11018 --ml-model-file /models/ensemble.pt
   skyml-block batch --mjd 60325:60330 --ml-model-file /models/ensemble.pt \
-    --processes 8 --cpus 8 --output-dir /results --preserve-drp-tree
+    --cpus 8 --output-dir /results --preserve-drp-tree
   skyml-block batch --input-list cframes.txt --ml-model-file /models/ensemble.pt \
-    --flat-output --processes 4 --cpus 4
+    --flat-output --cpus 4
   skyml-block batch --all-exposures --ml-model-file /models/ensemble.pt --dry-run
 
 INPUT AND SDSS PATHS
@@ -384,16 +373,10 @@ R/Z BLOCK-LSF FLEXIBILITY AND REGULARIZATION
                             Adopted reference fallback retains its own centroid.
 
 PARALLELISM AND TOTAL CPU BUDGET
-  --processes P             Exposures active simultaneously. [integer >=1; default: 1]
-  --jobs J                  Internal fiber-worker processes PER EXPOSURE.
-                            Native numerical threads stay at 1 per process.
-                            [integer >=1; default: 1 in batch, 8 in single/legacy]
-  --cpus C                  TOTAL allowed logical CPUs for the whole command.
-                            Count, not CPU IDs. [default: P times J]
-                            Positive integer; require P times J <= C.
-                            Extra CPU allowance never increases J automatically.
-  --cpu-list IDS            Optional exact CPU IDs, e.g. 8-11. [automatic]
-                            Must contain C distinct CPUs allowed by the scheduler.
+  --cpus C                  Total logical CPUs; default: N.
+  --nproc N                 Workers per exposure; default: 1 in batch.
+                            Concurrent exposures: floor(C / N). Require N <= C.
+  --cpu-list IDS            Optional exact scheduler-allowed CPU IDs.
 
 RUN CONTROL AND LOGGING
   --on-error POLICY         continue: schedule remaining independent exposures;
@@ -418,9 +401,8 @@ PATH AND SELECTION RULES
   No max-exposures means all SELECTED entries, not the whole catalogue.
 
 CPU EXAMPLES
-  --processes 10 --cpus 10          10 exposures, one CPU each (jobs defaults to 1).
-  --processes 10 --cpus 20          Still one CPU each; no implicit extra workers.
-  --processes 10 --jobs 2 --cpus 20  10 exposures, up to two CPUs each.
+  --cpus 16 --nproc 1        Up to 16 exposures, one worker each.
+  --cpus 16 --nproc 2        Up to eight exposures, two workers each.
 
 ~~~
 
@@ -439,7 +421,7 @@ skyml-block batch \
   --ml-model-file /models/mlp_ensemble_split_zodi_cont-1.3.2.pt \
   --gaia-dir /cache/gaia/fibers \
   --output-dir /results/skyml-block --preserve-drp-tree \
-  --processes 8 --jobs 1 --cpus 8
+  --nproc 1 --cpus 8
 ~~~
 
 Nonstandard data/catalogue locations with deliberate catalogue cuts:
@@ -450,7 +432,7 @@ skyml-block batch \
   --mjd 60356:60401 --tileid 11112: --exptime 900 --catalog-fluxcal MOD \
   --ml-model-file /models/ensemble.pt \
   --output-dir /results/selected --flat-output \
-  --processes 10 --jobs 1 --cpus 10 --cpu-list 8-17
+  --nproc 1 --cpus 10 --cpu-list 8-17
 ~~~
 
 Release checks cover legacy argv/defaults and improved help, single/legacy scientific equivalence, input-source rules and selectors, deterministic maximum selection, SAS/environment/explicit-path precedence, actual Gaia cache/error cases, same-exposure state checks, mirrored/flat collision handling, compatible-product reuse, atomic publication and interruptions. Test P/J/C arithmetic and observe the actual process-tree affinity and native threads during both J=1 and explicitly parallel exposure runs.

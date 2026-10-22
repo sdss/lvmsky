@@ -143,7 +143,9 @@ The block run computes its preparation in memory and writes it only with `--keep
 
 The single/batch CLI adds `SKYML_META.cli_run` with its scientific fingerprint,
 state-reuse mode and requested/observed CPU budget. Batch execution records its
-reproducible invocation and per-exposure resource state. This is JSON provenance;
+reproducible invocation and per-exposure resource state. `--cpus C` records the
+total CPU budget; `--nproc N` records workers per exposure. Batch concurrency is
+computed as `floor(C / N)` and recorded as `budget.processes`. This is JSON provenance;
 the shared extension layout and coefficient-based reconstruction stay the same.
 
 ## Storage boundary

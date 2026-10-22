@@ -23,9 +23,9 @@ Examples:
         /data/lvmCFrame-00011017.fits --ml-model-file \\
         /models/sky.pt
 
-    SAS_BASE_DIR=/data/sas python -m \\
+    python -m \\
         skysub.sky_subtraction_block.cli batch --expnum 11017,11018 \\
-        --ml-model-file /models/sky.pt --processes 2 --cpus 2
+        --ml-model-file /models/sky.pt --cpus 2
 
     python -m skysub.sky_subtraction_block.cli batch --input-list \\
         cframes.txt --ml-model-file /models/sky.pt --flat-output \\
@@ -42,7 +42,7 @@ Examples:
 
     python -m skysub.sky_subtraction_block.cli single \\
         /data/lvmCFrame-00011017.fits --ml-model-file \\
-        /models/sky.pt --jobs 1 --cpus 1 --output \\
+        /models/sky.pt --nproc 1 --cpus 1 --output \\
         /results/lvmSFrame-skyml-block-00011017.fits
 
     python -m skysub.sky_subtraction_block.cli single \\
@@ -63,26 +63,26 @@ BATCH_HELP = """Subtract sky from selected CFrames, writing one final compact SF
 
 Examples:
 
-    SAS_BASE_DIR=/data/sas python -m \\
+    python -m \\
         skysub.sky_subtraction_block.cli batch --expnum 11017,11018 \\
-        --ml-model-file /models/sky.pt --processes 2 --cpus 2 \\
+        --ml-model-file /models/sky.pt --cpus 2 \\
         --output-dir /results --preserve-drp-tree
 
-    SAS_BASE_DIR=/data/sas python -m \\
+    python -m \\
         skysub.sky_subtraction_block.cli batch --mjd 60325:60330 \\
         --ml-model-file /models/sky.pt --max-exposures 3 --dry-run
 
     python -m skysub.sky_subtraction_block.cli batch --input-list \\
         cframes.txt --ml-model-file /models/sky.pt --flat-output \\
-        --output-dir /results --processes 2 --jobs 2 --cpus 4
+        --output-dir /results --nproc 2 --cpus 4
 
-    SAS_BASE_DIR=/data/sas python -m \\
+    python -m \\
         skysub.sky_subtraction_block.cli batch --all-exposures \\
         --ml-model-file /models/sky.pt --dry-run
 
 Commas/repeated values mean OR within a selector; different selectors mean AND. Ranges are inclusive.
-Total CPUs never increase internal workers automatically: processes=10, cpus=20 still uses jobs=1.
-Request jobs=2 explicitly to permit two CPUs per exposure; require processes * jobs <= cpus.
+Set --cpus for the total CPU budget and --nproc for workers per exposure.
+Concurrent exposures are computed automatically as floor(cpus / nproc).
 Serial stages remain serial. Missing/identity-mismatched Gaia cache queries TAP; malformed FITS/schema is an error.
 """
 
@@ -118,11 +118,11 @@ ModelFile = Annotated[Path | None, typer.Option("--ml-model-file", "--ensemble",
 Gaia = Annotated[Path | None, typer.Option("--gaia-dir", help=HELP["gaia_dir"], rich_help_panel="Model and Gaia")]
 Seed = Annotated[Path | None, typer.Option("--reuse-state", "--seed", help=HELP["seed"], rich_help_panel="Optional saved-state reuse")]
 Keep = Annotated[bool, typer.Option("--keep-preparation", help=HELP["keep_preparation"], rich_help_panel="Optional saved-state reuse")]
-Jobs = Annotated[int, typer.Option(min=1, help=HELP["jobs"], rich_help_panel="CPU budget")]
+Jobs = Annotated[int, typer.Option("--nproc", "--jobs", min=1, help=HELP["jobs"], rich_help_panel="CPU budget")]
 CPUs = Annotated[int | None, typer.Option("--cpus", min=1, help=(
     "TOTAL allowed logical-CPU count for the whole command and descendants, including coordination. "
-    "Default: batch processes * jobs; single inherits allowed CPUs. Must cover processes * jobs. "
-    "Extra CPUs never increase jobs automatically."), rich_help_panel="CPU budget")]
+    "Default: batch uses nproc CPUs; single inherits allowed CPUs. Must cover nproc. "
+    "Batch automatically runs floor(cpus / nproc) exposures concurrently."), rich_help_panel="CPU budget")]
 CPUList = Annotated[str | None, typer.Option("--cpu-list", help=(
     "Optional exact CPU IDs, e.g. --cpus 4 --cpu-list 8-11 or 0,2,4,6. "
     "Supply --cpus; list must contain exactly that many distinct scheduler-allowed IDs."),
@@ -277,8 +277,6 @@ def batch(
         rich_help_panel="Optional saved-state reuse")] = None,
     keep_preparation: Keep = False,
     jobs: Jobs = 1,
-    processes: Annotated[int, typer.Option(min=1, help="Maximum exposures active simultaneously, separate from internal --jobs.",
-                         rich_help_panel="CPU budget")] = 1,
     cpus: CPUs = None, cpu_list: CPUList = None,
     slit_count: Slit = DEFAULTS["slit_count"], offset_count: Offset = DEFAULTS["offset_count"],
     wave_count: Wave = DEFAULTS["wave_count"],
@@ -302,7 +300,7 @@ def batch(
         os.environ["SAS_BASE_DIR"] = str(sas_base_dir.expanduser().resolve())
     try:
         validate_model(model)
-        budget = cpu_budget(processes, jobs, cpus, cpu_list)
+        budget = cpu_budget(jobs=jobs, cpus=cpus, cpu_list=cpu_list)
         apply_affinity(budget["cpu_ids"])
         from .planning import make_plan, select_exposures
         entries, context = select_exposures(
