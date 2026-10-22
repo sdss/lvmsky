@@ -52,6 +52,7 @@ SFrame; saved-state reuse is a special optional mode.
         parser.add_argument("--" + name.replace("_", "-"), type=float, default=DEFAULTS[name], help=HELP[name])
     parser.add_argument("--centered", action="store_true", help=HELP["centered"])
     parser.add_argument("--keep-preparation", action="store_true", help=HELP["keep_preparation"])
+    parser.add_argument("--fit-sky-fibers", action="store_true", help=HELP["fit_sky_fibers"])
     return parser
 
 

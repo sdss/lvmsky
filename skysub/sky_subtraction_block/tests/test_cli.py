@@ -71,6 +71,8 @@ def test_legacy_defaults_and_aliases():
     assert old == new
     assert old["jobs"] == 8 and old["seed"] == "state.fits"
     assert {name: old[name] for name in DEFAULTS} == DEFAULTS
+    assert not old['fit_sky_fibers']
+    assert build_parser().parse_args(['input.fits','--fit-sky-fibers']).fit_sky_fibers
 
 
 @pytest.mark.parametrize("command,panel", [([], "Options"), (["single"], "Arguments"), (["batch"], "Arguments")])
@@ -352,10 +354,10 @@ def test_verified_existing_product_and_changed_settings(cframe, model, tmp_path)
     fresh = planning.exposure_from_file(item.input_path)
     planning.make_plan([fresh], model, output_dir=tmp_path / "output", flat_output=True, on_existing="skip")
     assert fresh.status == "reused"
-    changed = dict(model, reference_prior=0.1)
-    with pytest.raises(ValueError, match="fingerprint"):
-        planning.make_plan([planning.exposure_from_file(item.input_path)], changed,
-                           output_dir=tmp_path / "output", flat_output=True, on_existing="skip")
+    for changed in (dict(model,reference_prior=0.1),dict(model,fit_sky_fibers=True)):
+        with pytest.raises(ValueError, match="fingerprint"):
+            planning.make_plan([planning.exposure_from_file(item.input_path)], changed,
+                               output_dir=tmp_path / "output", flat_output=True, on_existing="skip")
 
 
 def test_overwrite_plan_recomputes_without_removing_previous_output(cframe, model, tmp_path):
@@ -426,6 +428,28 @@ def test_single_aliases_forward_same_scientific_options(cframe, model, tmp_path,
         assert result.exit_code == 0, result.output
     assert calls[0] == calls[1]
     assert calls[0][1]["jobs"] == 8
+    assert calls[0][1]['fit_sky_fibers'] is False
+    result = RUNNER.invoke(cli.app, ['single',str(path),'--ml-model-file',str(model['ensemble']),
+                                    '--fit-sky-fibers','--output',str(tmp_path / 'lvmSFrame-skyml-block-00011017.fits')])
+    assert result.exit_code == 0, result.output
+    assert calls[-1][1]['fit_sky_fibers'] is True
+
+
+@pytest.mark.parametrize('individual',[False,True])
+def test_batch_forwards_sky_coefficient_mode(cframe,model,tmp_path,monkeypatch,individual):
+    captured={}
+    original=planning.make_plan
+    def capture(entries,options,**kwargs):
+        captured.update(options)
+        return original(entries,options,**kwargs)
+    monkeypatch.setattr(planning,'make_plan',capture)
+    monkeypatch.setattr(cli,'cpu_budget',lambda **kwargs:dict(processes=1,cpu_ids=[]))
+    monkeypatch.setattr(cli,'apply_affinity',lambda _:None)
+    args=['batch',str(cframe()),*model_arguments(model),'--output-dir',str(tmp_path/'out'),'--dry-run']
+    if individual:args.append('--fit-sky-fibers')
+    result=RUNNER.invoke(cli.app,args)
+    assert result.exit_code==0,result.output
+    assert captured['fit_sky_fibers'] is individual
 
 
 def test_explicit_and_adjacent_saved_state(cframe, model, tmp_path):

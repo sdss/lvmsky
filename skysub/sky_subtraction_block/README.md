@@ -2,6 +2,8 @@
 
 This method shares the median decomposition, ML predictor, sky-arm residual transfer and Science-median OH correction with `sky_subtraction`. Its LSF stage uses selected SkyE and SkyW fibers only, separately for each spectrograph in the R and Z channels, where sky lines constrain the profile. B is not fitted: every Science fiber keeps the survey LSF of the preparation there (it still enters the model, the flux and the residuals). Science spectra never enter this LSF fit.
 
+By default, every selected Sky fiber uses the full component coefficient vector of its own telescope median: SkyE for SkyE fibers and SkyW for SkyW fibers. There is no individual Sky-fiber decomposition. `--fit-sky-fibers` opts into the previous per-fiber coefficient QPs with fixed median LSF and O2 temperature. Both modes fit the block surface to the individual observed Sky spectra, with their own IVAR and masks.
+
 ## Command line
 
 Use the existing scientific Python environment and install the small CLI dependencies:
@@ -92,12 +94,20 @@ counted separately from new successes. ETA uses successful completions per
 wall-clock time; failures do not increase that rate, and ETA is unknown until
 the first success. This is exposure-level progress, not progress within a fit.
 
-Completion/failure events print above the panel without overwriting it.
-Routine start events appear only at DEBUG level. Full paths, PIDs and CPU
+Normal runs do not print one completion line per exposure. The live panel
+and final summary show successful worker wall-time mean, median, P10/P90/P95,
+and fastest/slowest exposure IDs and durations. Percentiles use inclusive
+linear interpolation. Reused, skipped and failed entries and unavailable
+timings are excluded. Numeric values in seconds are saved as
+`timing_seconds` in `status.json`.
+
+Only the first three failures are printed individually at normal verbosity;
+further failures remain counted and recorded in the logs. DEBUG enables all
+per-exposure start/completion/error events. Full paths, PIDs and CPU
 allocations are written to `OUTPUT_DIR/.batch/<run ID>/batch.log`; individual
 worker logs stay beside it. The run-record directory is printed once at
-startup. `--no-progress` and noninteractive runs retain compact event lines
-without a live panel. Dry runs and DEBUG retain the full per-exposure plan.
+startup. `--no-progress` and noninteractive runs print the final timing
+summary without a live panel. Dry runs and DEBUG retain the full per-exposure plan.
 
 The trained model is selected by `--ml-model-file FILE`; `--ensemble FILE`
 remains accepted by all three entry points. Ordinary operation computes
@@ -135,7 +145,7 @@ Local real-data commands and product checks are stored under
 ## Method
 
 1. Select hardware-good, Gaia-clean Sky fibers (Gaia / observed G < 0.01). Prepare masked telescope medians, decompose them, predict the Science component coefficients, and determine the OH corrections.
-2. Decompose each selected Sky fiber with its telescope-median LSF and O2 temperature fixed. Each fiber gets its own nonnegative component coefficients. Freeze these coefficients for the block fit.
+2. Assign each selected Sky fiber its telescope-median component coefficients and freeze them for the block fit. Only with `--fit-sky-fibers`, fit individual nonnegative component coefficients with the telescope-median LSF and O2 temperature fixed before freezing them.
 3. Solve one native-pixel weighted least-squares QP for each of six spectrograph × (R, Z) blocks. The LSF density is `sum H[k,q,s] M[k](offset) B[q](wavelength) S[s](fiberid)`. The initial slit model uses four cubic B-spline controls over the full spectrograph fiber-ID range. The wavelength basis is the existing four-control cubic basis. SkyE and SkyW use their own component coefficients and telescope transmission arrays.
 4. Enforce `H >= 0` and `sum_k H[k,q,s] = 1` for every wavelength/slit control pair. The centroid is unconstrained by default; `--centered` (`centered=True`) also enforces `sum_k mu[k] H[k,q,s] = 0`, with `mu[k]` the exact first moment of the normalized cubic M-spline. Partition of unity propagates the equalities to every wavelength and slit position. There is no wavelength-solution shift or added shape/width constraint. Native IVAR supplies weights; input/protected-line masks apply. Five Angstroms at channel edges are trimmed from the fit because the affine designs hold neighboring-channel leakage fixed.
 5. Evaluate the fitted R and Z surfaces at each Science fiber, keep that fiber's survey B LSF, and render the common ML coefficients with this LSF. Apply the sky-arm residual transfer and Science-median OH correction to every fiber, through the shared renderer. The transfer follows the current `residual_*` settings whatever the preparation recorded; the block product records them and the science-line velocities in `SKYML_META`. Render each usable SkyE/SkyW fiber as its telescope median model with the block R/Z surface at that fiber (B: telescope median LSF). Store the actual final SKY and FLUX = observed − SKY for Science and Sky fibers.
@@ -153,7 +163,8 @@ For a controlled LSF comparison, add `--seed /path/lvmSFrame-skyml-00059750.fits
 `--offset-count` (default 11, odd and ≥5), `--wave-count` (default 4, ≥4),
 and `--slit-count` (default 4, ≥4) set the R/Z cubic tensor dimensions.
 The offset support stays ±2.5 Å; B retains its exact original survey profile.
-Sky-fiber component coefficients are fitted with the original median profiles;
+Sky-fiber component coefficients come from the telescope medians by default;
+the optional individual QPs use the original median profiles.
 the R/Z profiles are then projected onto the trial basis to construct the block
 designs. Rendering and reconstruction use each channel's actual dimensions.
 
@@ -179,12 +190,12 @@ taskset -c 0 python -m skysub.sky_subtraction_block /path/lvmCFrame-00014350.fit
 
 ## Compact storage and diagnostics
 
-The shared [compact product contract](../sky_subtraction/FITS_STRUCTURE.md) applies. `BLOCK_LSF_COEF` stores the six blocks × offset × wavelength × slit controls; `BLOCK_SLIT_KNOTS`, `BLOCK_WAVE_KNOTS` and `BLOCK_LSF_META` store exact domains, degrees, solver status, rank, input counts, chi-square, and moment checks. `SKY_FIBER_COEF` records every selected Sky fiber's identity, component vector and decomposition status. The usual `LSF_COEF/KNOTS/META` contain evaluations of the R/Z global solution at Science fibers together with their survey B LSF, so existing `SkyMLReconstructor.sky()` works directly. No intermediate model images are persisted. `SKYML_META` records preparation/input hashes, settings and implementation hashes. `SkyBlockReconstructor.global_state()` and `.sky_fiber()` reconstruct block profiles and selected Sky-fiber fits in memory.
+The shared [compact product contract](../sky_subtraction/FITS_STRUCTURE.md) applies. `BLOCK_LSF_COEF` stores the six blocks × offset × wavelength × slit controls; `BLOCK_SLIT_KNOTS`, `BLOCK_WAVE_KNOTS` and `BLOCK_LSF_META` store exact domains, degrees, solver status, rank, input counts, chi-square, and moment checks. `SKY_FIBER_COEF` records every selected Sky fiber's identity, frozen component vector and status (`MedianCoefficients` by default, QP status with `--fit-sky-fibers`). `SKYML_META.block_settings` records `fit_sky_fibers` and the coefficient source; CLI reuse fingerprints distinguish the modes. The usual `LSF_COEF/KNOTS/META` contain evaluations of the R/Z global solution at Science fibers together with their survey B LSF, so existing `SkyMLReconstructor.sky()` works directly. No intermediate model images are persisted. `SKYML_META` records preparation/input hashes, settings and implementation hashes. `SkyBlockReconstructor.global_state()` and `.sky_fiber()` reconstruct block profiles and selected Sky-fiber models in memory.
 
 ## Sky coverage and explicit reference fallback
 
 Channel-valid Sky fibers determine each R/Z block independently. An unavailable
-individual Sky-component fit is recorded in `SKY_FIBER_COEF` with `usable=False`,
+individual Sky-component fit (only with `--fit-sky-fibers`) is recorded in `SKY_FIBER_COEF` with `usable=False`,
 its reason and NaN coefficients. It does not enter the surface fit.
 The coverage checks require at least twice the slit-basis count in distinct
 positions, full slit rank, condition number ≤1000, a selected-fiber convex hull
@@ -226,7 +237,7 @@ The positivity threshold and calculation time are also recorded.
 
 The fixed-eleven analysis reports conditional Gaussian AIC/BIC with nominal and
 effective dimensions as diagnostics, plus delivered Science/Sky residual scores.
-The data likelihood is conditional on the preparation and individual component
+The data likelihood is conditional on the preparation and frozen component
 coefficients. The analysis records full CLI wall/CPU time independently of its
 later profile checks. `hessian_bytes`, `penalized_bytes`, `coefficient_bytes` and
 `sample_design_bytes` describe named fitter arrays, not process peak memory.

@@ -358,6 +358,10 @@ MODEL, GAIA AND OPTIONAL REUSE
                             the final product for future controlled reruns. [off]
 
 R/Z BLOCK-LSF FLEXIBILITY AND REGULARIZATION
+  --fit-sky-fibers          Opt in to individual Sky-fiber component QPs with
+                            fixed median LSF/O2 temperature. [off]
+                            Default: each Sky fiber uses its own telescope's
+                            median component coefficients, without a fiber fit.
   --offset-count N          Cubic offset controls over +/-2.5 Angstrom.
                             [odd integer >=5; default: 11]
   --wave-count N            Cubic wavelength controls. [integer >=4; default: 4]
@@ -423,12 +427,17 @@ only; fast failures do not improve it. ETA remains unknown before the first
 success and is an estimate across heterogeneous exposures. No within-fit
 progress is inferred.
 
-Compact completion/error events are printed above the live panel. Detailed
-start/finish records with full paths, PIDs and CPU allocations are retained in
+Normal output is aggregate: no individual success lines, and at most three
+detailed failures plus a notice directing further errors to logs. DEBUG prints
+all individual events. The panel/final summary includes successful exposure
+wall-time mean, median, P10/P90/P95 and fastest/slowest IDs and durations.
+Inclusive linear percentiles exclude failures, reuse, skips and unavailable
+timings; numeric seconds are persisted as timing_seconds in status.json.
+Detailed start/finish records with full paths, PIDs and CPU allocations are retained in
 `OUTPUT_DIR/.batch/<run ID>/batch.log`. Individual worker logs remain there.
 Normal runs print a short selection/output header; full plans remain available
-through `--dry-run` and DEBUG. Noninteractive/`--no-progress` runs use plain
-compact events.
+through `--dry-run` and DEBUG. Noninteractive/`--no-progress` runs print
+the final timing summary.
 
 ## 10. Complete examples and implementation validation
 

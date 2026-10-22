@@ -6,9 +6,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 import json
 import logging
+import math
 import os
 import shlex
 import signal
+import statistics
 import subprocess
 import sys
 import tempfile
@@ -80,6 +82,29 @@ def _duration(seconds):
     return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
 
 
+def _timing_statistics(entries):
+    successful = sorted((entry.elapsed_seconds, entry.expnum) for entry in entries
+                        if entry.status == "complete" and entry.elapsed_seconds > 0
+                        and math.isfinite(entry.elapsed_seconds))
+    if not successful:
+        return {"n": 0}
+    seconds = [value for value, _ in successful]
+    percentiles = statistics.quantiles(seconds, n=100, method="inclusive") if len(seconds) > 1 else seconds * 99
+    return dict(n=len(seconds), mean=statistics.fmean(seconds), median=statistics.median(seconds),
+                p10=percentiles[9], p90=percentiles[89], p95=percentiles[94],
+                min=seconds[0], max=seconds[-1],
+                fastest_expnum=successful[0][1], slowest_expnum=successful[-1][1])
+
+
+def _timing_lines(timing):
+    if not timing.get("n"):
+        return ["Successful exposure duration: -- (no completed exposures with timing)"]
+    return [f"Successful duration (n={timing['n']}): mean {_duration(timing['mean'])} · median {_duration(timing['median'])}",
+            f"P10 {_duration(timing['p10'])} · P90 {_duration(timing['p90'])} · P95 {_duration(timing['p95'])}",
+            f"Fastest {timing['fastest_expnum']}: {_duration(timing['min'])} · "
+            f"Slowest {timing['slowest_expnum']}: {_duration(timing['max'])}"]
+
+
 def _progress_panel(entries, elapsed):
     from rich.console import Group
     from rich.progress_bar import ProgressBar
@@ -106,6 +131,7 @@ def _progress_panel(entries, elapsed):
     running = ", ".join(str(entry.expnum) for entry in entries if entry.status == "running") or "none"
     return Group(bar, Text(summary),
                  Text(f"Elapsed {_duration(elapsed)} · Rate {rate * 60:.1f} successful exp/min · ETA {eta}"),
+                 *(Text(line) for line in _timing_lines(_timing_statistics(entries))),
                  Text(f"Running: {running}"))
 
 
@@ -128,6 +154,7 @@ def run_batch(entries, model, budget, *, output_dir, run_dir=None, context=None,
     def save():
         state.update(updated=timestamp(), elapsed_seconds=time.monotonic() - started,
                      counts=dict(Counter(e.status for e in entries)),
+                     timing_seconds=_timing_statistics(entries),
                      active=[dict(expnum=e.expnum, pid=p.pid, cpu_ids=budget["subsets"][slot])
                              for p, stream, result, slot, e in active.values()])
         atomic_json(run_dir / "status.json", state)
@@ -158,6 +185,7 @@ def run_batch(entries, model, budget, *, output_dir, run_dir=None, context=None,
         if live:
             live.start()
         stop = False
+        reported_errors = 0
         while queue or active:
             while queue and slots and not stop:
                 slot = slots.popleft()
@@ -203,15 +231,21 @@ def run_batch(entries, model, budget, *, output_dir, run_dir=None, context=None,
                 if code == 0 and result.get("state") == "complete" and entry.output.is_file():
                     entry.status = "complete"
                     log.info("Exposure %s complete in %.1f s: %s", entry.expnum, entry.elapsed_seconds, entry.output)
-                    event(f"✓ {entry.expnum} completed in {_duration(entry.elapsed_seconds)}", style="green")
+                    event(f"✓ {entry.expnum} completed in {_duration(entry.elapsed_seconds)}",
+                          level=logging.DEBUG, style="green")
                 else:
                     entry.status, entry.error = "error", result.get("error", f"Worker exited {code}")
                     log.error("Exposure %s: %s; log=%s", entry.expnum, entry.error, entry.log)
                     reason = " ".join(str(entry.error).split())
                     if len(reason) > 160:
                         reason = reason[:157] + "..."
-                    event(f"✗ {entry.expnum} failed: {reason} — log: {Path(entry.log).name}",
-                          level=logging.ERROR, style="red")
+                    reported_errors += 1
+                    if reported_errors <= 3 or terminal_level <= logging.DEBUG:
+                        event(f"✗ {entry.expnum} failed: {reason} — log: {Path(entry.log).name}",
+                              level=logging.ERROR, style="red")
+                    elif reported_errors == 4:
+                        event("Further exposure errors are recorded in batch.log and individual logs.",
+                              level=logging.ERROR, style="red")
                     stop = on_error == "stop"
                 del active[pid]
                 slots.append(slot)

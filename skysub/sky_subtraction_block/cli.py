@@ -6,6 +6,7 @@ import logging
 import os
 from pathlib import Path
 import subprocess
+import sys
 from typing import Annotated
 
 import typer
@@ -137,6 +138,7 @@ WavePenalty = Annotated[float, typer.Option(min=0, help=HELP["wave_roughness"], 
 SlitPenalty = Annotated[float, typer.Option(min=0, help=HELP["slit_roughness"], rich_help_panel="R/Z regularization")]
 Prior = Annotated[float, typer.Option(min=0, help=HELP["reference_prior"], rich_help_panel="R/Z regularization")]
 Centered = Annotated[bool, typer.Option("--centered", help=HELP["centered"], rich_help_panel="R/Z block LSF")]
+FitSky = Annotated[bool, typer.Option("--fit-sky-fibers", help=HELP["fit_sky_fibers"], rich_help_panel="R/Z block LSF")]
 LogLevel = Annotated[Level, typer.Option("--log-level", case_sensitive=False, help=(
     "DEBUG: detailed diagnostics; INFO: normal stages; WARNING: attention; "
     "ERROR: execution errors; CRITICAL: fatal application conditions."),
@@ -183,7 +185,7 @@ def single(
     wave_roughness: WavePenalty = DEFAULTS["wave_roughness"],
     slit_roughness: SlitPenalty = DEFAULTS["slit_roughness"],
     reference_prior: Prior = DEFAULTS["reference_prior"],
-    centered: Centered = False, keep_preparation: Keep = False,
+    centered: Centered = False, keep_preparation: Keep = False, fit_sky_fibers: FitSky = False,
     log_level: LogLevel = Level.info,
 ):
     model = _model(locals())
@@ -295,6 +297,7 @@ def batch(
     wave_roughness: WavePenalty = DEFAULTS["wave_roughness"],
     slit_roughness: SlitPenalty = DEFAULTS["slit_roughness"],
     reference_prior: Prior = DEFAULTS["reference_prior"], centered: Centered = False,
+    fit_sky_fibers: FitSky = False,
     run_dir: Annotated[Path | None, typer.Option(help="Plan/status/results/logs directory; default OUTPUT_DIR/.batch/<UTC run ID>.",
                          rich_help_panel="Run control and logging")] = None,
     on_error: Annotated[OnError, typer.Option(help="continue: schedule independent remaining work; stop: finish active work and stop submissions.",
@@ -337,7 +340,7 @@ def batch(
             return
         if any(entry.status == "queued" for entry in entries):
             check_runtime_dependencies()
-        from .batch import run_batch
+        from .batch import run_batch, _timing_lines
         result = run_batch(entries, model, budget, output_dir=output_dir, run_dir=run_dir,
                            context=context, on_error=on_error.value, log_level=log_level.value,
                            no_progress=no_progress)
@@ -350,6 +353,9 @@ def batch(
         ("complete", "OK"), ("error", "failed"), ("reused", "reused"), ("skipped_input", "skipped"),
         ("not_started", "not started")))
     typer.echo(f"Batch {result['state']}: {summary}")
+    if no_progress or not sys.stderr.isatty():
+        for line in _timing_lines(result.get("timing_seconds", {})):
+            typer.echo(line)
     if result["state"] != "complete":
         raise typer.Exit(1)
 

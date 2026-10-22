@@ -6,9 +6,14 @@ import math
 DEFAULTS = dict(
     slit_count=4, offset_count=11, wave_count=4,
     offset_roughness=0.0, wave_roughness=0.0, slit_roughness=0.0,
-    reference_prior=0.0, centered=False, keep_preparation=False,
+    reference_prior=0.0, centered=False, keep_preparation=False, fit_sky_fibers=False,
 )
 HELP = {
+    "fit_sky_fibers": (
+        "Opt in to an individual component-coefficient QP for each selected Sky fiber, "
+        "with median LSF and O2 temperature fixed. Default: reuse its telescope-median "
+        "coefficients for the block LSF fit; no individual Sky-fiber decomposition."
+    ),
     "ensemble": (
         "Trained ML model archive (.pt) used for ordinary sky inference, not training. "
         "Required unless reusing same-exposure saved state. Intermediate calculations stay "
