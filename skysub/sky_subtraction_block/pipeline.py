@@ -95,7 +95,7 @@ def _mapped(function,indices,jobs):
 
 
 def run(input_path, *, output=None, seed=None, ensemble=None, gaia_dir=None, jobs=8, slit_count=4, centered=False, keep_preparation=False,
-        offset_count=11, wave_count=4, offset_roughness=0., wave_roughness=0., slit_roughness=0., reference_prior=0.):
+        offset_count=11, wave_count=4, offset_roughness=0., wave_roughness=0., slit_roughness=0., reference_prior=0., execution_metadata=None):
     global _WORK
     _keep_freed_memory()
     started=time.perf_counter(); input_path=Path(input_path).resolve()
@@ -253,6 +253,7 @@ def run(input_path, *, output=None, seed=None, ensemble=None, gaia_dir=None, job
                 'FLUX is a residual of the fibers that build the LSF and the median, not an independent test'),
             block_code_sha256={p.name:common.sha256(p) for p in Path(__file__).parent.glob('*.py')},
             elapsed_seconds=time.perf_counter()-started)
+        if execution_metadata is not None:provenance['cli_run']=deepcopy(execution_metadata)
         product.append(fits.ImageHDU(np.frombuffer(json.dumps(provenance,default=common._json).encode(),dtype='u1'),name='SKYML_META'))
         if 'reliability' in provenance.get('prediction_diagnostics',{}):
             set_prediction_reliability(product[0].header,int(np.asarray(provenance['prediction_diagnostics']['reliability']).ravel()[0]))

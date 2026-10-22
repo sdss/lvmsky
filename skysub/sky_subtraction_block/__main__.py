@@ -1,29 +1,68 @@
-"""Create a compact SFrame with a sky-only global LSF per spectrograph/channel."""
-import os
-for name in ('OPENBLAS_NUM_THREADS','OMP_NUM_THREADS','MKL_NUM_THREADS','RAYON_NUM_THREADS'):
-    os.environ[name]='1'
+"""Subtract sky from one CFrame with a sky-only global block LSF."""
+from __future__ import annotations
+
 import argparse
 import logging
 
+from .options import DEFAULTS, HELP
+from .resources import limit_environment
+
+limit_environment()
+
+
+class HelpFormatter(argparse.ArgumentDefaultsHelpFormatter, argparse.RawDescriptionHelpFormatter):
+    pass
+
+
+class LegacyParser(argparse.ArgumentParser):
+    def _get_option_tuples(self, option_string):
+        matches = super()._get_option_tuples(option_string)
+        previous = [m for m in matches if m[1] not in ("--ml-model-file", "--reuse-state")]
+        # Preserve formerly unambiguous abbreviations such as --r for --reference-prior.
+        return previous if len(previous) == 1 else matches
+
+
+def build_parser():
+    description = __doc__ + """
+
+Examples:
+  python -m skysub.sky_subtraction_block /data/lvmCFrame-00011017.fits \\
+    --ml-model-file /models/sky.pt --jobs 1 \\
+    --output /results/lvmSFrame-skyml-block-00011017.fits
+
+  python -m skysub.sky_subtraction_block /data/lvmCFrame-00011017.fits \\
+    --ensemble /models/sky.pt --keep-preparation
+
+The original one-exposure interface remains compatible. For explicit single and
+batch commands: python -m skysub.sky_subtraction_block.cli --help
+Ordinary operation computes intermediate state in memory and writes the final
+SFrame; saved-state reuse is a special optional mode.
+"""
+    parser = LegacyParser(description=description, formatter_class=HelpFormatter,
+                          usage="python -m skysub.sky_subtraction_block INPUT [OPTIONS]")
+    parser.add_argument("input", help="One observed-flux lvmCFrame FITS path.")
+    parser.add_argument("--output", help="One final lvmSFrame-skyml-block-* FITS; default beside INPUT. Existing files are protected.")
+    parser.add_argument("--ml-model-file", "--ensemble", dest="ensemble", help=HELP["ensemble"])
+    parser.add_argument("--gaia-dir", help=HELP["gaia_dir"])
+    parser.add_argument("--reuse-state", "--seed", dest="seed", help=HELP["seed"])
+    parser.add_argument("--jobs", type=int, default=8, help=HELP["jobs"])
+    for name in ("slit_count", "offset_count", "wave_count"):
+        parser.add_argument("--" + name.replace("_", "-"), type=int, default=DEFAULTS[name], help=HELP[name])
+    for name in ("offset_roughness", "wave_roughness", "slit_roughness", "reference_prior"):
+        parser.add_argument("--" + name.replace("_", "-"), type=float, default=DEFAULTS[name], help=HELP[name])
+    parser.add_argument("--centered", action="store_true", help=HELP["centered"])
+    parser.add_argument("--keep-preparation", action="store_true", help=HELP["keep_preparation"])
+    return parser
+
 
 def main():
-    p=argparse.ArgumentParser(description=__doc__)
-    p.add_argument('input');p.add_argument('--output');p.add_argument('--seed',help='Same-exposure compact SkyML preparation; reuse medians, ML and corrections')
-    p.add_argument('--ensemble',help='Trusted ML archive, required when creating preparation')
-    p.add_argument('--gaia-dir');p.add_argument('--jobs',type=int,default=8)
-    p.add_argument('--slit-count',type=int,default=4)
-    p.add_argument('--offset-count',type=int,default=11,help='Odd number of cubic offset M-splines (>=5); R/Z only')
-    p.add_argument('--wave-count',type=int,default=4,help='Number of cubic wavelength B-splines (>=4); R/Z only')
-    p.add_argument('--offset-roughness',type=float,default=0.)
-    p.add_argument('--wave-roughness',type=float,default=0.)
-    p.add_argument('--slit-roughness',type=float,default=0.)
-    p.add_argument('--reference-prior',type=float,default=0.,help='Strength of projected Science-median profile prior')
-    p.add_argument('--centered',action='store_true',help='Also constrain every block profile to zero first moment (default: unconstrained centroid)')
-    p.add_argument('--keep-preparation',action='store_true',help='Also write the in-memory preparation next to the output so later runs can reuse it with --seed (default: not written)')
-    a=p.parse_args();logging.basicConfig(level=logging.INFO,format='%(asctime)s %(levelname)s %(message)s')
+    args = build_parser().parse_args()
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     from .pipeline import run
-    print(run(a.input,output=a.output,seed=a.seed,ensemble=a.ensemble,gaia_dir=a.gaia_dir,jobs=a.jobs,slit_count=a.slit_count,centered=a.centered,keep_preparation=a.keep_preparation,
-        offset_count=a.offset_count,wave_count=a.wave_count,offset_roughness=a.offset_roughness,wave_roughness=a.wave_roughness,slit_roughness=a.slit_roughness,reference_prior=a.reference_prior))
+    kwargs = vars(args).copy()
+    input_path = kwargs.pop("input")
+    print(run(input_path, **kwargs))
 
 
-if __name__=='__main__':main()
+if __name__ == "__main__":
+    main()

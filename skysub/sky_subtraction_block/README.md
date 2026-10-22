@@ -2,6 +2,71 @@
 
 This method shares the median decomposition, ML predictor, sky-arm residual transfer and Science-median OH correction with `sky_subtraction`. Its LSF stage uses selected SkyE and SkyW fibers only, separately for each spectrograph in the R and Z channels, where sky lines constrain the profile. B is not fitted: every Science fiber keeps the survey LSF of the preparation there (it still enters the model, the flux and the residuals). Science spectra never enter this LSF fit.
 
+## Command line
+
+Use the existing scientific Python environment and install the small CLI dependencies:
+
+```sh
+conda activate lvmdrp311
+python -m pip install -r skysub/sky_subtraction_block/requirements-cli.txt
+python -m skysub.sky_subtraction_block.cli --help
+```
+
+The checkout also includes `./skyml-block`, using the active environment's Python.
+Root, `single`, `batch` and legacy help put examples immediately after the usage
+and short description, before detailed option descriptions.
+
+```sh
+# The explicit one-exposure command; --ensemble remains a compatible alias.
+python -m skysub.sky_subtraction_block.cli single /data/lvmCFrame-00011017.fits \
+  --ml-model-file /models/trained-sky.pt --jobs 1 --cpus 1 \
+  --output /results/lvmSFrame-skyml-block-00011017.fits
+
+# Discover exposures through the standard SAS mirror and its DRP catalogue.
+SAS_BASE_DIR=/data/sas python -m skysub.sky_subtraction_block.cli batch \
+  --expnum 11017,11018 --ml-model-file /models/trained-sky.pt \
+  --gaia-dir /cache/gaia/fibers --processes 2 --jobs 1 --cpus 2 \
+  --output-dir /results --preserve-drp-tree
+
+# Inspect the plan before any fitting, network queries or output creation.
+SAS_BASE_DIR=/data/sas python -m skysub.sky_subtraction_block.cli batch \
+  --mjd 60325:60330 --max-exposures 3 --ml-model-file /models/trained-sky.pt --dry-run
+```
+
+`single` retains the existing one-exposure scientific defaults, including
+`--jobs 8`. Batch defaults to `--jobs 1`: one computational thread per exposure.
+`--processes P` controls simultaneous exposures, `--jobs J` controls internal
+fiber-worker processes per exposure, and `--cpus C` bounds the whole descendant
+process tree. Require `P * J <= C`; increasing C alone does not increase J.
+Native numerical threads remain one per process. Use `--cpu-list 8-11` with
+`--cpus 4` to choose exact scheduler-allowed logical CPUs.
+
+The trained model is selected by `--ml-model-file FILE`; `--ensemble FILE`
+remains accepted by all three entry points. Ordinary operation computes
+intermediate state in memory and writes the final SFrame. `--keep-preparation`
+explicitly enables an additional snapshot for later `--reuse-state FILE`
+(compatible alias `--seed FILE`) or batch `--reuse-state-dir DIR` reruns.
+
+`--gaia-dir` is the direct parent of eight-digit files such as
+`/cache/gaia/fibers/lvmGAIA-fibers-00011017.fits`. Missing/identity-mismatched
+cache triggers the existing ARI TAP query; malformed FITS/schema is an error.
+
+Preserved output placement is
+`OUTPUT_DIR/1.3.2/TILEGROUP/TILE/MJD/lvmSFrame-skyml-block-EXPNUM.fits`.
+`--flat-output` writes directly in OUTPUT_DIR (default: `./skyml-block-output`).
+For unavailable explicit inputs, `--missing-input skip` records the path; unknown
+header identities use `-1` and the output path stays unset. `--on-existing skip` verifies
+scientific fingerprints, complete FITS layout and checksums before reuse.
+Run plans, results, status, exact invocations and individual logs are stored
+under `OUTPUT_DIR/.batch/<run ID>`, or the explicit `--run-dir`.
+
+Full flag definitions, directory trees, saved-state rules, selector examples
+and CPU combinations are in [the CLI reference](CLI_PROPOSAL.md).
+Local real-data commands and product checks are stored under
+`analysis/cli_validation/` in the validation workspace.
+
+## Method
+
 1. Select hardware-good, Gaia-clean Sky fibers (Gaia / observed G < 0.01). Prepare masked telescope medians, decompose them, predict the Science component coefficients, and determine the OH corrections.
 2. Decompose each selected Sky fiber with its telescope-median LSF and O2 temperature fixed. Each fiber gets its own nonnegative component coefficients. Freeze these coefficients for the block fit.
 3. Solve one native-pixel weighted least-squares QP for each of six spectrograph × (R, Z) blocks. The LSF density is `sum H[k,q,s] M[k](offset) B[q](wavelength) S[s](fiberid)`. The initial slit model uses four cubic B-spline controls over the full spectrograph fiber-ID range. The wavelength basis is the existing four-control cubic basis. SkyE and SkyW use their own component coefficients and telescope transmission arrays.
@@ -10,7 +75,7 @@ This method shares the median decomposition, ML predictor, sky-arm residual tran
 
 ```sh
 python -m skysub.sky_subtraction_block /path/lvmCFrame-00059750.fits \
-  --ensemble /path/trusted_ensemble.pt --gaia-dir /path/gaia/fibers \
+  --ml-model-file /path/trusted_ensemble.pt --gaia-dir /path/gaia/fibers \
   --output /separate/products/lvmSFrame-skyml-block-00059750.fits --jobs 8
 ```
 
@@ -39,7 +104,7 @@ For example, run an independent single-core trial with:
 
 ```sh
 taskset -c 0 python -m skysub.sky_subtraction_block /path/lvmCFrame-00014350.fits \
-  --ensemble /path/trusted_ensemble.pt --gaia-dir /path/gaia/fibers \
+  --ml-model-file /path/trusted_ensemble.pt --gaia-dir /path/gaia/fibers \
   --jobs 1 --offset-count 11 --wave-count 4 --slit-count 4 \
   --offset-roughness 0.01 --wave-roughness 0 --slit-roughness 0 --reference-prior 0 \
   --output /separate/trial/lvmSFrame-skyml-block-00014350.fits

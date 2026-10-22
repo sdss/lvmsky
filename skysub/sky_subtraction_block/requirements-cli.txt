@@ -1,0 +1,4 @@
+# Install in the existing scientific runtime; scientific dependencies remain unchanged.
+typer>=0.15,<1
+rich>=13.8
+threadpoolctl>=3.2

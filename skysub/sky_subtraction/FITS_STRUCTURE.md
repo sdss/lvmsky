@@ -141,6 +141,11 @@ Robust fit weights are reconstructed from native CFrame IVAR, the stored pre-LSF
 
 The block run computes its preparation in memory and writes it only with `--keep-preparation` (reusable with `--seed`; a supplied `--seed` is never modified). The product does not read it. `SKYML_META` adds `method`, `preparation` path/SHA256 (`in-memory` and null when not written), `block_settings`, `block_timing` and `block_code_sha256`. `SkyBlockReconstructor.global_state(fiberid)` evaluates the block surfaces at any fiber; `.sky_fiber(fiberid)` renders a selected Sky fiber's fit in memory.
 
+The single/batch CLI adds `SKYML_META.cli_run` with its scientific fingerprint,
+state-reuse mode and requested/observed CPU budget. Batch execution records its
+reproducible invocation and per-exposure resource state. This is JSON provenance;
+the shared extension layout and coefficient-based reconstruction stay the same.
+
 ## Storage boundary
 
 The compact file contains no OBSFLUX copy, zero-filled SKY_IVAR, per-pixel SKYML_VALID, intermediate full sky images, individual full fit images, or median model/component/residual images. Validity is represented by SLITMAP.skyml_applied, MASK, IVAR and finite final SKY. Coefficients and observed median data reconstruct the model curves and additive corrections. Invalid final pixels require the original CFrame to recover actual observed values.

@@ -78,12 +78,14 @@ def _fwhm_rows(state, coefficients, wave, channel, probes_count):
 def uniform_metadata(r):
     """True when every Science fiber's adopted B-channel LSF metadata equals the first fiber's (only coefficients differ)."""
     meta = r.h['LSF_META'].data
-    n = int(meta['spectrum_index'].max()) + 1
+    # R/Z are replaced by the new blocks; their prior fit QA can vary by fiber.
+    meta = meta[meta['channel'] == 'B']
+    if not np.array_equal(np.sort(meta['spectrum_index']), np.arange(len(r.h['LSF_FIBERS'].data))):
+        return False
     for name in meta.columns.names:
         if name == 'spectrum_index':
             continue
         values = np.asarray(meta[name])
-        values = values.reshape(n, len(CHANNELS), *values.shape[1:])
         if not np.all((values == values[:1]) | ((values != values) & (values[:1] != values[:1]))):
             return False
     return True

@@ -37,6 +37,7 @@ def solve_normal(hessian, linear, shape, centers=None):
     rhs = np.r_[np.ones(nw*ns), np.zeros((len(rows)-1)*nw*ns+size)]
     scale = max(float(np.trace(hessian)/size), 1e-30)
     settings = clarabel.DefaultSettings(); settings.verbose = False
+    settings.max_threads = 1
     settings.tol_gap_abs = settings.tol_feas = settings.tol_gap_rel = 1e-9
     solution = clarabel.DefaultSolver(sp.triu(sp.csc_matrix(hessian/scale)).tocsc(), linear/scale,
         constraint, rhs, [clarabel.ZeroConeT(len(rows)*nw*ns), clarabel.NonnegativeConeT(size)], settings).solve()
