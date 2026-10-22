@@ -163,18 +163,18 @@ The DRP version is inferred from the catalogue filename and checked against sele
 
 Input-root precedence: explicit --redux-dir; the standard redux path under explicit --sas-base-dir; LVM_SPECTRO_REDUX; the standard redux path under SAS_BASE_DIR. For environment/SAS roots, search the root directly, then its immediate version directories if no direct catalogue exists, requiring a unique complete catalogue. With explicit --drpall, a matching version directory under an environment/SAS root is used when present. An explicit --sas-base-dir also sets SAS_BASE_DIR for scientific assets. The plan prints the resolved catalogue and data root.
 
-Known CFrame paths or an input-list do not require a SAS environment or catalogue; their versions come from their FITS headers.
+Known CFrame paths or a path-based input-list do not require a SAS environment or catalogue; their versions come from their FITS headers.
 
 A catalogue location may name a DRP SFrame and include an archive prefix. Extract its validated <tilegrp>/<tileid>/<mjd> suffix, place it below the selected version root and use the CFrame basename. Substitute the product basename prefix, rather than arbitrary directory substrings. Validate row/header exposure identity and version/path consistency.
 
 ## 6. Selecting a batch and defining its order
 
-Choose one source: explicit INPUTS, --input-list, or catalogue selectors/--all-exposures. Catalogue filters apply only to catalogue mode. A catalogue path alone requires an explicit selection; it never schedules the entire catalogue silently.
+Choose one source: explicit INPUTS, --input-list, or catalogue selectors/--all-exposures. Catalogue filters apply only to catalogue mode, including an exposure-ID input-list. A catalogue path alone requires an explicit selection; it never schedules the entire catalogue silently.
 
 | Batch selection option | Default | Meaning with concrete examples |
 | --- | --- | --- |
 | INPUTS... | Empty | Explicit files: batch /data/lvmCFrame-00011017.fits /data/lvmCFrame-00011018.fits. Shell-expanded globs become multiple paths. |
-| --input-list FILE | Unset | One CFrame path per line. Example: batch --input-list cframes.txt. Relative paths are relative to that list file. Blank lines and lines starting with # are allowed. |
+| --input-list FILE | Unset | Either CFrame paths (one per line) or exposure IDs (one per line, whitespace/comma-separated also accepted). Do not mix them. Relative paths are relative to the list file; IDs use the catalogue under --redux-dir or the SAS environment. ID lists may combine with catalogue filters except --expnum/--all-exposures. Blank lines and whole-line # comments are allowed. |
 | --expnum VALUES | No exposure-number cut | One: --expnum 11017. Several: --expnum 11017,11018,11025. Inclusive range: --expnum 11017:11025. Combined: --expnum 11017,11020:11025. Repeatable. |
 | --mjd VALUES | No night cut | Examples: --mjd 60325; --mjd 60325,60326; --mjd 60356:60401. Uses the catalogue observing-night identifier. Repeatable. |
 | --tileid VALUES | No tile cut | Examples: --tileid 1029016; --tileid 1029016,1029017; --tileid 11112: for IDs >=11112. Repeatable. |
@@ -300,7 +300,11 @@ EXAMPLES
 
 INPUT AND SDSS PATHS
   INPUTS...                 Explicit CFrame paths: a.fits b.fits.
-  --input-list FILE         One path per line; relative to that list file.
+  --input-list FILE         CFrame paths or exposure IDs; never mix.
+                            Paths: one per line, relative to the list file.
+                            IDs: integers separated by newlines/spaces/commas.
+                            IDs require a catalogue/data root.
+                            Blank lines and whole-line # comments allowed.
   --sas-base-dir DIR        SAS mirror root containing sdsswork/.
                             Example: /data/sas. [env: SAS_BASE_DIR]
   --redux-dir DIR           Input directory containing drpall-VERSION.fits and
@@ -411,6 +415,20 @@ CPU EXAMPLES
 A real run records plan.ecsv, status.json, results.ecsv and individual logs. Preserve scientific QA states separately from execution status: an adopted reference LSF is not itself an execution error. Reuse fingerprints include input identity, state/ensemble identity, scientific settings and relevant implementation provenance; scheduling parameters are recorded separately.
 
 Exit codes: 0 successful completion/verified reuse; 1 exposure execution errors; 2 invalid arguments/planning conflicts; 130 user interruption. Stop new submissions and terminate owned exposure processes on interruption, finalize status and retain atomic final-product publication. A subsequent --on-existing skip can reuse compatible completed products.
+
+The interactive display separates processed/total, successful, failed, running,
+queued, reused and skipped inputs. It shows elapsed wall time, successful
+exposures/minute, approximate ETA and active IDs. The rate counts new successes
+only; fast failures do not improve it. ETA remains unknown before the first
+success and is an estimate across heterogeneous exposures. No within-fit
+progress is inferred.
+
+Compact completion/error events are printed above the live panel. Detailed
+start/finish records with full paths, PIDs and CPU allocations are retained in
+`OUTPUT_DIR/.batch/<run ID>/batch.log`. Individual worker logs remain there.
+Normal runs print a short selection/output header; full plans remain available
+through `--dry-run` and DEBUG. Noninteractive/`--no-progress` runs use plain
+compact events.
 
 ## 10. Complete examples and implementation validation
 

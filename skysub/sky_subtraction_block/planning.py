@@ -209,11 +209,29 @@ def select_exposures(*, inputs=None, input_list=None, drpall=None, sas_base_dir=
                      cframe_root=None, expnum=None, mjd=None,
                      tileid=None, exptime=None, catalog_fluxcal=None, all_exposures=False,
                      max_exposures=None, missing_input="error"):
-    explicit = bool(inputs) or input_list is not None
-    selectors = dict(expnum=expnum, mjd=mjd, tileid=tileid)
-    filters = any(selectors.values()) or exptime is not None or catalog_fluxcal is not None
     if inputs and input_list:
         raise ValueError("Choose positional INPUTS or --input-list, not both")
+    if input_list is not None:
+        manifest = Path(input_list).expanduser().resolve()
+        lines = [line.strip() for line in manifest.read_text().splitlines()
+                 if line.strip() and not line.lstrip().startswith("#")]
+        if not lines:
+            raise ValueError(f"Input list is empty: {manifest}")
+        ids = [bool(re.fullmatch(r"\d+(?:[\s,]+\d+)*", line)) for line in lines]
+        if any(ids):
+            if not all(ids):
+                raise ValueError("Input list must contain either exposure IDs or CFrame paths, not both")
+            if expnum or all_exposures:
+                raise ValueError("Choose an exposure-ID list or --expnum/--all-exposures, not both")
+            expnum = [re.sub(r"[\s,]+", ",", line) for line in lines]
+        else:
+            inputs = []
+            for line in lines:
+                path = Path(line).expanduser()
+                inputs.append(path if path.is_absolute() else manifest.parent / path)
+    explicit = bool(inputs)
+    selectors = dict(expnum=expnum, mjd=mjd, tileid=tileid)
+    filters = any(selectors.values()) or exptime is not None or catalog_fluxcal is not None
     if explicit and (filters or all_exposures or drpall is not None):
         raise ValueError("Choose explicit paths or catalogue selection, not both")
     if all_exposures and filters:
@@ -224,16 +242,8 @@ def select_exposures(*, inputs=None, input_list=None, drpall=None, sas_base_dir=
         raise ValueError("--max-exposures must be >= 1")
     context = {}
     if explicit:
-        paths_in = list(inputs or [])
-        if input_list is not None:
-            manifest = Path(input_list).expanduser().resolve()
-            for line in manifest.read_text().splitlines():
-                line = line.strip()
-                if line and not line.startswith("#"):
-                    p = Path(line).expanduser()
-                    paths_in.append(p if p.is_absolute() else manifest.parent / p)
         exposures = []
-        for path in paths_in:
+        for path in inputs:
             path = Path(path).expanduser().resolve()
             if not path.is_file() and missing_input == "skip":
                 # Unknown header identities use -1; retain each skipped path in run records.

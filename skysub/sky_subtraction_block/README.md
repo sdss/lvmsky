@@ -12,6 +12,12 @@ python -m pip install -r skysub/sky_subtraction_block/requirements-cli.txt
 python -m skysub.sky_subtraction_block.cli --help
 ```
 
+Worker bootstrap requires PyTorch and `threadpoolctl`. Install PyTorch in the
+same Python environment used to launch the CLI, then install all packages from
+`requirements-cli.txt` above. Before executing a batch, the CLI checks that
+`torch` and `threadpoolctl` can be imported and reports failures once, before
+workers or run records are created. Help and dry runs do not import them.
+
 Run the module from the repository root using the active environment's Python.
 Root, `single`, `batch` and legacy help put examples immediately after the usage
 and short description, before detailed option descriptions.
@@ -61,6 +67,37 @@ Preserving the tree is the default and does not prepend the DRP version.
 Saved-state reuse follows the same `TILEGROUP/TILE/MJD` layout under
 `--reuse-state-dir`. Existing outputs/snapshots from the older version-prefixed
 layout are not moved automatically.
+
+For a file of exposure IDs, use the same input-list option directly:
+
+~~~sh
+python -m skysub.sky_subtraction_block.cli batch \
+  --redux-dir /data/sas/sdsswork/lvm/spectro/redux/1.3.2 \
+  --input-list exposures.txt --ml-model-file /models/trained-sky.pt \
+  --gaia-dir /cache/gaia/fibers --output-dir /results --cpus 4 --nproc 1
+~~~
+
+An ID list accepts one integer per line or whitespace/comma-separated integers.
+A path list accepts one CFrame path per line, with relative paths resolved
+against the list file. Both formats support blank lines and whole-line
+`#` comments; do not mix IDs and paths in one file. ID lists use catalogue
+selection and may combine with MJD/tile/exposure-time/calibration filters,
+but not `--expnum` or `--all-exposures`. Path lists are explicit inputs and
+cannot combine with catalogue filters.
+
+Interactive batches show one live panel with processed/total, successful,
+failed, running and queued exposures, elapsed wall time, successful exposures
+per minute, approximate ETA and active exposure IDs. Reused/skipped inputs are
+counted separately from new successes. ETA uses successful completions per
+wall-clock time; failures do not increase that rate, and ETA is unknown until
+the first success. This is exposure-level progress, not progress within a fit.
+
+Completion/failure events print above the panel without overwriting it.
+Routine start events appear only at DEBUG level. Full paths, PIDs and CPU
+allocations are written to `OUTPUT_DIR/.batch/<run ID>/batch.log`; individual
+worker logs stay beside it. The run-record directory is printed once at
+startup. `--no-progress` and noninteractive runs retain compact event lines
+without a live panel. Dry runs and DEBUG retain the full per-exposure plan.
 
 The trained model is selected by `--ml-model-file FILE`; `--ensemble FILE`
 remains accepted by all three entry points. Ordinary operation computes

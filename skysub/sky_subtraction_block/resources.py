@@ -13,6 +13,23 @@ THREAD_VARIABLES = (
 _LIMITER = None
 
 
+def check_runtime_dependencies():
+    """Check worker bootstrap imports before launching an exposure batch."""
+    from importlib import import_module
+    import sys
+
+    errors = []
+    for name in ("torch", "threadpoolctl"):
+        try:
+            import_module(name)
+        except (ImportError, OSError) as error:
+            errors.append(f"{name}: {error}")
+    if errors:
+        raise ValueError(f"Worker dependencies unavailable in {sys.executable}: " + "; ".join(errors)
+                         + ". Install torch and the packages in "
+                         "skysub/sky_subtraction_block/requirements-cli.txt using this Python before retrying.")
+
+
 def limit_environment():
     for name in THREAD_VARIABLES:
         os.environ[name] = "1"

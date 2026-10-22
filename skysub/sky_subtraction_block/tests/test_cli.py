@@ -137,6 +137,55 @@ def test_manifest_relative_paths_and_deduplication(tmp_path, cframe):
     assert len(selected) == 1 and selected[0].input_path == path
 
 
+@pytest.mark.parametrize("contents", ["11017\n11018\n11017\n", "11017 11018\n", "11017,11018\n",
+                                    "# exposures\n\n11017\n11018\n"])
+def test_exposure_id_file_uses_catalogue(catalogue, tmp_path, contents):
+    root, _ = catalogue
+    manifest = tmp_path / "exposures.txt"
+    manifest.write_text(contents)
+    entries, context = planning.select_exposures(input_list=manifest, cframe_root=root)
+    assert [entry.expnum for entry in entries] == [11017, 11018]
+    assert context["cframe_root"] == str(root)
+    entries, _ = planning.select_exposures(input_list=manifest, cframe_root=root, exptime=900)
+    assert [entry.expnum for entry in entries] == [11017]
+
+
+@pytest.mark.parametrize("contents,message", [
+    ("# empty\n\n", "empty"),
+    ("11017\nlvmCFrame-00011018.fits\n", "not both"),
+    ("999999\n", "absent"),
+])
+def test_invalid_exposure_id_file(catalogue, tmp_path, contents, message):
+    root, _ = catalogue
+    manifest = tmp_path / "exposures.txt"
+    manifest.write_text(contents)
+    with pytest.raises(ValueError, match=message):
+        planning.select_exposures(input_list=manifest, cframe_root=root)
+
+
+@pytest.mark.parametrize("selection", [dict(expnum=["11018"]), dict(all_exposures=True)])
+def test_exposure_id_file_rejects_conflicting_selection(catalogue, tmp_path, selection):
+    root, _ = catalogue
+    manifest = tmp_path / "exposures.txt"
+    manifest.write_text("11017\n")
+    with pytest.raises(ValueError, match="not both"):
+        planning.select_exposures(input_list=manifest, cframe_root=root, **selection)
+
+
+def test_batch_accepts_id_file_without_shell_conversion(catalogue, model, tmp_path, monkeypatch):
+    root, _ = catalogue
+    manifest = tmp_path / "exposures.txt"
+    manifest.write_text("11017\n11018\n")
+    monkeypatch.setattr(resources.os, "sched_getaffinity", lambda _: {0}, raising=False)
+    monkeypatch.setattr(cli, "apply_affinity", lambda _: None)
+    monkeypatch.setattr(cli, "check_runtime_dependencies", lambda: pytest.fail("Dry run must not import worker dependencies"))
+    result = RUNNER.invoke(cli.app, ["batch", "--input-list", str(manifest), "--redux-dir", str(root),
+        *model_arguments(model), "--output-dir", str(tmp_path / "out"), "--dry-run"])
+    assert result.exit_code == 0, result.output
+    assert "00011017" in result.output and "00011018" in result.output
+    assert not (tmp_path / "out").exists()
+
+
 def test_explicit_and_catalogue_sources_are_exclusive(cframe):
     with pytest.raises(ValueError, match="not both"):
         planning.select_exposures(inputs=[cframe()], expnum=["11017"])
@@ -381,7 +430,7 @@ def test_catalogue_identity_disagreement(catalogue, tmp_path, model):
 
 @pytest.mark.parametrize("policy,expected", [("continue", ["error", "complete", "complete"]),
                                            ("stop", ["error", "not_started", "not_started"])])
-def test_batch_error_policies_and_records(cframe, model, tmp_path, monkeypatch, policy, expected):
+def test_batch_error_policies_and_records(cframe, model, tmp_path, monkeypatch, capsys, policy, expected):
     from skysub.sky_subtraction_block import batch as scheduler
 
     entries = [planning.exposure_from_file(cframe(v)) for v in (11017, 11018, 11019)]
@@ -414,6 +463,14 @@ raise SystemExit(code)
     assert result["state"] == "complete_with_errors"
     assert json.loads((run_dir / "status.json").read_text())["counts"]["error"] == 1
     assert (run_dir / "plan.ecsv").is_file() and (run_dir / "results.ecsv").is_file()
+    terminal = capsys.readouterr().err
+    assert "11017 failed: probe error" in terminal
+    assert "CPUs=" not in terminal and "pid=" not in terminal
+    assert "Exposure 11017 started" not in terminal
+    detailed = (run_dir / "batch.log").read_text()
+    assert "CPUs=[0]" in detailed and "pid=" in detailed
+    assert str(entries[0].input_path) in detailed
+    assert str(entries[0].log) in detailed
 
 
 def test_batch_interrupt_terminates_owned_process(cframe, model, tmp_path, monkeypatch):
@@ -584,3 +641,30 @@ def test_batch_nproc_controls_automatic_slots(cframe, model, tmp_path, monkeypat
         assert result.exit_code == 0, result.output
         assert captured['budget']['processes'] == 4
         assert captured['jobs'] == 2
+
+
+def test_worker_dependencies_report_all_import_failures(monkeypatch):
+    import importlib
+    def unavailable(name):
+        raise ModuleNotFoundError(f"No module named '{name}'")
+    monkeypatch.setattr(importlib, "import_module", unavailable)
+    with pytest.raises(ValueError) as caught:
+        resources.check_runtime_dependencies()
+    message = str(caught.value)
+    assert "torch:" in message and "threadpoolctl:" in message
+    assert sys.executable in message and "requirements-cli.txt" in message
+
+
+def test_missing_worker_dependency_stops_before_batch(cframe, model, tmp_path, monkeypatch):
+    from skysub.sky_subtraction_block import batch as scheduler
+    monkeypatch.setattr(resources.os, "sched_getaffinity", lambda _: {0}, raising=False)
+    monkeypatch.setattr(cli, "apply_affinity", lambda _: None)
+    def unavailable():
+        raise ValueError("threadpoolctl unavailable")
+    monkeypatch.setattr(cli, "check_runtime_dependencies", unavailable)
+    monkeypatch.setattr(scheduler, "run_batch", lambda *a, **kw: pytest.fail("Must not start batch"))
+    result = RUNNER.invoke(cli.app, ["batch", str(cframe()), *model_arguments(model),
+        "--output-dir", str(tmp_path / "out")])
+    assert result.exit_code == 2, result.output
+    assert "threadpoolctl unavailable" in result.output
+    assert not (tmp_path / "out").exists()

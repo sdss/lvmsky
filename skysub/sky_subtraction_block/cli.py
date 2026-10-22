@@ -11,7 +11,7 @@ from typing import Annotated
 import typer
 
 from .options import DEFAULTS, HELP, validate_model
-from .resources import apply_affinity, cpu_budget, limit_environment
+from .resources import apply_affinity, check_runtime_dependencies, cpu_budget, limit_environment
 
 limit_environment()
 
@@ -76,11 +76,12 @@ Examples:
         cframes.txt --ml-model-file /models/sky.pt --flat-output \\
         --output-dir /results --nproc 2 --cpus 4
 
-    python -m \\
-        skysub.sky_subtraction_block.cli batch --all-exposures \\
-        --ml-model-file /models/sky.pt --dry-run
+    python -m skysub.sky_subtraction_block.cli batch \\
+        --redux-dir /data/redux/1.3.2 --input-list exposures.txt \\
+        --ml-model-file /models/sky.pt --cpus 4
 
 Commas/repeated values mean OR within a selector; different selectors mean AND. Ranges are inclusive.
+Input-list files contain either CFrame paths or exposure IDs; do not mix them.
 Set --cpus for the total CPU budget and --nproc for workers per exposure.
 Concurrent exposures are computed automatically as floor(cpus / nproc).
 Serial stages remain serial. Missing/identity-mismatched Gaia cache queries TAP; malformed FITS/schema is an error.
@@ -215,7 +216,10 @@ def single(
 @app.command(help=BATCH_HELP)
 def batch(
     inputs: Annotated[list[Path] | None, typer.Argument(help="Explicit CFrame paths; alternative to catalogue selection.")] = None,
-    input_list: Annotated[Path | None, typer.Option(help="One CFrame path per line; relative to the list file. Blank lines/# comments allowed.",
+    input_list: Annotated[Path | None, typer.Option(help=(
+        "File containing CFrame paths (one per line, relative to this file) or exposure IDs "
+        "(one per line, whitespace/comma-separated also accepted; requires --redux-dir or SAS environment). "
+        "Do not mix IDs and paths. Blank lines/# comments allowed."),
                          rich_help_panel="Input and SDSS paths")] = None,
     sas_base_dir: Annotated[Path | None, typer.Option(help=(
         "SAS mirror root containing sdsswork/, e.g. /data/sas. Default: SAS_BASE_DIR environment. "
@@ -310,14 +314,21 @@ def batch(
         make_plan(entries, model, output_dir=output_dir, flat_output=not preserve_drp_tree,
                   reuse_state_dir=reuse_state_dir, on_existing=on_existing.value,
                   missing_input=missing_input.value)
-        typer.echo("Resolved paths: " + str(context))
-        typer.echo("CPU allocation: " + str(budget))
-        for entry in entries:
-            typer.echo(f"{entry.expnum:08d} [{entry.status}] {entry.input_path} -> {entry.output}; "
-                       f"{entry.state_mode}: {entry.seed or 'in-memory'}")
+        if dry_run or log_level == Level.debug:
+            typer.echo("Resolved paths: " + str(context))
+            typer.echo("CPU allocation: " + str(budget))
+            for entry in entries:
+                typer.echo(f"{entry.expnum:08d} [{entry.status}] {entry.input_path} -> {entry.output}; "
+                           f"{entry.state_mode}: {entry.seed or 'in-memory'}")
+        else:
+            typer.echo(f"Selected {len(entries)} exposures; up to {budget['processes']} concurrent, "
+                       f"{jobs} worker(s) per exposure")
+            typer.echo(f"Output: {output_dir.expanduser().resolve()}")
         if dry_run:
             typer.echo("Dry run complete; output directories/files were not created.")
             return
+        if any(entry.status == "queued" for entry in entries):
+            check_runtime_dependencies()
         from .batch import run_batch
         result = run_batch(entries, model, budget, output_dir=output_dir, run_dir=run_dir,
                            context=context, on_error=on_error.value, log_level=log_level.value,
@@ -326,7 +337,11 @@ def batch(
         raise typer.Exit(130) from None
     except (ValueError, OSError, KeyError) as error:
         raise typer.BadParameter(str(error)) from error
-    typer.echo(f"Batch {result['state']}: {result['counts']}; records: {result['run_dir']}")
+    counts = result["counts"]
+    summary = ", ".join(f"{label}={counts.get(status, 0)}" for status, label in (
+        ("complete", "OK"), ("error", "failed"), ("reused", "reused"), ("skipped_input", "skipped"),
+        ("not_started", "not started")))
+    typer.echo(f"Batch {result['state']}: {summary}")
     if result["state"] != "complete":
         raise typer.Exit(1)
 

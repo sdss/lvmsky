@@ -16,8 +16,6 @@ import time
 
 from .resources import apply_affinity
 
-LOG = logging.getLogger(__name__)
-
 
 def atomic_json(path, value):
     path = Path(path)
@@ -76,6 +74,41 @@ def _terminate(active):
         entry.status = "interrupted"
 
 
+def _duration(seconds):
+    minutes, seconds = divmod(max(0, int(seconds)), 60)
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+
+
+def _progress_panel(entries, elapsed):
+    from rich.console import Group
+    from rich.progress_bar import ProgressBar
+    from rich.table import Table
+    from rich.text import Text
+
+    counts = Counter(entry.status for entry in entries)
+    completed = sum(counts[name] for name in ("complete", "error", "reused", "skipped_input"))
+    remaining = counts["running"] + counts["queued"]
+    rate = counts["complete"] / elapsed if elapsed > 0 else 0
+    eta = "00:00:00" if not remaining else ("~" + _duration(remaining / rate) if rate else "--")
+    bar = Table.grid(expand=True, padding=(0, 1))
+    bar.add_column(no_wrap=True)
+    bar.add_column(ratio=1)
+    bar.add_column(no_wrap=True)
+    bar.add_row("Sky subtraction", ProgressBar(total=len(entries), completed=completed),
+                f"{completed}/{len(entries)} processed")
+    summary = (f"OK {counts['complete']} · Failed {counts['error']} · "
+               f"Running {counts['running']} · Queued {counts['queued']}")
+    for status, label in (("reused", "Reused"), ("skipped_input", "Skipped"),
+                          ("not_started", "Not started"), ("interrupted", "Interrupted")):
+        if counts[status]:
+            summary += f" · {label} {counts[status]}"
+    running = ", ".join(str(entry.expnum) for entry in entries if entry.status == "running") or "none"
+    return Group(bar, Text(summary),
+                 Text(f"Elapsed {_duration(elapsed)} · Rate {rate * 60:.1f} successful exp/min · ETA {eta}"),
+                 Text(f"Running: {running}"))
+
+
 def run_batch(entries, model, budget, *, output_dir, run_dir=None, context=None,
               on_error="continue", log_level="INFO", no_progress=False):
     run_dir = Path(run_dir).expanduser().resolve() if run_dir else new_run_dir(output_dir).resolve()
@@ -100,16 +133,30 @@ def run_batch(entries, model, budget, *, output_dir, run_dir=None, context=None,
         atomic_json(run_dir / "status.json", state)
         write_table(run_dir / "results.ecsv", entries)
 
-    progress = None
+    from rich.console import Console
+    from rich.text import Text
+
+    console = Console(stderr=True)
+    log = logging.Logger(__name__, level=logging.DEBUG)
+    handler = logging.FileHandler(run_dir / "batch.log")
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+    log.addHandler(handler)
+    log.info("Command: %s; paths=%s; CPU budget=%s", state["command"], context, budget)
+    terminal_level = logging.getLevelName(log_level.upper())
+    def event(message, level=logging.INFO, style=None):
+        if level >= terminal_level:
+            console.print(Text(message, style=style))
+
+    live = None
     if not no_progress and sys.stderr.isatty():
-        from rich.progress import Progress
-        progress = Progress()
-        progress.start()
-        bar = progress.add_task("Sky subtraction", total=len(entries),
-                                completed=sum(e.status != "queued" for e in entries))
-    save()
-    print(f"Run records: {run_dir}", flush=True)
+        from rich.live import Live
+        live = Live(console=console, refresh_per_second=4,
+                    get_renderable=lambda: _progress_panel(entries, time.monotonic() - started))
     try:
+        save()
+        console.print(Text(f"Run records: {run_dir}"))
+        if live:
+            live.start()
         stop = False
         while queue or active:
             while queue and slots and not stop:
@@ -137,9 +184,10 @@ def run_batch(entries, model, budget, *, output_dir, run_dir=None, context=None,
                     raise
                 entry.pid, entry.status = process.pid, "running"
                 active[process.pid] = (process, stream, result_path, slot, entry)
-                LOG.info("Exposure %s started pid=%s CPUs=%s: %s -> %s; log=%s",
+                log.info("Exposure %s started pid=%s CPUs=%s: %s -> %s; log=%s",
                          entry.expnum, process.pid, budget["subsets"][slot],
                          entry.input_path, entry.output, entry.log)
+                event(f"Exposure {entry.expnum} started", level=logging.DEBUG)
                 save()
             for pid, record in list(active.items()):
                 process, stream, result_path, slot, entry = record
@@ -154,15 +202,19 @@ def run_batch(entries, model, budget, *, output_dir, run_dir=None, context=None,
                 entry.elapsed_seconds = float(result.get("elapsed_seconds", 0))
                 if code == 0 and result.get("state") == "complete" and entry.output.is_file():
                     entry.status = "complete"
-                    LOG.info("Exposure %s complete: %s", entry.expnum, entry.output)
+                    log.info("Exposure %s complete in %.1f s: %s", entry.expnum, entry.elapsed_seconds, entry.output)
+                    event(f"✓ {entry.expnum} completed in {_duration(entry.elapsed_seconds)}", style="green")
                 else:
                     entry.status, entry.error = "error", result.get("error", f"Worker exited {code}")
-                    LOG.error("Exposure %s: %s; log=%s", entry.expnum, entry.error, entry.log)
+                    log.error("Exposure %s: %s; log=%s", entry.expnum, entry.error, entry.log)
+                    reason = " ".join(str(entry.error).split())
+                    if len(reason) > 160:
+                        reason = reason[:157] + "..."
+                    event(f"✗ {entry.expnum} failed: {reason} — log: {Path(entry.log).name}",
+                          level=logging.ERROR, style="red")
                     stop = on_error == "stop"
                 del active[pid]
                 slots.append(slot)
-                if progress:
-                    progress.advance(bar)
                 save()
             if stop:
                 for entry in queue:
@@ -173,6 +225,7 @@ def run_batch(entries, model, budget, *, output_dir, run_dir=None, context=None,
                 time.sleep(0.1)
         state["state"] = "complete_with_errors" if any(e.status == "error" for e in entries) else "complete"
     except KeyboardInterrupt:
+        log.warning("Batch interrupted by user")
         state["state"] = "interrupted"
         _terminate(active)
         active.clear()
@@ -182,12 +235,17 @@ def run_batch(entries, model, budget, *, output_dir, run_dir=None, context=None,
         state["state"] = "interrupted"
         raise
     except BaseException:
+        log.exception("Batch failed")
         _terminate(active)
         active.clear()
         state["state"] = "error"
         raise
     finally:
-        if progress:
-            progress.stop()
-        save()
+        try:
+            if live:
+                live.stop()
+            save()
+        finally:
+            log.removeHandler(handler)
+            handler.close()
     return state
