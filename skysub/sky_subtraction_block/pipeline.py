@@ -6,8 +6,6 @@ from pathlib import Path
 import json
 import logging
 import multiprocessing as mp
-import os
-import tempfile
 import time
 import ctypes
 import numpy as np
@@ -21,7 +19,7 @@ from skysub.sky_decomp.reliability import misfit
 import re
 from skysub.sky_subtraction.io import read_cframe
 from skysub.sky_subtraction.fiber_lsf import unfitted_qa
-from skysub.sky_subtraction.product import lsf_hdus,lvmsframe_layout,publish_product,set_prediction_reliability
+from skysub.sky_subtraction.product import lsf_hdus,lvmsframe_layout,publish,publish_product,set_prediction_reliability
 from skysub.sky_decomp import reliability as rel
 from skysub.sky_subtraction.reconstruction import SkyMLReconstructor
 from skysub.sky_subtraction.rendering import arm_sky,exposure_line_masks,fwhm_grid
@@ -95,7 +93,7 @@ def _mapped(function,indices,jobs):
 
 
 def run(input_path, *, output=None, seed=None, ensemble=None, gaia_dir=None, jobs=8, slit_count=4, centered=False, keep_preparation=False,
-        offset_count=11, wave_count=4, offset_roughness=0., wave_roughness=0., slit_roughness=0., reference_prior=0., execution_metadata=None):
+        offset_count=11, wave_count=4, offset_roughness=0., wave_roughness=0., slit_roughness=0., reference_prior=0., execution_metadata=None, overwrite=False):
     global _WORK
     _keep_freed_memory()
     started=time.perf_counter(); input_path=Path(input_path).resolve()
@@ -107,7 +105,7 @@ def run(input_path, *, output=None, seed=None, ensemble=None, gaia_dir=None, job
         raise ValueError('Regularization strengths must be finite and nonnegative')
     if output==input_path or not output.name.startswith('lvmSFrame-skyml-block-'):
         raise ValueError('Use lvmSFrame-skyml-block-* to protect the existing methods and DRP products')
-    if output.exists():raise FileExistsError(output)
+    if output.exists() and not overwrite:raise FileExistsError(output)
     output.parent.mkdir(parents=True,exist_ok=True)
     prepared=None; seed_path=Path(seed).resolve() if seed else None
     if seed_path==output:raise ValueError('Seed and output must differ')
@@ -258,9 +256,8 @@ def run(input_path, *, output=None, seed=None, ensemble=None, gaia_dir=None, job
         if 'reliability' in provenance.get('prediction_diagnostics',{}):
             set_prediction_reliability(product[0].header,int(np.asarray(provenance['prediction_diagnostics']['reliability']).ravel()[0]))
         product[0].header['SKYMETH']='skyml-block'; product[0].header['LSFCENT']=centered; product[0].header['BLOCKCH']='RZ'
-        fd,temporary=tempfile.mkstemp(prefix='.skyblock-',suffix='.fits',dir=output.parent);os.close(fd)
         try:
-            lvmsframe_layout(product,output,input_path).writeto(temporary,overwrite=True,checksum=True);os.chmod(temporary,0o644);os.link(temporary,output)
+            publish(lvmsframe_layout(product,output,input_path),output,0o644,overwrite=overwrite)
         finally:
-            os.unlink(temporary);product.close();_WORK=None
+            product.close();_WORK=None
     return output

@@ -205,7 +205,7 @@ The catalogue-calibration filter matches the existing driver's t['fluxcal'] == '
 | --- | --- | --- |
 | --output-dir DIR | ./skyml-block-output | Root for generated products, relative to the launch directory. Example: --output-dir /results/skyml-block. |
 | --preserve-drp-tree / --flat-output | Preserve DRP tree | Mutually exclusive choices: recreate TILEGROUP/TILE/MJD below output-dir, or write final FITS directly there. |
-| --on-existing error or skip | error | error reports a destination conflict. skip reuses a readable complete product only when input identity and scientific fingerprint match; mismatches remain conflicts. |
+| --on-existing error, skip or overwrite | error | error reports a destination conflict. skip verifies and reuses a complete matching product; mismatches remain conflicts. overwrite recomputes and atomically replaces the final FITS only after successful writing, preserving the previous result on calculation/write failure. |
 | --reuse-state-dir DIR | Unset | Special reuse mode: existing per-exposure snapshots from --keep-preparation, with exact placement below. |
 | --run-dir DIR | OUTPUT_DIR/.batch/<UTC run ID> | Plan, status, results and per-exposure logs, e.g. --run-dir /logs/skyml-night60325. |
 

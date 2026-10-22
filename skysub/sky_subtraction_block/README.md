@@ -115,6 +115,15 @@ Preserved output placement is
 For unavailable explicit inputs, `--missing-input skip` records the path; unknown
 header identities use `-1` and the output path stays unset. `--on-existing skip` verifies
 scientific fingerprints, complete FITS layout and checksums before reuse.
+To recompute and replace existing final products, add
+`--on-existing overwrite` to `batch` or `single`. The previous final FITS
+stays in place during fitting and writing; only a fully written replacement
+is atomically published. Calculation/write failures leave the previous result
+untouched. This policy does not overwrite input CFrames or saved preparation
+snapshots, and does not change the existing preparation-reuse rules.
+The default remains `--on-existing error`; `skip` verifies and reuses
+matching products rather than recomputing them.
+
 Run plans, results, status, exact invocations and individual logs are stored
 under `OUTPUT_DIR/.batch/<run ID>`, or the explicit `--run-dir`.
 
@@ -137,7 +146,7 @@ python -m skysub.sky_subtraction_block /path/lvmCFrame-00059750.fits \
   --output /separate/products/lvmSFrame-skyml-block-00059750.fits --nproc 8
 ```
 
-For a controlled LSF comparison, add `--seed /path/lvmSFrame-skyml-00059750.fits` to reuse that exact exposure's saved median/ML/correction preparation. The input SHA256 and row/wavelength identities must match. The seed's individual Science LSF fits are replaced completely. A run without a seed computes the same median/ML/correction stage (survey-only, no per-fiber LSF fits) in memory and writes no preparation file; `--keep-preparation` also writes it beside the output for reuse with `--seed`. A `--seed` file, or a preparation that already exists at that default path, is used as is and never modified or deleted. Existing destinations are protected; working filenames have no version suffixes.
+For a controlled LSF comparison, add `--seed /path/lvmSFrame-skyml-00059750.fits` to reuse that exact exposure's saved median/ML/correction preparation. The input SHA256 and row/wavelength identities must match. The seed's individual Science LSF fits are replaced completely. A run without a seed computes the same median/ML/correction stage (survey-only, no per-fiber LSF fits) in memory and writes no preparation file; `--keep-preparation` also writes it beside the output for reuse with `--seed`. A `--seed` file, or a preparation that already exists at that default path, is used as is and never modified or deleted. Existing destinations are protected by default; working filenames have no version suffixes.
 
 ## Basis dimensions and regularization
 

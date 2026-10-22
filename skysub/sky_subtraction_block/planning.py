@@ -31,6 +31,7 @@ class Exposure:
     log: str = ""
     pid: int | None = None
     elapsed_seconds: float = 0.0
+    overwrite: bool = False
 
     @property
     def identity(self):
@@ -332,10 +333,13 @@ def prepare_exposure(item, model, *, seed=None, implementation=None, on_existing
     from ..sky_subtraction.settings import SETTINGS
 
     validate_model(model)
+    if on_existing not in ("error", "skip", "overwrite"):
+        raise ValueError("--on-existing must be error, skip or overwrite")
+    item.overwrite = on_existing == "overwrite"
     if item.output == item.input_path or not item.output.name.startswith("lvmSFrame-skyml-block-"):
         raise ValueError("Output must use lvmSFrame-skyml-block-* and protect the input")
     if item.output.exists() and on_existing == "error":
-        raise FileExistsError(f"Output exists: {item.output}; choose a new directory or --on-existing skip")
+        raise FileExistsError(f"Output exists: {item.output}; use --on-existing skip or --on-existing overwrite")
     if not item.input_path.is_file():
         raise FileNotFoundError(item.input_path)
     hash_cache = {}
@@ -394,7 +398,7 @@ def prepare_exposure(item, model, *, seed=None, implementation=None, on_existing
                        implementation_sha256=implementation or scientific_implementation())
     item.fingerprint = hashlib.sha256(json.dumps(fingerprint, sort_keys=True).encode()).hexdigest()
     item.dependencies = dependencies
-    if item.output.exists():
+    if item.output.exists() and on_existing == "skip":
         verify_product(item)
         item.status = "reused"
     return item

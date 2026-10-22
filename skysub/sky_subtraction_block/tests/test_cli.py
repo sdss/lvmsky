@@ -358,6 +358,41 @@ def test_verified_existing_product_and_changed_settings(cframe, model, tmp_path)
                            output_dir=tmp_path / "output", flat_output=True, on_existing="skip")
 
 
+def test_overwrite_plan_recomputes_without_removing_previous_output(cframe, model, tmp_path):
+    source = cframe()
+    output = tmp_path / "out"
+    output.mkdir()
+    destination = output / "lvmSFrame-skyml-block-00011017.fits"
+    original = b"previous product, including an incompatible or incomplete FITS"
+    destination.write_bytes(original)
+    item = planning.exposure_from_file(source)
+    planning.make_plan([item], model, output_dir=output, flat_output=True, on_existing="overwrite")
+    assert item.status == "queued" and item.overwrite is True
+    assert item.record()["overwrite"] is True
+    assert destination.read_bytes() == original
+
+
+def test_batch_overwrite_reaches_worker_request(cframe, model, tmp_path, monkeypatch):
+    from skysub.sky_subtraction_block import batch as scheduler
+    output = tmp_path / "out"
+    output.mkdir()
+    destination = output / "lvmSFrame-skyml-block-00011017.fits"
+    destination.write_bytes(b"previous result")
+    monkeypatch.setattr(resources.os, "sched_getaffinity", lambda _: {0}, raising=False)
+    monkeypatch.setattr(cli, "apply_affinity", lambda _: None)
+    monkeypatch.setattr(cli, "check_runtime_dependencies", lambda: None)
+    captured = []
+    def run(entries, *args, **kwargs):
+        captured.extend(entry.record() for entry in entries)
+        return dict(state="complete", counts={}, run_dir="records")
+    monkeypatch.setattr(scheduler, "run_batch", run)
+    result = RUNNER.invoke(cli.app, ["batch", str(cframe()), *model_arguments(model),
+        "--output-dir", str(output), "--flat-output", "--on-existing", "overwrite"])
+    assert result.exit_code == 0, result.output
+    assert captured[0]["overwrite"] is True and captured[0]["status"] == "queued"
+    assert destination.read_bytes() == b"previous result"
+
+
 def test_cpu_budget_and_no_implicit_jobs(monkeypatch):
     monkeypatch.setattr(resources.os, "sched_getaffinity", lambda _: set(range(20)))
     allocation = resources.cpu_budget(processes=10, cpus=20)

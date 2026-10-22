@@ -91,6 +91,7 @@ Serial stages remain serial. Missing/identity-mismatched Gaia cache queries TAP;
 class Existing(str, Enum):
     error = "error"
     skip = "skip"
+    overwrite = "overwrite"
 
 
 class Missing(str, Enum):
@@ -169,9 +170,12 @@ def single(
     input: Annotated[Path, typer.Argument(exists=True, dir_okay=False, help="One local observed-flux lvmCFrame FITS.")],
     output: Annotated[Path | None, typer.Option(help=(
         "One final FITS file, retaining the lvmSFrame-skyml-block- prefix. Default: beside INPUT, "
-        "replace lvmCFrame- with lvmSFrame-skyml-block-; remove trailing .gz. Existing files are protected."),
+        "replace lvmCFrame- with lvmSFrame-skyml-block-; remove trailing .gz. Existing files are protected by default."),
         rich_help_panel="Input and final output")] = None,
     ensemble: ModelFile = None, gaia_dir: Gaia = None, seed: Seed = None,
+    on_existing: Annotated[Existing, typer.Option(help=(
+        "error: destination conflict; skip: verify/reuse a matching product; "
+        "overwrite: recompute and atomically replace the final FITS only on success."))] = Existing.error,
     jobs: Jobs = 8, cpus: CPUs = None, cpu_list: CPUList = None,
     slit_count: Slit = DEFAULTS["slit_count"], offset_count: Offset = DEFAULTS["offset_count"],
     wave_count: Wave = DEFAULTS["wave_count"],
@@ -192,9 +196,12 @@ def single(
         entry = exposure_from_file(input)
         entry.output = output.expanduser().resolve() if output else entry.input_path.with_name(
             entry.input_path.name.replace("lvmCFrame-", "lvmSFrame-skyml-block-").removesuffix(".gz"))
-        prepare_exposure(entry, model, seed=seed)
+        prepare_exposure(entry, model, seed=seed, on_existing=on_existing.value)
     except (ValueError, OSError, KeyError) as error:
         raise typer.BadParameter(str(error)) from error
+    if entry.status == "reused":
+        typer.echo(f"Reused: {entry.output}")
+        return
     logging.info("Input: %s; %s: %s; output: %s; CPU budget: %s",
                  entry.input_path, entry.state_mode, entry.seed or "in-memory", entry.output, budget)
     try:
@@ -204,7 +211,7 @@ def single(
         metadata = dict(fingerprint=entry.fingerprint, state_mode=entry.state_mode,
                         budget=budget, resources=runtime_resources())
         result = run(entry.input_path, output=entry.output, seed=entry.seed,
-                     execution_metadata=metadata, **model)
+                     execution_metadata=metadata, overwrite=entry.overwrite, **model)
         typer.echo(str(result))
     except KeyboardInterrupt:
         raise typer.Exit(130) from None
@@ -267,7 +274,8 @@ def batch(
         rich_help_panel="Final output")] = True,
     on_existing: Annotated[Existing, typer.Option(help=(
         "error: destination conflict; skip: verify complete FITS, input/scientific fingerprint and checksums. "
-        "Mismatches remain conflicts. No automatic filename versions."),
+        "Mismatches remain conflicts in skip mode. overwrite: recompute and atomically replace the final "
+        "FITS only on success; retain the old output on failure. No automatic filename versions."),
         rich_help_panel="Final output")] = Existing.error,
     missing_input: Annotated[Missing, typer.Option(help="error: stop planning; skip: record unavailable local CFrame and continue.",
                          rich_help_panel="Catalogue selection")] = Missing.error,

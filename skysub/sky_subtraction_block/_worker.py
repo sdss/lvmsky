@@ -42,7 +42,7 @@ def main(request_path):
                         state_mode=entry["state_mode"], budget=request["budget"],
                         resources=result["resources_start"])
         output = run(entry["input_path"], output=entry["output"], seed=entry["seed"],
-                     execution_metadata=metadata, **request["model"])
+                     execution_metadata=metadata, overwrite=entry.get("overwrite", False), **request["model"])
         result.update(state="complete", output=str(output), resources_end=runtime_resources())
         from astropy.io import fits
         with fits.open(output, memmap=True) as hdus:
