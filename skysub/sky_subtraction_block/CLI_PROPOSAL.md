@@ -151,18 +151,19 @@ $SAS_BASE_DIR/sdsswork/lvm/spectro/redux/1.3.2/
   1029XX/1029016/60325/lvmCFrame-00011017.fits
 ~~~
 
-The version default reflects the current scientific input/grid contract. Selecting another path/version still requires compatible input and assets; the option alone does not establish support for a new reduction format.
+The version inferred from the catalogue identifies the scientific input/grid contract. Selecting another path/version still requires compatible input and assets; the option alone does not establish support for a new reduction format.
 
 | Batch path option | Default | Meaning and example |
 | --- | --- | --- |
 | --sas-base-dir DIR | Environment SAS_BASE_DIR | Local SAS mirror root containing sdsswork/, e.g. --sas-base-dir /data/sas. |
-| --drp-version TEXT | 1.3.2 | Chosen reduction version for catalogue/data discovery. Example: --drp-version 1.3.2. No automatic newest-version selection. |
-| --cframe-root DIR | Resolved version directory below | Advanced override for a nonstandard mirror: directory directly containing <tilegrp>/<tileid>/<mjd>, e.g. /scratch/lvm/1.3.2. |
-| --drpall FILE | CFRAME_ROOT/drpall-<drp-version>.fits in catalogue mode | Exposure summary FITS. Example override: --drpall /catalogues/drpall-1.3.2.fits. A relocated catalogue does not move the data root. |
+| --redux-dir DIR | Resolved from the SAS environment when omitted | Input reduction directory directly containing drpall-VERSION.fits and TILEGROUP/TILE/MJD. The directory name is unrestricted. --cframe-root remains a compatible alias. |
+| --drpall FILE | Exactly one complete drpall-*.fits in the input directory | Explicit catalogue selection; excludes *-incomplete.fits. The filename determines the version. A relocated catalogue does not relocate an explicit input directory. |
 
-CFrame-root precedence: explicit --cframe-root; root constructed from explicit --sas-base-dir; environment LVM_SPECTRO_REDUX plus the chosen version; environment SAS_BASE_DIR plus sdsswork/lvm/spectro/redux/<version>. Explicit command-line paths are authoritative. An explicit --sas-base-dir also sets SAS_BASE_DIR for scientific assets; use --cframe-root when only the input-data mirror differs. The plan prints both resolved catalogue and CFrame-root paths.
+The DRP version is inferred from the catalogue filename and checked against selected catalogue rows and CFrame headers. There is no separate version option. Zero or multiple matching catalogues are errors; specify --drpall when needed.
 
-For example, LVM_SPECTRO_REDUX=/data/sas/sdsswork/lvm/spectro/redux yields the same version root as SAS_BASE_DIR=/data/sas. Standard use needs no root option. Nonstandard storage can supply --cframe-root and --drpall explicitly. Known CFrame paths or an input-list do not require a SAS environment or catalogue.
+Input-root precedence: explicit --redux-dir; the standard redux path under explicit --sas-base-dir; LVM_SPECTRO_REDUX; the standard redux path under SAS_BASE_DIR. For environment/SAS roots, search the root directly, then its immediate version directories if no direct catalogue exists, requiring a unique complete catalogue. With explicit --drpall, a matching version directory under an environment/SAS root is used when present. An explicit --sas-base-dir also sets SAS_BASE_DIR for scientific assets. The plan prints the resolved catalogue and data root.
+
+Known CFrame paths or an input-list do not require a SAS environment or catalogue; their versions come from their FITS headers.
 
 A catalogue location may name a DRP SFrame and include an archive prefix. Extract its validated <tilegrp>/<tileid>/<mjd> suffix, place it below the selected version root and use the CFrame basename. Substitute the product basename prefix, rather than arbitrary directory substrings. Validate row/header exposure identity and version/path consistency.
 
@@ -179,7 +180,7 @@ Choose one source: explicit INPUTS, --input-list, or catalogue selectors/--all-e
 | --tileid VALUES | No tile cut | Examples: --tileid 1029016; --tileid 1029016,1029017; --tileid 11112: for IDs >=11112. Repeatable. |
 | --exptime SECONDS | No duration cut | Match the recorded exposure time, e.g. --exptime 900. Selects rows; does not rescale flux. |
 | --catalog-fluxcal TEXT | No calibration-mode cut | Match drpall.fluxcal, e.g. --catalog-fluxcal MOD. Catalogue filtering only; does not calibrate or rescale flux. |
-| --all-exposures | Off | Every exposure row in the selected catalogue. Example: batch --all-exposures --drp-version 1.3.2. Use instead of catalogue filters. |
+| --all-exposures | Off | Every exposure row in the selected catalogue. Example: batch --redux-dir /data/redux/1.3.2 --all-exposures. Use instead of catalogue filters. |
 | --max-exposures N | Unset: whole selected set | First N entries of the ordered selected list; N must be an integer >=1. Example: --mjd 60325 --max-exposures 3 selects that night's first three entries by the ordering below. |
 | --missing-input error or skip | error | error stops planning if a selected local CFrame is unavailable; skip records it and continues with available members of the same selected set. |
 
@@ -203,7 +204,7 @@ The catalogue-calibration filter matches the existing driver's t['fluxcal'] == '
 | Batch option | Default | Meaning and example |
 | --- | --- | --- |
 | --output-dir DIR | ./skyml-block-output | Root for generated products, relative to the launch directory. Example: --output-dir /results/skyml-block. |
-| --preserve-drp-tree / --flat-output | Preserve DRP tree | Mutually exclusive choices: recreate VERSION/TILEGROUP/TILE/MJD below output-dir, or write final FITS directly there. |
+| --preserve-drp-tree / --flat-output | Preserve DRP tree | Mutually exclusive choices: recreate TILEGROUP/TILE/MJD below output-dir, or write final FITS directly there. |
 | --on-existing error or skip | error | error reports a destination conflict. skip reuses a readable complete product only when input identity and scientific fingerprint match; mismatches remain conflicts. |
 | --reuse-state-dir DIR | Unset | Special reuse mode: existing per-exposure snapshots from --keep-preparation, with exact placement below. |
 | --run-dir DIR | OUTPUT_DIR/.batch/<UTC run ID> | Plan, status, results and per-exposure logs, e.g. --run-dir /logs/skyml-night60325. |
@@ -213,7 +214,7 @@ Input:
   $SAS_BASE_DIR/sdsswork/lvm/spectro/redux/1.3.2/1029XX/1029016/60325/lvmCFrame-00011017.fits
 
 --output-dir /results --preserve-drp-tree:
-  /results/1.3.2/1029XX/1029016/60325/lvmSFrame-skyml-block-00011017.fits
+  /results/1029XX/1029016/60325/lvmSFrame-skyml-block-00011017.fits
 
 --output-dir /results --flat-output:
   /results/lvmSFrame-skyml-block-00011017.fits
@@ -225,7 +226,7 @@ With --reuse-state-dir /previous, preserve-tree mode expects:
 
 ~~~text
 /previous/
-  1.3.2/1029XX/1029016/60325/
+  1029XX/1029016/60325/
     lvmSFrame-skyml-preparation-00011017.fits
 ~~~
 
@@ -302,11 +303,11 @@ INPUT AND SDSS PATHS
   --input-list FILE         One path per line; relative to that list file.
   --sas-base-dir DIR        SAS mirror root containing sdsswork/.
                             Example: /data/sas. [env: SAS_BASE_DIR]
-  --drp-version TEXT        Catalogue/data version. [default: 1.3.2]
-  --cframe-root DIR         Override version directory containing
-                            <tilegrp>/<tileid>/<mjd>.
-  --drpall FILE             Summary FITS. [catalogue-mode default:
-                            CFRAME_ROOT/drpall-<drp-version>.fits]
+  --redux-dir DIR           Input directory containing drpall-VERSION.fits and
+                            <tilegrp>/<tileid>/<mjd>; alias: --cframe-root.
+  --drpall FILE             Explicit complete drpall-VERSION.fits.
+                            Default: exactly one drpall-*.fits,
+                            excluding *-incomplete.fits. Version is inferred.
 
 SELECT CATALOGUE EXPOSURES
   --expnum VALUES           11017 or 11017,11018 or 11017:11025.
@@ -327,7 +328,7 @@ SELECT CATALOGUE EXPOSURES
 
 FINAL PRODUCTS
   --output-dir DIR          Generated product root. [default: ./skyml-block-output]
-  --preserve-drp-tree       VERSION/TILEGROUP/TILE/MJD below output-dir. [default]
+  --preserve-drp-tree       TILEGROUP/TILE/MJD below output-dir. [default]
   --flat-output             Final FITS directly in output-dir.
   --on-existing POLICY      error: conflict; skip: verify compatible product.
                             [choices: error, skip; default: error]
@@ -393,9 +394,10 @@ RUN CONTROL AND LOGGING
   -h, --help                Show this documentation and exit.
 
 PATH AND SELECTION RULES
-  CFrame-root precedence: --cframe-root; explicit --sas-base-dir plus standard
-  suffix; LVM_SPECTRO_REDUX/<version>; SAS_BASE_DIR plus standard suffix.
-  Standard suffix: sdsswork/lvm/spectro/redux/<version>.
+  Data-root precedence: --redux-dir; explicit --sas-base-dir plus standard
+  suffix; LVM_SPECTRO_REDUX; SAS_BASE_DIR plus standard suffix.
+  Standard suffix: sdsswork/lvm/spectro/redux.
+  Infer the version from one complete drpall-*.fits; no automatic newest selection.
   For a full catalogue request --all-exposures explicitly.
   Commas/repeated values mean OR; different selectors mean AND.
   No max-exposures means all SELECTED entries, not the whole catalogue.
@@ -428,7 +430,7 @@ Nonstandard data/catalogue locations with deliberate catalogue cuts:
 
 ~~~sh
 skyml-block batch \
-  --cframe-root /scratch/lvm/1.3.2 --drpall /catalogues/drpall-1.3.2.fits \
+  --redux-dir /scratch/lvm/1.3.2 --drpall /catalogues/drpall-1.3.2.fits \
   --mjd 60356:60401 --tileid 11112: --exptime 900 --catalog-fluxcal MOD \
   --ml-model-file /models/ensemble.pt \
   --output-dir /results/selected --flat-output \

@@ -219,18 +219,17 @@ def batch(
                          rich_help_panel="Input and SDSS paths")] = None,
     sas_base_dir: Annotated[Path | None, typer.Option(help=(
         "SAS mirror root containing sdsswork/, e.g. /data/sas. Default: SAS_BASE_DIR environment. "
-        "An explicit value also overrides SAS_BASE_DIR for scientific assets. Use --cframe-root for a partial data mirror."),
+        "An explicit value also overrides SAS_BASE_DIR for scientific assets. Use --redux-dir for a partial data mirror."),
         rich_help_panel="Input and SDSS paths")] = None,
-    drp_version: Annotated[str, typer.Option(help="Chosen catalogue/data version; current supported native grid is DRP 1.3.2.",
-                         rich_help_panel="Input and SDSS paths")] = "1.3.2",
-    cframe_root: Annotated[Path | None, typer.Option(help=(
-        "Advanced: version directory containing TILEGROUP/TILE/MJD, e.g. /scratch/lvm/1.3.2. "
-        "Precedence: this option; explicit --sas-base-dir plus standard suffix; "
-        "LVM_SPECTRO_REDUX/version; SAS_BASE_DIR/sdsswork/lvm/spectro/redux/version."),
+    cframe_root: Annotated[Path | None, typer.Option("--redux-dir", "--cframe-root", help=(
+        "Input reduction directory containing drpall-VERSION.fits and TILEGROUP/TILE/MJD. "
+        "The catalogue determines the DRP version; the directory name is unrestricted. "
+        "Overrides SAS/environment data paths. --cframe-root is a compatible alias."),
         rich_help_panel="Input and SDSS paths")] = None,
     drpall: Annotated[Path | None, typer.Option(help=(
-        "LVM summary FITS. Default in catalogue mode: CFRAME_ROOT/drpall-VERSION.fits. "
-        "A relocated catalogue does not relocate the CFrame root."),
+        "Explicit complete drpall-VERSION.fits catalogue. Default: discover exactly one "
+        "drpall-*.fits in the input directory, excluding *-incomplete.fits. "
+        "A relocated catalogue does not relocate an explicit --redux-dir."),
         rich_help_panel="Input and SDSS paths")] = None,
     expnum: Annotated[list[str] | None, typer.Option(help=(
         "Exposure numbers: 11017; 11017,11018; 11017:11025; or 11017,11020:11025. "
@@ -259,7 +258,7 @@ def batch(
     output_dir: Annotated[Path, typer.Option(help="Generated product root; relative to the launch directory.",
                          rich_help_panel="Final output")] = Path("skyml-block-output"),
     preserve_drp_tree: Annotated[bool, typer.Option("--preserve-drp-tree/--flat-output", help=(
-        "Preserve: OUTPUT_DIR/VERSION/TILEGROUP/TILE/MJD/lvmSFrame-skyml-block-EXPNUM.fits. "
+        "Preserve: OUTPUT_DIR/TILEGROUP/TILE/MJD/lvmSFrame-skyml-block-EXPNUM.fits. "
         "Flat: write final FITS directly in OUTPUT_DIR. EXPNUM has eight digits."),
         rich_help_panel="Final output")] = True,
     on_existing: Annotated[Existing, typer.Option(help=(
@@ -271,7 +270,7 @@ def batch(
     ensemble: ModelFile = None, gaia_dir: Gaia = None,
     reuse_state_dir: Annotated[Path | None, typer.Option(help=(
         "Advanced: existing snapshots from earlier --keep-preparation runs. Preserve-tree mode expects "
-        "DIR/VERSION/TILEGROUP/TILE/MJD/lvmSFrame-skyml-preparation-00011017.fits; flat mode "
+        "DIR/TILEGROUP/TILE/MJD/lvmSFrame-skyml-preparation-00011017.fits; flat mode "
         "expects that basename directly under DIR. Each executing exposure needs matching state. "
         "Unset: ordinary in-memory processing or compatible adjacent-state lookup."),
         rich_help_panel="Optional saved-state reuse")] = None,
@@ -305,7 +304,7 @@ def batch(
         from .planning import make_plan, select_exposures
         entries, context = select_exposures(
             inputs=inputs, input_list=input_list, drpall=drpall, sas_base_dir=sas_base_dir,
-            cframe_root=cframe_root, drp_version=drp_version, expnum=expnum, mjd=mjd,
+            cframe_root=cframe_root, expnum=expnum, mjd=mjd,
             tileid=tileid, exptime=exptime, catalog_fluxcal=catalog_fluxcal,
             all_exposures=all_exposures, max_exposures=max_exposures, missing_input=missing_input.value)
         make_plan(entries, model, output_dir=output_dir, flat_output=not preserve_drp_tree,

@@ -12,7 +12,7 @@ python -m pip install -r skysub/sky_subtraction_block/requirements-cli.txt
 python -m skysub.sky_subtraction_block.cli --help
 ```
 
-The checkout also includes `./skyml-block`, using the active environment's Python.
+Run the module from the repository root using the active environment's Python.
 Root, `single`, `batch` and legacy help put examples immediately after the usage
 and short description, before detailed option descriptions.
 
@@ -24,6 +24,7 @@ python -m skysub.sky_subtraction_block.cli single /data/lvmCFrame-00011017.fits 
 
 # Discover exposures through the standard SAS mirror and its DRP catalogue.
 python -m skysub.sky_subtraction_block.cli batch \
+  --redux-dir /data/sas/sdsswork/lvm/spectro/redux/1.3.2 \
   --expnum 11017,11018 --ml-model-file /models/trained-sky.pt \
   --gaia-dir /cache/gaia/fibers --nproc 1 --cpus 2 \
   --output-dir /results --preserve-drp-tree
@@ -43,6 +44,24 @@ native numerical threads remain one per process. Memory grows with concurrent
 exposures. `--jobs` remains a compatible alias for `--nproc`.
 Use `--cpu-list 8-11 --cpus 4` to select exact scheduler-allowed logical CPUs.
 
+Use `--redux-dir DIR` for the input directory containing the catalogue and
+`TILEGROUP/TILE/MJD` tree. The directory name is unrestricted. The CLI discovers
+exactly one `drpall-*.fits` there, excluding `*-incomplete.fits`, and derives
+the version from that filename. Zero or multiple catalogues are errors; use
+`--drpall FILE` to select a complete catalogue explicitly. Catalogue rows and
+CFrame headers must agree with the discovered version. There is no
+`--drp-version` option. `--cframe-root` remains an alias for `--redux-dir`.
+
+Without an explicit input directory, the CLI uses `LVM_SPECTRO_REDUX` or the
+standard redux path below `--sas-base-dir` / `SAS_BASE_DIR`. It searches that
+directory, then its immediate version directories if no catalogue is present
+directly; ambiguous selections require an explicit directory/catalogue.
+
+Preserving the tree is the default and does not prepend the DRP version.
+Saved-state reuse follows the same `TILEGROUP/TILE/MJD` layout under
+`--reuse-state-dir`. Existing outputs/snapshots from the older version-prefixed
+layout are not moved automatically.
+
 The trained model is selected by `--ml-model-file FILE`; `--ensemble FILE`
 remains accepted by all three entry points. Ordinary operation computes
 intermediate state in memory and writes the final SFrame. `--keep-preparation`
@@ -54,7 +73,7 @@ explicitly enables an additional snapshot for later `--reuse-state FILE`
 cache triggers the existing ARI TAP query; malformed FITS/schema is an error.
 
 Preserved output placement is
-`OUTPUT_DIR/1.3.2/TILEGROUP/TILE/MJD/lvmSFrame-skyml-block-EXPNUM.fits`.
+`OUTPUT_DIR/TILEGROUP/TILE/MJD/lvmSFrame-skyml-block-EXPNUM.fits`.
 `--flat-output` writes directly in OUTPUT_DIR (default: `./skyml-block-output`).
 For unavailable explicit inputs, `--missing-input skip` records the path; unknown
 header identities use `-1` and the output path stays unset. `--on-existing skip` verifies

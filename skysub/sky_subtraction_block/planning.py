@@ -62,23 +62,43 @@ def validate_version(value):
     return value
 
 
-def paths(sas_base_dir=None, drp_version="1.3.2", cframe_root=None, drpall=None):
-    validate_version(drp_version)
+def catalogue_version(catalogue):
+    match = re.fullmatch(r"drpall-([A-Za-z0-9][A-Za-z0-9_.-]*)\.fits", Path(catalogue).name)
+    if match is None or match[1].endswith("-incomplete"):
+        raise ValueError(f"Expected a complete drpall-VERSION.fits catalogue: {catalogue}")
+    return validate_version(match[1])
+
+
+def paths(sas_base_dir=None, cframe_root=None, drpall=None):
     sas = Path(sas_base_dir).expanduser() if sas_base_dir else None
     if cframe_root:
         root = Path(cframe_root).expanduser()
     elif sas:
-        root = sas / "sdsswork/lvm/spectro/redux" / drp_version
+        root = sas / "sdsswork/lvm/spectro/redux"
     elif os.environ.get("LVM_SPECTRO_REDUX"):
-        root = Path(os.environ["LVM_SPECTRO_REDUX"]).expanduser() / drp_version
+        root = Path(os.environ["LVM_SPECTRO_REDUX"]).expanduser()
     elif os.environ.get("SAS_BASE_DIR"):
-        root = Path(os.environ["SAS_BASE_DIR"]).expanduser() / "sdsswork/lvm/spectro/redux" / drp_version
-    elif drpall:
-        raise ValueError("A relocated --drpall needs --cframe-root or a SAS environment")
+        root = Path(os.environ["SAS_BASE_DIR"]).expanduser() / "sdsswork/lvm/spectro/redux"
     else:
-        raise ValueError("Set SAS_BASE_DIR, --sas-base-dir or --cframe-root for catalogue selection")
+        raise ValueError("Set --redux-dir, LVM_SPECTRO_REDUX or SAS_BASE_DIR for catalogue selection")
     root = root.resolve()
-    catalogue = Path(drpall).expanduser().resolve() if drpall else root / f"drpall-{drp_version}.fits"
+    if drpall:
+        catalogue = Path(drpall).expanduser().absolute()
+        version = catalogue_version(catalogue)
+        if cframe_root is None and (root / version).is_dir():
+            root = root / version
+    else:
+        candidates = sorted(p for p in root.glob("drpall-*.fits")
+                            if p.is_file() and not p.name.endswith("-incomplete.fits"))
+        if not candidates and cframe_root is None:
+            candidates = sorted(p for p in root.glob("*/drpall-*.fits")
+                                if p.is_file() and not p.name.endswith("-incomplete.fits"))
+        if len(candidates) != 1:
+            raise ValueError(f"Expected exactly one complete drpall-*.fits catalogue under {root}; "
+                             f"found {len(candidates)}. Set --redux-dir and/or --drpall explicitly.")
+        catalogue = candidates[0]
+        catalogue_version(catalogue)
+        root = catalogue.parent
     return root, catalogue
 
 
@@ -186,7 +206,7 @@ def _catalogue_exposures(catalogue, root, version, selectors, exptime, fluxcal, 
 
 
 def select_exposures(*, inputs=None, input_list=None, drpall=None, sas_base_dir=None,
-                     cframe_root=None, drp_version="1.3.2", expnum=None, mjd=None,
+                     cframe_root=None, expnum=None, mjd=None,
                      tileid=None, exptime=None, catalog_fluxcal=None, all_exposures=False,
                      max_exposures=None, missing_input="error"):
     explicit = bool(inputs) or input_list is not None
@@ -219,12 +239,13 @@ def select_exposures(*, inputs=None, input_list=None, drpall=None, sas_base_dir=
                 # Unknown header identities use -1; retain each skipped path in run records.
                 match = re.fullmatch(r"lvmCFrame-(\d+)\.fits(?:\.gz)?", path.name)
                 exposures.append(Exposure(path, int(match[1]) if match else -1, -1, -1,
-                                          drp_version, "", status="skipped_input",
+                                          "", "", status="skipped_input",
                                           error=f"Local CFrame unavailable: {path}"))
             else:
                 exposures.append(exposure_from_file(path))
     else:
-        root, catalogue = paths(sas_base_dir, drp_version, cframe_root, drpall)
+        root, catalogue = paths(sas_base_dir, cframe_root, drpall)
+        drp_version = catalogue_version(catalogue)
         context = dict(cframe_root=str(root), drpall=str(catalogue))
         exposures = _catalogue_exposures(catalogue, root, drp_version, selectors,
                                          exptime, catalog_fluxcal, all_exposures)
@@ -377,7 +398,7 @@ def make_plan(exposures, model, *, output_dir, flat_output=False, reuse_state_di
     for item in exposures:
         if item.status == "skipped_input":
             continue
-        relative = Path() if flat_output else Path(item.version, item.tilegroup, str(item.tileid), str(item.mjd))
+        relative = Path() if flat_output else Path(item.tilegroup, str(item.tileid), str(item.mjd))
         item.output = output_dir / relative / f"lvmSFrame-skyml-block-{item.expnum:08d}.fits"
         if item.output in destinations:
             raise ValueError(f"Multiple exposures map to the same output: {item.output}")
@@ -395,7 +416,7 @@ def make_plan(exposures, model, *, output_dir, flat_output=False, reuse_state_di
             raise ValueError(f"Catalogue and CFrame identity disagree: {item.input_path}")
         seed = None
         if reuse_state_dir:
-            relative = Path() if flat_output else Path(item.version, item.tilegroup, str(item.tileid), str(item.mjd))
+            relative = Path() if flat_output else Path(item.tilegroup, str(item.tileid), str(item.mjd))
             seed = Path(reuse_state_dir).expanduser().resolve() / relative / f"lvmSFrame-skyml-preparation-{item.expnum:08d}.fits"
         prepare_exposure(item, model, seed=seed, implementation=implementation, on_existing=on_existing)
     return exposures

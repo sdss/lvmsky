@@ -142,24 +142,92 @@ def test_explicit_and_catalogue_sources_are_exclusive(cframe):
         planning.select_exposures(inputs=[cframe()], expnum=["11017"])
 
 
-def test_sas_path_precedence(tmp_path, monkeypatch):
-    monkeypatch.setenv("SAS_BASE_DIR", str(tmp_path / "sas"))
+def test_sas_path_precedence(catalogue, tmp_path, monkeypatch):
+    root, cat = catalogue
+    sas = tmp_path / "sas"
+    mirror = sas / "sdsswork/lvm/spectro/redux/1.3.2"
+    mirror.mkdir(parents=True)
+    (mirror / cat.name).touch()
+    monkeypatch.setenv("SAS_BASE_DIR", str(sas))
     monkeypatch.delenv("LVM_SPECTRO_REDUX", raising=False)
-    root, cat = planning.paths()
-    assert root == tmp_path / "sas/sdsswork/lvm/spectro/redux/1.3.2"
-    monkeypatch.setenv("LVM_SPECTRO_REDUX", str(tmp_path / "redux"))
-    assert planning.paths()[0] == tmp_path / "redux/1.3.2"
-    assert planning.paths(sas_base_dir=tmp_path / "explicit")[0] == tmp_path / "explicit/sdsswork/lvm/spectro/redux/1.3.2"
-    assert planning.paths(cframe_root=tmp_path / "direct")[0] == tmp_path / "direct"
-    assert planning.paths(cframe_root=tmp_path / "direct", drpall=tmp_path / "moved.fits")[1] == tmp_path / "moved.fits"
+    assert planning.paths()[0] == mirror
+    monkeypatch.setenv("LVM_SPECTRO_REDUX", str(root.parent))
+    assert planning.paths()[0] == root
+    assert planning.paths(sas_base_dir=sas)[0] == mirror
+    assert planning.paths(cframe_root=root) == (root, cat)
+    assert planning.paths(cframe_root=root, drpall=mirror / cat.name) == (root, mirror / cat.name)
+    assert planning.paths(drpall=mirror / cat.name)[0] == root
+
+
+def test_catalogue_discovery_requires_one_complete_file(catalogue):
+    root, cat = catalogue
+    (root / "drpall-1.3.2-incomplete.fits").touch()
+    assert planning.paths(cframe_root=root) == (root, cat)
+    other = root / "drpall-1.3.3.fits"
+    other.touch()
+    with pytest.raises(ValueError, match="found 2"):
+        planning.paths(cframe_root=root)
+    assert planning.paths(cframe_root=root, drpall=cat) == (root, cat)
+    other.unlink()
+    cat.unlink()
+    with pytest.raises(ValueError, match="found 0"):
+        planning.paths(cframe_root=root)
+
+
+def test_symlinked_catalogue_does_not_relocate_inputs(catalogue, tmp_path):
+    root, cat = catalogue
+    external = tmp_path / cat.name
+    cat.rename(external)
+    cat.symlink_to(external)
+    entries, context = planning.select_exposures(cframe_root=root, all_exposures=True)
+    assert context["cframe_root"] == str(root)
+    assert all(entry.input_path.is_relative_to(root) for entry in entries)
+
+
+def test_environment_catalogue_discovery_rejects_multiple_versions(catalogue, monkeypatch):
+    root, cat = catalogue
+    other = root.parent / "1.3.3"
+    other.mkdir()
+    (other / "drpall-1.3.3.fits").touch()
+    monkeypatch.setenv("LVM_SPECTRO_REDUX", str(root.parent))
+    with pytest.raises(ValueError, match="found 2"):
+        planning.paths()
+    assert planning.paths(drpall=cat) == (root, cat)
+
+
+def test_catalogue_version_independent_of_directory_name(catalogue):
+    root, cat = catalogue
+    renamed = root.rename(root.with_name("arbitrary-input-directory"))
+    entries, _ = planning.select_exposures(cframe_root=renamed, all_exposures=True)
+    assert {entry.version for entry in entries} == {"1.3.2"}
+    table = Table.read(renamed / cat.name)
+    table["drpver"][0] = "1.3.3"
+    table.write(renamed / cat.name, overwrite=True)
+    with pytest.raises(ValueError, match="differs"):
+        planning.select_exposures(cframe_root=renamed, all_exposures=True)
+
+
+@pytest.mark.parametrize("flag", ["--redux-dir", "--cframe-root"])
+def test_batch_redux_directory_and_default_tree(catalogue, model, tmp_path, monkeypatch, flag):
+    root, _ = catalogue
+    monkeypatch.setattr(resources.os, "sched_getaffinity", lambda _: {0}, raising=False)
+    monkeypatch.setattr(cli, "apply_affinity", lambda _: None)
+    result = RUNNER.invoke(cli.app, ["batch", flag, str(root), "--expnum", "11017",
+        *model_arguments(model), "--output-dir", str(tmp_path / "out"),
+        "--cpus", "1", "--dry-run"])
+    assert result.exit_code == 0, result.output
+    assert str(tmp_path / "out/1029XX/1029016/60325/lvmSFrame-skyml-block-00011017.fits") in result.output
+    assert not (tmp_path / "out").exists()
+    help_result = RUNNER.invoke(cli.app, ["batch", "--help"])
+    assert "--drp-version" not in help_result.output
 
 
 def test_output_tree_flat_and_missing_policy(catalogue, model, tmp_path):
     root, _ = catalogue
     entries, _ = planning.select_exposures(cframe_root=root, expnum=["11017,11018"])
     planning.make_plan(entries, model, output_dir=tmp_path / "out")
-    assert entries[0].output == tmp_path / "out/1.3.2/1029XX/1029016/60325/lvmSFrame-skyml-block-00011017.fits"
-    assert entries[1].output == tmp_path / "out/1.3.2/1028XX/1028962/60325/lvmSFrame-skyml-block-00011018.fits"
+    assert entries[0].output == tmp_path / "out/1029XX/1029016/60325/lvmSFrame-skyml-block-00011017.fits"
+    assert entries[1].output == tmp_path / "out/1028XX/1028962/60325/lvmSFrame-skyml-block-00011018.fits"
     assert not (tmp_path / "out").exists()
     entries[1].input_path.unlink()
     planning.make_plan(entries, model, output_dir=tmp_path / "flat", flat_output=True, missing_input="skip")
@@ -167,12 +235,22 @@ def test_output_tree_flat_and_missing_policy(catalogue, model, tmp_path):
     assert entries[1].status == "skipped_input"
 
 
-def test_output_collision_rejected_before_computation(cframe, model, tmp_path):
+def test_preserved_saved_state_uses_unprefixed_tree(catalogue, model, tmp_path, monkeypatch):
+    root, _ = catalogue
+    entries, _ = planning.select_exposures(cframe_root=root, expnum=["11017"])
+    captured = []
+    monkeypatch.setattr(planning, "prepare_exposure", lambda item, model, **kwargs: captured.append(kwargs["seed"]))
+    planning.make_plan(entries, model, output_dir=tmp_path / "out", reuse_state_dir=tmp_path / "states")
+    assert captured == [tmp_path / "states/1029XX/1029016/60325/lvmSFrame-skyml-preparation-00011017.fits"]
+
+
+@pytest.mark.parametrize("flat_output", [False, True])
+def test_output_collision_rejected_before_computation(cframe, model, tmp_path, flat_output):
     one = planning.exposure_from_file(cframe())
     two = deepcopy(one)
     two.version = "other-version"
     with pytest.raises(ValueError, match="same output"):
-        planning.make_plan([one, two], model, output_dir=tmp_path / "flat", flat_output=True)
+        planning.make_plan([one, two], model, output_dir=tmp_path / "out", flat_output=flat_output)
 
 
 def test_dry_run_uses_new_and_compatible_model_flags(cframe, model, tmp_path, monkeypatch):
