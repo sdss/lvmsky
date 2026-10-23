@@ -884,6 +884,7 @@ def _fit_bspline_channel(
     )
 
     settings = clarabel.DefaultSettings()
+    settings.max_threads = 1
     settings.verbose = False
     started = time.perf_counter()
     solver = clarabel.DefaultSolver(

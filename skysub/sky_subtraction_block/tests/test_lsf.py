@@ -262,3 +262,19 @@ def test_older_preparations_get_the_moon_glare_test_from_their_medians():
     assert failed_arms(prov)==()                                            # R2 alone misses it
     assert failed_arms(prov,(wave,{'SkyE':glare,'SkyW':sky},meta))==('SkyE',)
     assert failed_arms(prov,(wave,{'SkyE':glare,'SkyW':sky},dict(meta,moon_alt=-5.0)))==()
+
+
+def test_shared_metadata_checks_only_the_preserved_blue_channel():
+    from skysub.sky_subtraction_block.science import uniform_metadata
+    from astropy.io import fits
+    from astropy.table import Table
+
+    rows = [dict(spectrum_index=i, channel=ch, status="survey" if ch == "B" else f"block_{i}",
+                 value=float("nan")) for i in range(2) for ch in "BRZ"]
+    hdus = fits.HDUList([fits.PrimaryHDU(),
+                        fits.BinTableHDU(Table(rows=rows), name="LSF_META"),
+                        fits.BinTableHDU(Table(dict(fiberid=[1, 2])), name="LSF_FIBERS")])
+    reader = SimpleNamespace(h=hdus)
+    assert uniform_metadata(reader)
+    hdus["LSF_META"].data["status"][3] = "changed"
+    assert not uniform_metadata(reader)

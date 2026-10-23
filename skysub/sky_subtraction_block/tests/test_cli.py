@@ -1,0 +1,729 @@
+"""CLI selection, compatibility, reuse and resource contracts on small FITS fixtures."""
+from __future__ import annotations
+
+from copy import deepcopy
+import json
+from pathlib import Path
+import subprocess
+import sys
+from types import SimpleNamespace
+
+from astropy.io import fits
+from astropy.table import Table
+import numpy as np
+import pytest
+from typer.testing import CliRunner
+
+from skysub.sky_subtraction_block import cli, planning, resources
+from skysub.sky_subtraction_block.__main__ import build_parser
+from skysub.sky_subtraction_block.options import DEFAULTS
+
+RUNNER = CliRunner()
+
+
+@pytest.fixture
+def cframe(tmp_path):
+    def make(expnum=11017, mjd=60325, tileid=1029016, root=None):
+        path = (root or tmp_path) / f"lvmCFrame-{expnum:08d}.fits"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        header = fits.Header(dict(EXPOSURE=expnum, MJD=mjd, TILE_ID=tileid, DRPVER="1.3.2"))
+        fits.HDUList([fits.PrimaryHDU(header=header),
+                      fits.ImageHDU(np.arange(4.0), name="WAVE"),
+                      fits.BinTableHDU(Table(dict(fiberid=[1, 2])), name="SLITMAP")]).writeto(path)
+        return path
+    return make
+
+
+@pytest.fixture
+def model(tmp_path):
+    path = tmp_path / "trained-model.pt"
+    path.write_bytes(b"model identity only; numerical models are not loaded in planning tests")
+    return dict(ensemble=path, gaia_dir=None, jobs=1, **DEFAULTS)
+
+
+@pytest.fixture
+def catalogue(tmp_path, cframe):
+    root = tmp_path / "redux/1.3.2"
+    rows = []
+    for exp, night, tile, duration, calibration in (
+        (11019, 60326, 1029016, 900.0, "MOD"),
+        (11018, 60325, 1028962, 600.0, "STD"),
+        (11017, 60325, 1029016, 900.0, "MOD"),
+    ):
+        group = f"{tile // 1000:04d}XX"
+        path = cframe(exp, night, tile, root / group / str(tile) / str(night))
+        rows.append(dict(expnum=exp, mjd=night, tileid=tile, tilegrp=group, exptime=duration,
+                         fluxcal=calibration, drpver="1.3.2",
+                         location=f"sdsswork/lvm/spectro/redux/1.3.2/{group}/{tile}/{night}/lvmSFrame-{exp:08d}.fits"))
+    root.mkdir(parents=True, exist_ok=True)
+    cat = root / "drpall-1.3.2.fits"
+    Table(rows=rows).write(cat)
+    return root, cat
+
+
+def model_arguments(model):
+    return ["--ml-model-file", str(model["ensemble"])]
+
+
+def test_legacy_defaults_and_aliases():
+    old = vars(build_parser().parse_args(["lvmCFrame-00011017.fits", "--ensemble", "model.pt", "--seed", "state.fits"]))
+    new = vars(build_parser().parse_args(["lvmCFrame-00011017.fits", "--ml-model-file", "model.pt", "--reuse-state", "state.fits"]))
+    assert old == new
+    assert old["jobs"] == 8 and old["seed"] == "state.fits"
+    assert {name: old[name] for name in DEFAULTS} == DEFAULTS
+    assert not old['fit_sky_fibers']
+    assert build_parser().parse_args(['input.fits','--fit-sky-fibers']).fit_sky_fibers
+
+
+@pytest.mark.parametrize("command,panel", [([], "Options"), (["single"], "Arguments"), (["batch"], "Arguments")])
+def test_help_examples_before_options(command, panel):
+    result = RUNNER.invoke(cli.app, [*command, "--help"])
+    assert result.exit_code == 0, result.output
+    assert result.output.index("Usage:") < result.output.index("Examples:") < result.output.index(panel)
+    if command:
+        assert "--ml-model-file" in result.output and "--ensemble" in result.output
+    else:
+        assert "single" in result.output and "batch" in result.output
+
+
+def test_help_does_not_import_the_scientific_runtime():
+    code = (
+        "from typer.testing import CliRunner; from skysub.sky_subtraction_block.cli import app; "
+        "import sys; r=CliRunner().invoke(app,['batch','--help']); "
+        "assert r.exit_code==0,r.output; "
+        "assert 'torch' not in sys.modules; "
+        "assert 'skysub.sky_subtraction_block.pipeline' not in sys.modules"
+    )
+    subprocess.run([sys.executable, "-c", code], check=True)
+
+
+@pytest.mark.parametrize("bad", ["1:0", ":", "1,,2", "one", "1:2:3", "-1"])
+def test_bad_selectors(bad):
+    with pytest.raises(ValueError):
+        planning.parse_values([bad])
+
+
+def test_inclusive_union_and_open_ranges():
+    ranges = planning.parse_values(["11017,11020:11025", "11112:"])
+    assert planning.includes(11017, ranges)
+    assert planning.includes(11025, ranges)
+    assert not planning.includes(11026, ranges)
+    assert planning.includes(10**12, ranges)
+
+
+def test_catalogue_and_intersection_sort_maximum(catalogue):
+    root, cat = catalogue
+    selected, context = planning.select_exposures(cframe_root=root, drpall=cat,
+        expnum=["11017:11019"], mjd=["60325:60326"], catalog_fluxcal="MOD", max_exposures=1)
+    assert [v.expnum for v in selected] == [11017]
+    assert context["cframe_root"] == str(root)
+    selected, _ = planning.select_exposures(cframe_root=root, drpall=cat, all_exposures=True)
+    assert [v.expnum for v in selected] == [11017, 11018, 11019]
+
+
+def test_selection_requires_explicit_intent(catalogue):
+    root, cat = catalogue
+    with pytest.raises(ValueError, match="Select"):
+        planning.select_exposures(cframe_root=root, drpall=cat)
+    with pytest.raises(ValueError, match="instead"):
+        planning.select_exposures(cframe_root=root, all_exposures=True, mjd=["60325"])
+    with pytest.raises(ValueError, match="absent"):
+        planning.select_exposures(cframe_root=root, expnum=["11017:11020"])
+
+
+def test_manifest_relative_paths_and_deduplication(tmp_path, cframe):
+    path = cframe()
+    manifest = tmp_path / "cframes.txt"
+    manifest.write_text(f"# inputs\n{path.name}\n\n{path.name}\n")
+    selected, _ = planning.select_exposures(input_list=manifest)
+    assert len(selected) == 1 and selected[0].input_path == path
+
+
+@pytest.mark.parametrize("contents", ["11017\n11018\n11017\n", "11017 11018\n", "11017,11018\n",
+                                    "# exposures\n\n11017\n11018\n"])
+def test_exposure_id_file_uses_catalogue(catalogue, tmp_path, contents):
+    root, _ = catalogue
+    manifest = tmp_path / "exposures.txt"
+    manifest.write_text(contents)
+    entries, context = planning.select_exposures(input_list=manifest, cframe_root=root)
+    assert [entry.expnum for entry in entries] == [11017, 11018]
+    assert context["cframe_root"] == str(root)
+    entries, _ = planning.select_exposures(input_list=manifest, cframe_root=root, exptime=900)
+    assert [entry.expnum for entry in entries] == [11017]
+
+
+@pytest.mark.parametrize("contents,message", [
+    ("# empty\n\n", "empty"),
+    ("11017\nlvmCFrame-00011018.fits\n", "not both"),
+    ("999999\n", "absent"),
+])
+def test_invalid_exposure_id_file(catalogue, tmp_path, contents, message):
+    root, _ = catalogue
+    manifest = tmp_path / "exposures.txt"
+    manifest.write_text(contents)
+    with pytest.raises(ValueError, match=message):
+        planning.select_exposures(input_list=manifest, cframe_root=root)
+
+
+@pytest.mark.parametrize("selection", [dict(expnum=["11018"]), dict(all_exposures=True)])
+def test_exposure_id_file_rejects_conflicting_selection(catalogue, tmp_path, selection):
+    root, _ = catalogue
+    manifest = tmp_path / "exposures.txt"
+    manifest.write_text("11017\n")
+    with pytest.raises(ValueError, match="not both"):
+        planning.select_exposures(input_list=manifest, cframe_root=root, **selection)
+
+
+def test_batch_accepts_id_file_without_shell_conversion(catalogue, model, tmp_path, monkeypatch):
+    root, _ = catalogue
+    manifest = tmp_path / "exposures.txt"
+    manifest.write_text("11017\n11018\n")
+    monkeypatch.setattr(resources.os, "sched_getaffinity", lambda _: {0}, raising=False)
+    monkeypatch.setattr(cli, "apply_affinity", lambda _: None)
+    monkeypatch.setattr(cli, "check_runtime_dependencies", lambda: pytest.fail("Dry run must not import worker dependencies"))
+    result = RUNNER.invoke(cli.app, ["batch", "--input-list", str(manifest), "--redux-dir", str(root),
+        *model_arguments(model), "--output-dir", str(tmp_path / "out"), "--dry-run"])
+    assert result.exit_code == 0, result.output
+    assert "00011017" in result.output and "00011018" in result.output
+    assert not (tmp_path / "out").exists()
+
+
+def test_explicit_and_catalogue_sources_are_exclusive(cframe):
+    with pytest.raises(ValueError, match="not both"):
+        planning.select_exposures(inputs=[cframe()], expnum=["11017"])
+
+
+def test_sas_path_precedence(catalogue, tmp_path, monkeypatch):
+    root, cat = catalogue
+    sas = tmp_path / "sas"
+    mirror = sas / "sdsswork/lvm/spectro/redux/1.3.2"
+    mirror.mkdir(parents=True)
+    (mirror / cat.name).touch()
+    monkeypatch.setenv("SAS_BASE_DIR", str(sas))
+    monkeypatch.delenv("LVM_SPECTRO_REDUX", raising=False)
+    assert planning.paths()[0] == mirror
+    monkeypatch.setenv("LVM_SPECTRO_REDUX", str(root.parent))
+    assert planning.paths()[0] == root
+    assert planning.paths(sas_base_dir=sas)[0] == mirror
+    assert planning.paths(cframe_root=root) == (root, cat)
+    assert planning.paths(cframe_root=root, drpall=mirror / cat.name) == (root, mirror / cat.name)
+    assert planning.paths(drpall=mirror / cat.name)[0] == root
+
+
+def test_catalogue_discovery_requires_one_complete_file(catalogue):
+    root, cat = catalogue
+    (root / "drpall-1.3.2-incomplete.fits").touch()
+    assert planning.paths(cframe_root=root) == (root, cat)
+    other = root / "drpall-1.3.3.fits"
+    other.touch()
+    with pytest.raises(ValueError, match="found 2"):
+        planning.paths(cframe_root=root)
+    assert planning.paths(cframe_root=root, drpall=cat) == (root, cat)
+    other.unlink()
+    cat.unlink()
+    with pytest.raises(ValueError, match="found 0"):
+        planning.paths(cframe_root=root)
+
+
+def test_symlinked_catalogue_does_not_relocate_inputs(catalogue, tmp_path):
+    root, cat = catalogue
+    external = tmp_path / cat.name
+    cat.rename(external)
+    cat.symlink_to(external)
+    entries, context = planning.select_exposures(cframe_root=root, all_exposures=True)
+    assert context["cframe_root"] == str(root)
+    assert all(entry.input_path.is_relative_to(root) for entry in entries)
+
+
+def test_environment_catalogue_discovery_rejects_multiple_versions(catalogue, monkeypatch):
+    root, cat = catalogue
+    other = root.parent / "1.3.3"
+    other.mkdir()
+    (other / "drpall-1.3.3.fits").touch()
+    monkeypatch.setenv("LVM_SPECTRO_REDUX", str(root.parent))
+    with pytest.raises(ValueError, match="found 2"):
+        planning.paths()
+    assert planning.paths(drpall=cat) == (root, cat)
+
+
+def test_catalogue_version_independent_of_directory_name(catalogue):
+    root, cat = catalogue
+    renamed = root.rename(root.with_name("arbitrary-input-directory"))
+    entries, _ = planning.select_exposures(cframe_root=renamed, all_exposures=True)
+    assert {entry.version for entry in entries} == {"1.3.2"}
+    table = Table.read(renamed / cat.name)
+    table["drpver"][0] = "1.3.3"
+    table.write(renamed / cat.name, overwrite=True)
+    with pytest.raises(ValueError, match="differs"):
+        planning.select_exposures(cframe_root=renamed, all_exposures=True)
+
+
+@pytest.mark.parametrize("flag", ["--redux-dir", "--cframe-root"])
+def test_batch_redux_directory_and_default_tree(catalogue, model, tmp_path, monkeypatch, flag):
+    root, _ = catalogue
+    monkeypatch.setattr(resources.os, "sched_getaffinity", lambda _: {0}, raising=False)
+    monkeypatch.setattr(cli, "apply_affinity", lambda _: None)
+    result = RUNNER.invoke(cli.app, ["batch", flag, str(root), "--expnum", "11017",
+        *model_arguments(model), "--output-dir", str(tmp_path / "out"),
+        "--cpus", "1", "--dry-run"])
+    assert result.exit_code == 0, result.output
+    assert str(tmp_path / "out/1029XX/1029016/60325/lvmSFrame-skyml-block-00011017.fits") in result.output
+    assert not (tmp_path / "out").exists()
+    help_result = RUNNER.invoke(cli.app, ["batch", "--help"])
+    assert "--drp-version" not in help_result.output
+
+
+def test_output_tree_flat_and_missing_policy(catalogue, model, tmp_path):
+    root, _ = catalogue
+    entries, _ = planning.select_exposures(cframe_root=root, expnum=["11017,11018"])
+    planning.make_plan(entries, model, output_dir=tmp_path / "out")
+    assert entries[0].output == tmp_path / "out/1029XX/1029016/60325/lvmSFrame-skyml-block-00011017.fits"
+    assert entries[1].output == tmp_path / "out/1028XX/1028962/60325/lvmSFrame-skyml-block-00011018.fits"
+    assert not (tmp_path / "out").exists()
+    entries[1].input_path.unlink()
+    planning.make_plan(entries, model, output_dir=tmp_path / "flat", flat_output=True, missing_input="skip")
+    assert entries[0].output.parent == tmp_path / "flat"
+    assert entries[1].status == "skipped_input"
+
+
+def test_preserved_saved_state_uses_unprefixed_tree(catalogue, model, tmp_path, monkeypatch):
+    root, _ = catalogue
+    entries, _ = planning.select_exposures(cframe_root=root, expnum=["11017"])
+    captured = []
+    monkeypatch.setattr(planning, "prepare_exposure", lambda item, model, **kwargs: captured.append(kwargs["seed"]))
+    planning.make_plan(entries, model, output_dir=tmp_path / "out", reuse_state_dir=tmp_path / "states")
+    assert captured == [tmp_path / "states/1029XX/1029016/60325/lvmSFrame-skyml-preparation-00011017.fits"]
+
+
+@pytest.mark.parametrize("flat_output", [False, True])
+def test_output_collision_rejected_before_computation(cframe, model, tmp_path, flat_output):
+    one = planning.exposure_from_file(cframe())
+    two = deepcopy(one)
+    two.version = "other-version"
+    with pytest.raises(ValueError, match="same output"):
+        planning.make_plan([one, two], model, output_dir=tmp_path / "out", flat_output=flat_output)
+
+
+def test_dry_run_uses_new_and_compatible_model_flags(cframe, model, tmp_path, monkeypatch):
+    path = cframe()
+    monkeypatch.setattr(cli, "apply_affinity", lambda _: None)
+    destination = tmp_path / "dry-output"
+    for flag in ("--ml-model-file", "--ensemble"):
+        result = RUNNER.invoke(cli.app, ["batch", str(path), flag, str(model["ensemble"]),
+            "--flat-output", "--output-dir", str(destination), "--cpus", "1", "--dry-run"])
+        assert result.exit_code == 0, result.output
+        assert str(destination / "lvmSFrame-skyml-block-00011017.fits") in result.output
+        assert "compute state in memory" in result.output
+    assert not destination.exists()
+
+
+@pytest.mark.parametrize("options", [dict(offset_count=6), dict(offset_roughness=float("nan")), dict(reference_prior=-1)])
+def test_scientific_settings_validated_early(cframe, model, tmp_path, options):
+    model.update(options)
+    item = planning.exposure_from_file(cframe())
+    with pytest.raises(ValueError):
+        planning.make_plan([item], model, output_dir=tmp_path / "output")
+
+
+def make_product(item):
+    shape = (2, 4)
+    hdus = [fits.PrimaryHDU(header=fits.Header(dict(SKYMETH="skyml-block")))]
+    for name in ("FLUX", "IVAR", "MASK", "LSF", "SKY"):
+        hdus.append(fits.ImageHDU(np.zeros(shape), name=name))
+    hdus.extend([fits.ImageHDU(np.arange(4.0), name="WAVE"),
+                 fits.BinTableHDU(Table(dict(fiberid=[1, 2])), name="SLITMAP"),
+                 fits.ImageHDU(np.ones((1, 1)), name="BLOCK_LSF_COEF"),
+                 fits.BinTableHDU(Table(dict(adopted=[True])), name="BLOCK_LSF_META")])
+    from skysub.sky_subtraction.product import SHARED_ORDER
+    present = {h.name for h in hdus}
+    for name in (*SHARED_ORDER, "BLOCK_SLIT_KNOTS", "BLOCK_WAVE_KNOTS", "SKY_FIBER_COEF"):
+        if name not in present and name not in {"GAIA_SOURCES", "FIT_LSF_HISTORY"}:
+            hdus.append(fits.ImageHDU(np.zeros(1), name=name))
+    payload = json.dumps(dict(cli_run=dict(fingerprint=item.fingerprint))).encode()
+    hdus.append(fits.ImageHDU(np.frombuffer(payload, dtype="u1"), name="SKYML_META"))
+    item.output.parent.mkdir(parents=True, exist_ok=True)
+    fits.HDUList(hdus).writeto(item.output, checksum=True)
+
+
+def test_verified_existing_product_and_changed_settings(cframe, model, tmp_path):
+    item = planning.exposure_from_file(cframe())
+    planning.make_plan([item], model, output_dir=tmp_path / "output", flat_output=True)
+    make_product(item)
+    with pytest.raises(FileExistsError):
+        planning.make_plan([item], model, output_dir=tmp_path / "output", flat_output=True)
+    fresh = planning.exposure_from_file(item.input_path)
+    planning.make_plan([fresh], model, output_dir=tmp_path / "output", flat_output=True, on_existing="skip")
+    assert fresh.status == "reused"
+    for changed in (dict(model,reference_prior=0.1),dict(model,fit_sky_fibers=True)):
+        with pytest.raises(ValueError, match="fingerprint"):
+            planning.make_plan([planning.exposure_from_file(item.input_path)], changed,
+                               output_dir=tmp_path / "output", flat_output=True, on_existing="skip")
+
+
+def test_overwrite_plan_recomputes_without_removing_previous_output(cframe, model, tmp_path):
+    source = cframe()
+    output = tmp_path / "out"
+    output.mkdir()
+    destination = output / "lvmSFrame-skyml-block-00011017.fits"
+    original = b"previous product, including an incompatible or incomplete FITS"
+    destination.write_bytes(original)
+    item = planning.exposure_from_file(source)
+    planning.make_plan([item], model, output_dir=output, flat_output=True, on_existing="overwrite")
+    assert item.status == "queued" and item.overwrite is True
+    assert item.record()["overwrite"] is True
+    assert destination.read_bytes() == original
+
+
+def test_batch_overwrite_reaches_worker_request(cframe, model, tmp_path, monkeypatch):
+    from skysub.sky_subtraction_block import batch as scheduler
+    output = tmp_path / "out"
+    output.mkdir()
+    destination = output / "lvmSFrame-skyml-block-00011017.fits"
+    destination.write_bytes(b"previous result")
+    monkeypatch.setattr(resources.os, "sched_getaffinity", lambda _: {0}, raising=False)
+    monkeypatch.setattr(cli, "apply_affinity", lambda _: None)
+    monkeypatch.setattr(cli, "check_runtime_dependencies", lambda: None)
+    captured = []
+    def run(entries, *args, **kwargs):
+        captured.extend(entry.record() for entry in entries)
+        return dict(state="complete", counts={}, run_dir="records")
+    monkeypatch.setattr(scheduler, "run_batch", run)
+    result = RUNNER.invoke(cli.app, ["batch", str(cframe()), *model_arguments(model),
+        "--output-dir", str(output), "--flat-output", "--on-existing", "overwrite"])
+    assert result.exit_code == 0, result.output
+    assert captured[0]["overwrite"] is True and captured[0]["status"] == "queued"
+    assert destination.read_bytes() == b"previous result"
+
+
+def test_cpu_budget_and_no_implicit_jobs(monkeypatch):
+    monkeypatch.setattr(resources.os, "sched_getaffinity", lambda _: set(range(20)))
+    allocation = resources.cpu_budget(processes=10, cpus=20)
+    assert allocation["jobs"] == 1
+    assert all(len(v) == 1 for v in allocation["subsets"])
+    parallel = resources.cpu_budget(processes=10, jobs=2, cpus=20)
+    assert all(len(v) == 2 for v in parallel["subsets"])
+    with pytest.raises(ValueError, match="Need"):
+        resources.cpu_budget(processes=10, jobs=2, cpus=10)
+
+
+def test_cpu_ids_ranges_duplicates_and_available_set(monkeypatch):
+    monkeypatch.setattr(resources.os, "sched_getaffinity", lambda _: {8, 9, 10, 11})
+    assert resources.cpu_budget(2, 2, 4, "8-11")["cpu_ids"] == [8, 9, 10, 11]
+    for bad in ("8,8", "0-3", "8-1000000000"):
+        with pytest.raises(ValueError):
+            resources.cpu_budget(1, 4, 4, bad)
+
+
+def test_single_aliases_forward_same_scientific_options(cframe, model, tmp_path, monkeypatch):
+    path = cframe()
+    calls = []
+    fake = SimpleNamespace(run=lambda input, **kwargs: calls.append((input, kwargs)) or kwargs["output"])
+    monkeypatch.setitem(sys.modules, "skysub.sky_subtraction_block.pipeline", fake)
+    monkeypatch.setattr(resources, "limit_numerics", lambda: None)
+    monkeypatch.setattr(resources, "runtime_resources", lambda: {})
+    monkeypatch.setattr(cli, "apply_affinity", lambda _: None)
+    for flag in ("--ml-model-file", "--ensemble"):
+        result = RUNNER.invoke(cli.app, ["single", str(path), flag, str(model["ensemble"]),
+                                        "--output", str(tmp_path / "lvmSFrame-skyml-block-00011017.fits")])
+        assert result.exit_code == 0, result.output
+    assert calls[0] == calls[1]
+    assert calls[0][1]["jobs"] == 8
+    assert calls[0][1]['fit_sky_fibers'] is False
+    result = RUNNER.invoke(cli.app, ['single',str(path),'--ml-model-file',str(model['ensemble']),
+                                    '--fit-sky-fibers','--output',str(tmp_path / 'lvmSFrame-skyml-block-00011017.fits')])
+    assert result.exit_code == 0, result.output
+    assert calls[-1][1]['fit_sky_fibers'] is True
+
+
+@pytest.mark.parametrize('individual',[False,True])
+def test_batch_forwards_sky_coefficient_mode(cframe,model,tmp_path,monkeypatch,individual):
+    captured={}
+    original=planning.make_plan
+    def capture(entries,options,**kwargs):
+        captured.update(options)
+        return original(entries,options,**kwargs)
+    monkeypatch.setattr(planning,'make_plan',capture)
+    monkeypatch.setattr(cli,'cpu_budget',lambda **kwargs:dict(processes=1,cpu_ids=[]))
+    monkeypatch.setattr(cli,'apply_affinity',lambda _:None)
+    args=['batch',str(cframe()),*model_arguments(model),'--output-dir',str(tmp_path/'out'),'--dry-run']
+    if individual:args.append('--fit-sky-fibers')
+    result=RUNNER.invoke(cli.app,args)
+    assert result.exit_code==0,result.output
+    assert captured['fit_sky_fibers'] is individual
+
+
+def test_explicit_and_adjacent_saved_state(cframe, model, tmp_path):
+    source = cframe()
+    root = tmp_path / "states"
+    root.mkdir()
+    saved = root / "lvmSFrame-skyml-preparation-00011017.fits"
+    payload = json.dumps(dict(input_sha256=planning.file_sha256(source))).encode()
+    with fits.open(source) as original:
+        hdus = [fits.PrimaryHDU(), original["WAVE"].copy(), original["SLITMAP"].copy()]
+    for name in ("MED_COEF", "MED_LABELS", "ML_COEF", "MED_LSF_COEF", "RENDER_META", "LSF_FIBERS"):
+        hdus.append(fits.ImageHDU(np.zeros(1), name=name))
+    hdus.append(fits.ImageHDU(np.frombuffer(payload, dtype="u1"), name="SKYML_META"))
+    fits.HDUList(hdus).writeto(saved)
+    item = planning.exposure_from_file(source)
+    item.output = root / "lvmSFrame-skyml-block-00011017.fits"
+    planning.prepare_exposure(item, dict(model, ensemble=None))
+    assert item.seed == saved and item.state_mode == "reuse adjacent saved state"
+    explicit = planning.exposure_from_file(source)
+    explicit.output = tmp_path / "other/lvmSFrame-skyml-block-00011017.fits"
+    planning.prepare_exposure(explicit, dict(model, ensemble=None), seed=saved)
+    assert explicit.state_mode == "reuse explicitly selected state"
+    with source.open("ab") as stream:
+        stream.write(b"changed")
+    with pytest.raises(ValueError, match="different CFrame"):
+        planning.prepare_exposure(explicit, model, seed=saved)
+
+
+def test_catalogue_identity_disagreement(catalogue, tmp_path, model):
+    root, _ = catalogue
+    entries, _ = planning.select_exposures(cframe_root=root, expnum=["11017"])
+    with fits.open(entries[0].input_path, mode="update") as h:
+        h[0].header["MJD"] = 60326
+    with pytest.raises(ValueError, match="identity disagree"):
+        planning.make_plan(entries, model, output_dir=tmp_path / "output")
+
+
+@pytest.mark.parametrize("policy,expected", [("continue", ["error", "complete", "complete"]),
+                                           ("stop", ["error", "not_started", "not_started"])])
+def test_batch_error_policies_and_records(cframe, model, tmp_path, monkeypatch, capsys, policy, expected):
+    from skysub.sky_subtraction_block import batch as scheduler
+
+    entries = [planning.exposure_from_file(cframe(v)) for v in (11017, 11018, 11019)]
+    for item in entries:
+        item.output = tmp_path / f"product-{item.expnum}.fits"
+    real_popen = subprocess.Popen
+    probe = """
+import json,sys,time
+from pathlib import Path
+request=json.loads(Path(sys.argv[1]).read_text())
+entry=request['exposure']
+time.sleep(.1)
+code=1 if entry['expnum']==11017 else 0
+if not code:
+    Path(entry['output']).touch()
+Path(request['result_path']).write_text(json.dumps(dict(
+    state='error' if code else 'complete', error='probe error' if code else '',
+    elapsed_seconds=.1)))
+raise SystemExit(code)
+"""
+    def launch(command, **kwargs):
+        return real_popen([sys.executable, "-c", probe, command[-1]], **kwargs)
+    monkeypatch.setattr(scheduler.subprocess, "Popen", launch)
+    monkeypatch.setattr(scheduler, "apply_affinity", lambda _: None)
+    budget = dict(processes=1, jobs=1, cpus=1, cpu_ids=[0], subsets=[[0]])
+    run_dir = tmp_path / "records"
+    result = scheduler.run_batch(entries, model, budget, output_dir=tmp_path,
+                                  run_dir=run_dir, on_error=policy, no_progress=True)
+    assert [v.status for v in entries] == expected
+    assert result["state"] == "complete_with_errors"
+    assert json.loads((run_dir / "status.json").read_text())["counts"]["error"] == 1
+    assert (run_dir / "plan.ecsv").is_file() and (run_dir / "results.ecsv").is_file()
+    terminal = capsys.readouterr().err
+    assert "11017 failed: probe error" in terminal
+    assert "CPUs=" not in terminal and "pid=" not in terminal
+    assert "Exposure 11017 started" not in terminal
+    detailed = (run_dir / "batch.log").read_text()
+    assert "CPUs=[0]" in detailed and "pid=" in detailed
+    assert str(entries[0].input_path) in detailed
+    assert str(entries[0].log) in detailed
+
+
+def test_batch_interrupt_terminates_owned_process(cframe, model, tmp_path, monkeypatch):
+    from skysub.sky_subtraction_block import batch as scheduler
+
+    entry = planning.exposure_from_file(cframe())
+    entry.output = tmp_path / "output.fits"
+    real_popen = subprocess.Popen
+    children = []
+    def launch(command, **kwargs):
+        process = real_popen([sys.executable, "-c", "import time;time.sleep(60)"], **kwargs)
+        children.append(process)
+        return process
+    original_sleep = scheduler.time.sleep
+    def interrupt(_):
+        monkeypatch.setattr(scheduler.time, "sleep", original_sleep)
+        raise KeyboardInterrupt
+    monkeypatch.setattr(scheduler.subprocess, "Popen", launch)
+    monkeypatch.setattr(scheduler, "apply_affinity", lambda _: None)
+    monkeypatch.setattr(scheduler.time, "sleep", interrupt)
+    budget = dict(processes=1, jobs=1, cpus=1, cpu_ids=[0], subsets=[[0]])
+    run_dir = tmp_path / "interrupted"
+    with pytest.raises(KeyboardInterrupt):
+        scheduler.run_batch([entry], model, budget, output_dir=tmp_path,
+                            run_dir=run_dir, no_progress=True)
+    assert all(p.poll() is not None for p in children)
+    assert json.loads((run_dir / "status.json").read_text())["state"] == "interrupted"
+
+def test_legacy_long_option_abbreviations_remain_compatible():
+    args = build_parser().parse_args(["lvmCFrame-00011017.fits", "--r", "0.25"])
+    assert args.reference_prior == 0.25
+
+
+def test_snapshot_saved_by_computation_can_be_resumed(cframe, model, tmp_path):
+    source = cframe()
+    item = planning.exposure_from_file(source)
+    planning.make_plan([item], model, output_dir=tmp_path / "out", flat_output=True)
+    # Create a same-input optional snapshot after the original compute plan.
+    item.output.parent.mkdir()
+    snapshot = item.output.parent / "lvmSFrame-skyml-preparation-00011017.fits"
+    with fits.open(source) as original:
+        hdus = [fits.PrimaryHDU(), original["WAVE"].copy(), original["SLITMAP"].copy()]
+    for name in ("MED_COEF", "MED_LABELS", "ML_COEF", "MED_LSF_COEF", "RENDER_META", "LSF_FIBERS"):
+        hdus.append(fits.ImageHDU(np.zeros(1), name=name))
+    payload = json.dumps(dict(input_sha256=item.input_sha256)).encode()
+    hdus.append(fits.ImageHDU(np.frombuffer(payload, dtype="u1"), name="SKYML_META"))
+    fits.HDUList(hdus).writeto(snapshot)
+    make_product(item)
+    with fits.open(item.output, mode="update") as product:
+        meta = dict(cli_run=dict(fingerprint=item.fingerprint, state_mode="compute state in memory"),
+                    preparation_sha256=planning.file_sha256(snapshot))
+        product["SKYML_META"].data = np.frombuffer(json.dumps(meta).encode(), dtype="u1")
+        for hdu in product:
+            hdu.add_checksum()
+    fresh = planning.exposure_from_file(source)
+    planning.make_plan([fresh], model, output_dir=item.output.parent, flat_output=True, on_existing="skip")
+    assert fresh.status == "reused"
+
+
+def test_checkout_launcher_help_outside_repository(tmp_path):
+    import os
+    root = Path(cli.__file__).resolve().parents[2]
+    env = os.environ.copy()
+    env["PYTHONPATH"] = os.pathsep.join(str(Path(v).resolve()) for v in env.get("PYTHONPATH", "").split(os.pathsep) if v)
+    result = subprocess.run([sys.executable, str(root / "skyml-block"), "--help"],
+                            cwd=tmp_path, env=env, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert "single" in result.stdout and "batch" in result.stdout
+
+def test_runtime_resource_check_observes_excess_threads(monkeypatch):
+    monkeypatch.setitem(sys.modules, "torch", SimpleNamespace(
+        get_num_threads=lambda: 1, get_num_interop_threads=lambda: 1))
+    monkeypatch.setitem(sys.modules, "threadpoolctl", SimpleNamespace(
+        threadpool_info=lambda: [dict(num_threads=2)]))
+    with pytest.raises(RuntimeError, match="exceeds one thread"):
+        resources.runtime_resources()
+
+
+@pytest.mark.parametrize("manifest_mode", [False, True])
+def test_explicit_missing_input_skip(cframe, model, tmp_path, manifest_mode):
+    source = cframe()
+    absent = tmp_path / "lvmCFrame-00011018.fits"
+    arguments = [str(source), str(absent)]
+    if manifest_mode:
+        manifest = tmp_path / "inputs.txt"
+        manifest.write_text(source.name + "\n" + absent.name + "\n")
+        arguments = ["--input-list", str(manifest)]
+    result = RUNNER.invoke(cli.app, ["batch", *arguments, *model_arguments(model),
+        "--missing-input", "skip", "--output-dir", str(tmp_path / "out"), "--dry-run"])
+    assert result.exit_code == 0, result.output
+    assert "skipped_input" in result.output and "queued" in result.output
+    with pytest.raises(FileNotFoundError):
+        planning.select_exposures(inputs=[source, absent])
+
+
+def test_default_output_avoids_launcher(cframe, model, monkeypatch):
+    from skysub.sky_subtraction_block import batch as scheduler
+    captured = {}
+    def run(entries, model, budget, **kwargs):
+        captured.update(kwargs)
+        return dict(state="complete", counts={}, run_dir="records")
+    monkeypatch.setattr(scheduler, "run_batch", run)
+    monkeypatch.setattr(cli, "apply_affinity", lambda _: None)
+    result = RUNNER.invoke(cli.app, ["batch", str(cframe()), *model_arguments(model)])
+    assert result.exit_code == 0, result.output
+    assert captured["output_dir"] == Path("skyml-block-output")
+
+
+@pytest.mark.parametrize("extension", ["ML_COEF", "LSF_COEF", "MED_LABELS", "BLOCK_WAVE_KNOTS"])
+def test_reuse_requires_reconstruction_extensions(cframe, model, tmp_path, extension):
+    item = planning.exposure_from_file(cframe())
+    planning.make_plan([item], model, output_dir=tmp_path / "out")
+    make_product(item)
+    with fits.open(item.output) as product:
+        reduced = fits.HDUList([h.copy() for h in product if h.name != extension])
+    reduced.writeto(item.output, overwrite=True, checksum=True)
+    with pytest.raises(ValueError, match="complete block product"):
+        planning.verify_product(item)
+
+
+def test_all_explicit_inputs_skipped_are_recorded(tmp_path, model, monkeypatch):
+    from skysub.sky_subtraction_block import batch as scheduler
+    path = tmp_path / 'lvmCFrame-00011018.fits'
+    entries, _ = planning.select_exposures(inputs=[path], missing_input='skip')
+    planning.make_plan(entries, model, output_dir=tmp_path / 'out', missing_input='skip')
+    monkeypatch.setattr(scheduler, 'apply_affinity', lambda _: None)
+    budget = dict(processes=1, jobs=1, cpus=1, cpu_ids=[0], subsets=[[0]])
+    result = scheduler.run_batch(entries, model, budget, output_dir=tmp_path / 'out',
+                                 no_progress=True)
+    assert result['state'] == 'complete'
+    assert result['counts'] == {'skipped_input': 1}
+    records = Table.read(Path(result['run_dir']) / 'results.ecsv')
+    assert str(records['input'][0]) == str(path)
+    assert entries[0].output is None and entries[0].mjd == -1
+
+
+@pytest.mark.parametrize("cpus,nproc,concurrent", [(1,1,1),(8,1,8),(8,2,4),(8,4,2),(7,2,3)])
+def test_automatic_batch_concurrency(monkeypatch, cpus, nproc, concurrent):
+    monkeypatch.setattr(resources.os, "sched_getaffinity", lambda _: set(range(16)))
+    budget = resources.cpu_budget(jobs=nproc, cpus=cpus)
+    assert budget["processes"] == concurrent
+    assert len(budget["subsets"]) == concurrent
+    assert all(len(ids) == nproc for ids in budget["subsets"])
+    assert len(set().union(*map(set, budget["subsets"]))) == concurrent * nproc
+
+
+def test_nproc_aliases():
+    assert build_parser().parse_args(["input", "--nproc", "2"]).jobs == 2
+    result = RUNNER.invoke(cli.app, ["batch", "--help"])
+    assert result.exit_code == 0
+    assert "--nproc" in result.output
+    assert "--processes" not in result.output
+
+
+def test_batch_nproc_controls_automatic_slots(cframe, model, tmp_path, monkeypatch):
+    from skysub.sky_subtraction_block import batch as scheduler
+    captured = {}
+    monkeypatch.setattr(resources.os, 'sched_getaffinity', lambda _: set(range(8)))
+    monkeypatch.setattr(cli, 'apply_affinity', lambda _: None)
+    def run(entries, options, budget, **kwargs):
+        captured.update(budget=budget, jobs=options['jobs'])
+        return dict(state='complete', counts={}, run_dir='records')
+    monkeypatch.setattr(scheduler, 'run_batch', run)
+    source = cframe()
+    for flag in ('--nproc', '--jobs'):
+        result = RUNNER.invoke(cli.app, ['batch', str(source), *model_arguments(model),
+            '--output-dir', str(tmp_path / 'out'), '--cpus', '8', flag, '2'])
+        assert result.exit_code == 0, result.output
+        assert captured['budget']['processes'] == 4
+        assert captured['jobs'] == 2
+
+
+def test_worker_dependencies_report_all_import_failures(monkeypatch):
+    import importlib
+    def unavailable(name):
+        raise ModuleNotFoundError(f"No module named '{name}'")
+    monkeypatch.setattr(importlib, "import_module", unavailable)
+    with pytest.raises(ValueError) as caught:
+        resources.check_runtime_dependencies()
+    message = str(caught.value)
+    assert "torch:" in message and "threadpoolctl:" in message
+    assert sys.executable in message and "requirements-cli.txt" in message
+
+
+def test_missing_worker_dependency_stops_before_batch(cframe, model, tmp_path, monkeypatch):
+    from skysub.sky_subtraction_block import batch as scheduler
+    monkeypatch.setattr(resources.os, "sched_getaffinity", lambda _: {0}, raising=False)
+    monkeypatch.setattr(cli, "apply_affinity", lambda _: None)
+    def unavailable():
+        raise ValueError("threadpoolctl unavailable")
+    monkeypatch.setattr(cli, "check_runtime_dependencies", unavailable)
+    monkeypatch.setattr(scheduler, "run_batch", lambda *a, **kw: pytest.fail("Must not start batch"))
+    result = RUNNER.invoke(cli.app, ["batch", str(cframe()), *model_arguments(model),
+        "--output-dir", str(tmp_path / "out")])
+    assert result.exit_code == 2, result.output
+    assert "threadpoolctl unavailable" in result.output
+    assert not (tmp_path / "out").exists()

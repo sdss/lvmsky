@@ -137,9 +137,16 @@ Robust fit weights are reconstructed from native CFrame IVAR, the stored pre-LSF
 | `BLOCK_LSF_COEF` | f8; 6 × 11 × 4 × 4 | 0.011 | Block × offset basis × wavelength basis × slit basis; rows follow `BLOCK_LSF_META`. |
 | `BLOCK_SLIT_KNOTS` | f8; 6 × 8 | 0.005 | Cubic slit knots over the spectrograph's full fiberid range. |
 | `BLOCK_WAVE_KNOTS` | f8; 6 × 8 | 0.005 | Wavelength knots the block was fitted on; R/Z `LSF_KNOTS` of every Science fiber equal these. |
-| `SKY_FIBER_COEF` | table; 106 | 0.321 | Selected Sky fibers: input_row, fiberid, spectrograph, telescope, frozen component vector (internal 1e14 scaling) and QP status. |
+| `SKY_FIBER_COEF` | table; 106 | 0.321 | Selected Sky fibers: input_row, fiberid, spectrograph, telescope, frozen component vector (internal 1e14 scaling). Status is `MedianCoefficients` for the default telescope-median coefficients, or the individual QP status with `--fit-sky-fibers`; the mode/source is recorded in `SKYML_META.block_settings`. |
 
 The block run computes its preparation in memory and writes it only with `--keep-preparation` (reusable with `--seed`; a supplied `--seed` is never modified). The product does not read it. `SKYML_META` adds `method`, `preparation` path/SHA256 (`in-memory` and null when not written), `block_settings`, `block_timing` and `block_code_sha256`. `SkyBlockReconstructor.global_state(fiberid)` evaluates the block surfaces at any fiber; `.sky_fiber(fiberid)` renders a selected Sky fiber's fit in memory.
+
+The single/batch CLI adds `SKYML_META.cli_run` with its scientific fingerprint,
+state-reuse mode and requested/observed CPU budget. Batch execution records its
+reproducible invocation and per-exposure resource state. `--cpus C` records the
+total CPU budget; `--nproc N` records workers per exposure. Batch concurrency is
+computed as `floor(C / N)` and recorded as `budget.processes`. This is JSON provenance;
+the shared extension layout and coefficient-based reconstruction stay the same.
 
 ## Storage boundary
 

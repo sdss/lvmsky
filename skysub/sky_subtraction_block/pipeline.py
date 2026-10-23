@@ -6,8 +6,6 @@ from pathlib import Path
 import json
 import logging
 import multiprocessing as mp
-import os
-import tempfile
 import time
 import ctypes
 import numpy as np
@@ -21,7 +19,7 @@ from skysub.sky_decomp.reliability import misfit
 import re
 from skysub.sky_subtraction.io import read_cframe
 from skysub.sky_subtraction.fiber_lsf import unfitted_qa
-from skysub.sky_subtraction.product import lsf_hdus,lvmsframe_layout,publish_product,set_prediction_reliability
+from skysub.sky_subtraction.product import lsf_hdus,lvmsframe_layout,publish,publish_product,set_prediction_reliability
 from skysub.sky_decomp import reliability as rel
 from skysub.sky_subtraction.reconstruction import SkyMLReconstructor
 from skysub.sky_subtraction.rendering import arm_sky,exposure_line_masks,fwhm_grid
@@ -34,6 +32,11 @@ _WORK=None
 
 def _fit_sky(index):
     w=_WORK; label=str(w['slit']['telescope'][index]).strip()
+    if not w['fit_sky_fibers']:
+        coef=np.array(w['renderer'].h['MED_COEF'].data[w['renderer'].labels.index(label)],copy=True)
+        return dict(input_row=int(index),fiberid=int(w['slit']['fiberid'][index]),
+            spectrograph=int(w['slit']['spectrographid'][index]),telescope=label,
+            coef=coef,status='MedianCoefficients',usable=True,reason='')
     model=w['renderer'].model(label); state=w['templates'][label]
     flux=w['flux'][index]*common.FACTOR; ivar=w['ivar'][index]/common.FACTOR**2
     mask=w['mask'][index].copy()
@@ -95,7 +98,7 @@ def _mapped(function,indices,jobs):
 
 
 def run(input_path, *, output=None, seed=None, ensemble=None, gaia_dir=None, jobs=8, slit_count=4, centered=False, keep_preparation=False,
-        offset_count=11, wave_count=4, offset_roughness=0., wave_roughness=0., slit_roughness=0., reference_prior=0.):
+        offset_count=11, wave_count=4, offset_roughness=0., wave_roughness=0., slit_roughness=0., reference_prior=0., fit_sky_fibers=False, execution_metadata=None, overwrite=False):
     global _WORK
     _keep_freed_memory()
     started=time.perf_counter(); input_path=Path(input_path).resolve()
@@ -107,7 +110,7 @@ def run(input_path, *, output=None, seed=None, ensemble=None, gaia_dir=None, job
         raise ValueError('Regularization strengths must be finite and nonnegative')
     if output==input_path or not output.name.startswith('lvmSFrame-skyml-block-'):
         raise ValueError('Use lvmSFrame-skyml-block-* to protect the existing methods and DRP products')
-    if output.exists():raise FileExistsError(output)
+    if output.exists() and not overwrite:raise FileExistsError(output)
     output.parent.mkdir(parents=True,exist_ok=True)
     prepared=None; seed_path=Path(seed).resolve() if seed else None
     if seed_path==output:raise ValueError('Seed and output must differ')
@@ -147,10 +150,11 @@ def run(input_path, *, output=None, seed=None, ensemble=None, gaia_dir=None, job
         skyids=set().union(*(selected[label] for label in common.SKY_ARMS if label not in failed))
         indices=np.flatnonzero(np.isin(slit['fiberid'],list(skyids)))
         matrices={label:component_matrices(r.model(label),templates[label]) for label in {str(slit['telescope'][i]).strip() for i in indices}}
-        _WORK=dict(renderer=r,slit=slit,flux=flux,ivar=ivar,mask=mask,templates=templates,matrices=matrices)
-        LOG.info('Decomposing %s selected Sky fibers with fixed median LSFs',len(indices))
+        _WORK=dict(renderer=r,slit=slit,flux=flux,ivar=ivar,mask=mask,templates=templates,matrices=matrices,fit_sky_fibers=fit_sky_fibers)
+        LOG.info('%s for %s selected Sky fibers',
+            'Fitting individual component coefficients' if fit_sky_fibers else 'Using telescope-median component coefficients',len(indices))
         block_started=time.perf_counter()
-        fiber_rows=list(_mapped(_fit_sky,indices,jobs)); blocks={}
+        fiber_rows=list(_mapped(_fit_sky,indices,jobs if fit_sky_fibers else 1)); blocks={}
         coefficient_seconds=time.perf_counter()-block_started
         block_templates={label:resize_state(state,offset_count,wave_count) for label,state in templates.items()}
         tensor_seconds=0.
@@ -243,7 +247,9 @@ def run(input_path, *, output=None, seed=None, ensemble=None, gaia_dir=None, job
             block_settings=dict(fitted_channels='RZ',blue_lsf='each Science fiber keeps its survey LSF from the preparation; B is not fitted',offset_basis=offset_count,wave_basis=wave_count,slit_basis=slit_count,slit_degree=3,coordinate='SLITMAP.fiberid within spectrograph',
                 wavelength_solution='input, unchanged',constraints='nonnegative, unit integral'+(', zero first moment' if centered else '; no centroid constraint')+' at all wavelength/slit control pairs',
                 regularization=dict(offset_roughness=offset_roughness,wave_roughness=wave_roughness,slit_roughness=slit_roughness,reference_prior=reference_prior,
-                    scaling='mean diagonal of native-IVAR data Hessian; coefficient second differences; prior target: projected Science median LSF'),fiber_coefficients='individual full-component QP, fixed telescope-median LSF and O2 temperature',
+                    scaling='mean diagonal of native-IVAR data Hessian; coefficient second differences; prior target: projected Science median LSF'),
+                fit_sky_fibers=fit_sky_fibers,
+                fiber_coefficients='individual full-component QP, fixed telescope-median LSF and O2 temperature' if fit_sky_fibers else 'fixed telescope-median component coefficients; no individual Sky-fiber fit',
                 fit_weights='native observed IVAR and input/protected-line masks; 5 A trimmed channel edges',
                 science_lsf='R/Z from supported SkyE/SkyW blocks; unsupported entire blocks use the projected Science-median reference',
                 coverage_policy='channel-valid fibers only; >=2*slit_basis distinct positions; full slit rank and condition <=1000; '
@@ -253,13 +259,13 @@ def run(input_path, *, output=None, seed=None, ensemble=None, gaia_dir=None, job
                 'FLUX is a residual of the fibers that build the LSF and the median, not an independent test'),
             block_code_sha256={p.name:common.sha256(p) for p in Path(__file__).parent.glob('*.py')},
             elapsed_seconds=time.perf_counter()-started)
+        if execution_metadata is not None:provenance['cli_run']=deepcopy(execution_metadata)
         product.append(fits.ImageHDU(np.frombuffer(json.dumps(provenance,default=common._json).encode(),dtype='u1'),name='SKYML_META'))
         if 'reliability' in provenance.get('prediction_diagnostics',{}):
             set_prediction_reliability(product[0].header,int(np.asarray(provenance['prediction_diagnostics']['reliability']).ravel()[0]))
         product[0].header['SKYMETH']='skyml-block'; product[0].header['LSFCENT']=centered; product[0].header['BLOCKCH']='RZ'
-        fd,temporary=tempfile.mkstemp(prefix='.skyblock-',suffix='.fits',dir=output.parent);os.close(fd)
         try:
-            lvmsframe_layout(product,output,input_path).writeto(temporary,overwrite=True,checksum=True);os.chmod(temporary,0o644);os.link(temporary,output)
+            publish(lvmsframe_layout(product,output,input_path),output,0o644,overwrite=overwrite)
         finally:
-            os.unlink(temporary);product.close();_WORK=None
+            product.close();_WORK=None
     return output

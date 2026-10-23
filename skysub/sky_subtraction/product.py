@@ -228,17 +228,20 @@ def _model_hdus(inputs, fiberids):
     return hdus
 
 
-def publish(product, output, mode):
-    """Write beside ``output`` and hard-link: atomic, and refuses a destination created meanwhile."""
+def publish(product, output, mode, *, overwrite=False):
+    """Write beside the output, then atomically publish; replace only when explicitly requested."""
     output = Path(output)
     fd, temporary = tempfile.mkstemp(prefix='.skyml-', suffix='.fits', dir=output.parent)
     os.close(fd)
     try:
         product.writeto(temporary, overwrite=True, checksum=True)
         os.chmod(temporary, mode)
-        os.link(temporary, output)
+        if overwrite:
+            os.replace(temporary, output)
+        else:
+            os.link(temporary, output)
     finally:
-        os.unlink(temporary)
+        Path(temporary).unlink(missing_ok=True)
 
 
 def build_product(input_path, inputs, provenance):

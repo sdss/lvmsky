@@ -1,0 +1,6 @@
+#!/usr/bin/env python3
+"""Run the block sky-subtraction CLI from the repository checkout."""
+from skysub.sky_subtraction_block.cli import main
+
+if __name__ == "__main__":
+    main()

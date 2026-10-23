@@ -1872,6 +1872,7 @@ class SkyDecomp:
                 b_con = np.zeros(constrained_local.size, dtype=np.float64)
                 cones = [clarabel.NonnegativeConeT(constrained_local.size)]
             settings = clarabel.DefaultSettings()
+            settings.max_threads = 1
             settings.verbose = False
 
             t_qp_local = time.perf_counter()
@@ -2943,6 +2944,7 @@ class SkyDecomp:
             cones = [clarabel.ZeroConeT(1), clarabel.NonnegativeConeT(LSF_KERNEL_SIZE)]
 
             settings = clarabel.DefaultSettings()
+            settings.max_threads = 1
             settings.verbose = False
 
             t0 = time.perf_counter()

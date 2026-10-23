@@ -222,3 +222,53 @@ def test_oh_coefficient_correction_equals_template_correction():
     expected = sum((parameters[name] - 1) * template for name, template in templates.items())
     scale = np.max(np.abs(expected))
     np.testing.assert_allclose(actual, expected, rtol=1e-9, atol=1e-12 * scale)
+
+
+def test_explicit_overwrite_replaces_only_after_successful_write(tmp_path):
+    from skysub.sky_subtraction.product import publish
+    output = tmp_path / "result.fits"
+    original = b"previous result"
+    output.write_bytes(original)
+
+    class NewProduct:
+        def writeto(self, path, **kwargs):
+            assert output.read_bytes() == original
+            fits.HDUList([fits.PrimaryHDU(np.arange(3.0))]).writeto(path, **kwargs)
+            assert output.read_bytes() == original
+
+    publish(NewProduct(), output, 0o644, overwrite=True)
+    with fits.open(output) as hdus:
+        np.testing.assert_array_equal(hdus[0].data, np.arange(3.0))
+        assert hdus[0].verify_checksum() == 1
+    assert not list(tmp_path.glob(".skyml-*.fits"))
+
+
+def test_failed_overwrite_retains_previous_output_and_cleans_temporary(tmp_path):
+    from skysub.sky_subtraction.product import publish
+    output = tmp_path / "result.fits"
+    output.write_bytes(b"previous result")
+
+    class BrokenProduct:
+        def writeto(self, path, **kwargs):
+            Path(path).write_bytes(b"partial replacement")
+            raise OSError("Simulated write failure")
+
+    with pytest.raises(OSError, match="Simulated"):
+        publish(BrokenProduct(), output, 0o644, overwrite=True)
+    assert output.read_bytes() == b"previous result"
+    assert not list(tmp_path.glob(".skyml-*.fits"))
+
+
+def test_default_publication_refuses_a_destination_created_during_write(tmp_path):
+    from skysub.sky_subtraction.product import publish
+    output = tmp_path / "result.fits"
+
+    class RacingProduct:
+        def writeto(self, path, **kwargs):
+            Path(path).write_bytes(b"new result")
+            output.write_bytes(b"other writer")
+
+    with pytest.raises(FileExistsError):
+        publish(RacingProduct(), output, 0o644)
+    assert output.read_bytes() == b"other writer"
+    assert not list(tmp_path.glob(".skyml-*.fits"))
