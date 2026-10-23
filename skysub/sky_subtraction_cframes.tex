@@ -108,82 +108,103 @@ quarter of its flux at the median at 260\,km\,s$^{-1}$.
 \subsection{Results}
 \label{sec:cframe-results}
 
-Figure~\ref{fig:cframe} compares, for one exposure with the Moon up, the
-sky subtraction of version 1.3.2 of the DRP with ours. We measure both on the
-median science spectrum, outside the science-line windows, in percent of the
-local sky. After our subtraction the stars of the field remain as horizontal
-bands and its nebular emission as vertical lines, and faint sky residuals
-remain only among the strongest OH lines beyond 9300\,\AA.
+Figure~\ref{fig:cframe} compares the sky subtraction of version 1.3.2 of the
+DRP with ours for one exposure taken with the Moon up (exposure 12820; the
+Moon at $30^\circ$ altitude, illumination 0.83, $62^\circ$ from the field).
+The frame before subtraction shows what must be removed: sky lines in every
+fiber, the O$_2$ bands, the sky continuum and the stars of the field as bright
+horizontal bands. After either subtraction the stars remain, as they should,
+and the nebular emission appears as vertical lines at
+[O\,\textsc{ii}]\,3727 and H$\alpha$. The DRP frame also holds sky-line
+residuals of both signs and a continuum that is negative across the whole
+range; ours has both at much lower levels. We measure the differences on the
+median science spectrum, outside the science-line windows and the sky lines,
+in percent of the sky continuum of our frame, and on the sky-line pixels in
+percent of the line flux. The 47 of 1801 fibers masked in every pixel of any
+of the three frames are neither shown nor counted.
 
-The DRP over-subtracts the continuum. Its median science spectrum lies 5.0
-to 6.4\% of the sky below zero at all wavelengths, which no field can
-produce. Ours lies between $+0.3\%$ at 3600--4300\,\AA{} and $+4.6\%$ in
-the A band, rising to the red, as the starlight of a field at
-$b=-13^\circ$ should. In the blue the solar pattern
-(Section~\ref{sec:armcorr}) is removed: the RMS after subtracting a
-15\,\AA{} running median falls from 1.5 to 1.0\% at 3600--4300\,\AA{} and
-from 1.1 to 0.7\% at 4300--5000\,\AA. Toward the red the gain grows, to
-5.8 against 1.5\% at 7720--8900\,\AA{} and 4.3 against 2.4\% in the A band.
-The sky lines are removed more completely. On the sky-line pixels the
-absolute residual of the median is 3.1, 3.4 and 2.6\% of the line flux in
-the DRP frame at 5800--7580, 7580--8900 and 8900--9800\,\AA, and 1.5, 0.8
-and 1.2\% in ours; in single fibers beyond 7580\,\AA{} it is 5.3 against
-3.4\%. The DRP leaves $-4.9\%$ of [O\,\textsc{i}]\,5577 and removes
-[O\,\textsc{i}]\,6300 and 6364 twice, leaving $-105$ and $-110\%$ of their
-flux; we leave $-0.6$, $-6$ and $-10\%$.
+\paragraph{Continuum color.} The DRP over-subtracts the continuum. Its median
+science spectrum lies 6 to 10\% of the sky below zero at all wavelengths
+($-9.7\%$ at 3600--4300\,\AA, $-10.3\%$ at 6960--7580\,\AA{} and $-6.3\%$ at
+8900--9800\,\AA), which no field can produce, since the stars and the diffuse
+light of the field add light. Ours lies at $+2.5\%$ at 3600--4300\,\AA{} and
+rises smoothly to $+11\%$ at 8900--9800\,\AA, as the starlight of a field
+should. The two subtractions thus differ in color, not only in scale: the sky
+removed by the DRP exceeds ours by 12\% of the sky at 3600--4300\,\AA, 15\% at
+5000--5800\,\AA{} and 17--19\% at 6960--9800\,\AA. The sky fields lie several
+degrees or more from the science field (Section~\ref{sec:problem}), and the
+moonlight and the zodiacal light, which have different colors, differ in
+strength among the three pointings. The transfer predicts the two components
+separately, from the sky fields to the science field, through the viewing
+geometry (Section~\ref{sec:ml}). Subtracting a measured sky spectrum directly
+cannot, and a wrong mix of the two shows up as a wrong color.
 
-In three frames
-(Table~\ref{tab:cframes}) the full-band correction lowers the residual of
-the sky by factors of 1.3 to 5 in the red and $z$, most at the O$_2$ bands
-and with the Moon bright. It worsens the A band in one frame, whose west sky
-median holds a single Gaia-clean fiber. Two residuals remain on the
-full-Moon frame. The median continuum after subtraction falls from $-0.3$ to
-$-1.1\%$ of the sky at 6960--7580\,\AA, and since the median of the science
-fibers includes the field's own light, the sky is over-subtracted by at
-least that much. The residual continuum also differs by up to 2.4\% of the
-sky between the three spectrographs, each of which sees one third of the
-IFU, while the sky fibers of every spectrograph agree with their medians to
-within 0.8\%. A gradient of the moonlight across the half-degree field,
-which one prediction at its center cannot follow, would produce such a
-pattern, but we have not established the cause.
+\paragraph{Sky lines.} We sum the absolute residual of the median science
+spectrum, after removing its 50\,\AA{} running median, over the sky-line pixels
+and divide by the summed flux of the lines. The residual is 15.7, 9.3 and
+5.8\% of the line flux in the DRP frame at 5800--7580, 7580--8900 and
+8900--9800\,\AA, and 3.8, 1.4 and 1.6\% in ours. In single fibers beyond
+7580\,\AA{} the median residual is 11.1 and 7.8\% against 5.1 and 4.7\%; the
+photon noise of one fiber, which no model removes, is the larger part of ours.
+The atomic lines agree: the DRP frame retains 21, 32 and 32\% of
+[O\,\textsc{i}]\,5577, 6300 and 6364, ours 0.9, 1.3 and $-0.6\%$. We render
+the lines from the fitted OH families, scaled on the science spectrum, with the
+LSF of each fiber (Sections~\ref{sec:linescale} and~\ref{sec:perfiber}).
 
-\begin{deluxetable}{lccc}
-\tablecaption{High-frequency residual of the median science spectrum, in
-percent of the sky continuum, with the sky-arm correction below 5000\,\AA{}
-/ over the full band.\label{tab:cframes}}
-\tablehead{\colhead{} & \colhead{12619} & \colhead{13020} &
-\colhead{14168}}
-\startdata
-$h_{\rm moon}$, illumination & $4^\circ$, 0.44 & $46^\circ$, 1.00 &
-$-55^\circ$, 0.11 \\
-5800--6850\,\AA & 3.4 / 2.4 & 2.3 / 0.5 & 3.8 / 2.3 \\
-O$_2$ B band & 8.9 / 4.2 & 2.4 / 0.6 & 11.5 / 4.0 \\
-6960--7580\,\AA & 11.5 / 5.0 & 3.1 / 0.9 & 16.3 / 4.9 \\
-O$_2$ A band & 6.5 / 9.4 & 3.8 / 1.5 & 8.7 / 5.1 \\
-7720--8900\,\AA & 9.0 / 6.8 & 2.5 / 1.5 & 10.5 / 6.5 \\
-\enddata
-\tablecomments{RMS after subtracting a 15\,\AA{} running median, outside the
-science-line windows; B band 6855--6960\,\AA, A band 7585--7720\,\AA.}
-\end{deluxetable}
+\paragraph{Noise.} A subtraction can remove the sky and still add noise. We
+compare the scatter of the frames with the photon noise of the unsubtracted
+frame, $\sigma_{\rm IVAR}=1/\sqrt{\rm IVAR}$ of the \texttt{lvmCFrame}, which
+does not include the uncertainty of the sky model; a ratio of 1 means that the
+residual has the noise of the data alone. We use 10 science fibers of low
+continuum (ranked by median flux, from the 40th percentile up) in each of 634
+exposures of 900\,s taken between MJD 60355 and 60402. At each wavelength we
+take the negative-side $1\sigma$ of the pixel values, the median minus the
+16th percentile, because the positive side carries the faint continuum of the
+fibers, and divide it by $\sigma_{\rm IVAR}$. Over the continuum of the windows
+at [O\,\textsc{ii}]\,3727, [O\,\textsc{iii}]\,5007, H$\alpha$ and
+[S\,\textsc{iii}]\,9069, outside the science lines and the sky lines, the
+ratio is 1.24, 1.34, 1.43 and 1.38 for ours and 1.39, 1.82, 1.84 and 1.72 for
+the DRP; on the OH lines near 8900\,\AA{} it is 1.47 against 2.11. The DRP
+residuals thus exceed the photon noise by up to a factor of 2.1, ours by at
+most 1.5.
+
+The residual noise also averages down better. In 6600--6660\,\AA, after
+removing the mean of each fiber in the window, the rms of the mean of $N$
+fibers drawn at random from all 6340 spectra follows $N^{-1/2}$ to within
+20\% up to $N=50$ in both subtractions; for one fiber it is $0.103\times10^{-14}$
+in ours and $0.109\times10^{-14}$\,erg\,s$^{-1}$\,cm$^{-2}$\,\AA$^{-1}$ in the
+DRP. At $N=1000$ it lies a factor of 1.5 above $N^{-1/2}$ in ours and 2.0 in
+the DRP, and at $N=5000$ a factor of 2.4 and 3.9, so a component common to the
+fibers survives the average, 1.7 times larger in the DRP at $N=5000$. Within
+one exposure the excess appears sooner. For the 1792 usable science fibers of
+exposure 47477 the rms stays within 15\% of $N^{-1/2}$ up to $N=30$ in ours
+and $N=10$ in the DRP, and lies a factor of 3.8 and 6.5 above it at $N=1500$.
+Stacking many fibers of one frame, as for a diffuse source, is thus limited by
+the residuals that its fibers share and not by photon noise, and our
+subtraction lowers that limit by about 40\%.
 
 \begin{figure*}
 \centering
-\includegraphics[width=\textwidth]{figures/cframe_before_after_12781.pdf}
-\caption{The science fibers of exposure 12781 (Moon at $31^\circ$ altitude,
-illumination 0.74, $74^\circ$ from the field) before sky subtraction (top),
+\includegraphics[width=\textwidth]{figures/cframe_before_after_12820.pdf}
+\caption{The science fibers of exposure 12820 (Moon at $30^\circ$ altitude,
+illumination 0.83, $62^\circ$ from the field) before sky subtraction (top),
 after the sky subtraction of DRP version 1.3.2 (middle) and after ours
 (bottom). In each block, the first row shows every second fiber in four
 400\,\AA{} windows, at [O\,\textsc{ii}]\,3727, H$\alpha$, the O$_2$ A band
 and the OH lines around [S\,\textsc{iii}]\,9069 (marked by bars above the
 second row); the second row the 200 fibers at the center of the slit over
 the full range; the third the median science spectrum. Fibers are in order
-along the slit, and horizontal lines separate the three spectrographs; gray
-marks pixels and fibers masked in any of the three frames. The top block
+along the slit, and horizontal lines separate the three spectrographs. The 47
+fibers that are masked in every pixel of any of the three frames are left
+out, and masked pixels are interpolated over for display only. The top block
 uses a logarithmic scale; the two sky-subtracted blocks share one
-zero-centered asinh scale, and their median spectra one asinh axis. Flux in
+zero-centered asinh scale, and their median spectra one asinh axis; the red
+band there is $\pm1\sigma$ of a single fiber, the median over the science
+fibers of the error in the frame. Flux in
 $10^{-14}$\,erg\,s$^{-1}$\,cm$^{-2}$\,\AA$^{-1}$. The DRP frame is
-negative across the continuum, and its sky lines leave residuals, most
-clearly at [O\,\textsc{i}]\,6300 and in $z$; ours leaves the stars of the
-field as horizontal bands and its nebular emission as vertical lines.}
+negative across the continuum, with a color that differs from ours, and its
+sky lines leave residuals, most clearly at [O\,\textsc{i}]\,6300 and in $z$;
+ours leaves the stars of the field as horizontal bands and its nebular
+emission as vertical lines.}
 \label{fig:cframe}
 \end{figure*}

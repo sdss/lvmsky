@@ -4,9 +4,9 @@
 LVM \citep{Drory2024} observes extended, low-surface-brightness emission from
 the Milky Way and the Magellanic Clouds, and for such targets the night sky
 is a first-order contaminant. Alongside each science exposure, two dedicated
-sky telescopes observe blank fields a few degrees away. On that baseline the
-sky is not uniform. Scattered moonlight has strong angular structure, set by
-the scattering phase functions of molecules and aerosols; the zodiacal light
+sky telescopes observe blank fields several degrees or more away. On that
+baseline the sky is not uniform. Scattered moonlight has strong angular
+structure, set by the scattering phase functions of molecules and aerosols; the zodiacal light
 changes by tens of percent with ecliptic latitude and solar elongation
 across the pointings of one night; and mesospheric gravity waves modulate the
 OH airglow on scales of tens of arcminutes. The three lines of sight also
@@ -14,6 +14,33 @@ have different zenith angles, so each crosses the emitting layers and the
 atmosphere along a different slant path. Subtracting either sky spectrum
 directly leaves systematic residuals of one to ten percent of the sky, enough
 to bury the diffuse emission the survey is after.
+
+LVM has four 16.1\,cm siderostat-fed telescopes on one platform. Sci feeds the
+science integral-field unit (IFU), SkyE and SkyW feed two small sky IFUs, and
+Spec observes spectrophotometric standard stars; SkyE and SkyW are named for
+their place on the platform, not for where they point. The IFUs are
+hexagonal arrays of circular spaxels $35.3''$ across at a $37''$ pitch, each
+with its own fiber: 1801 for the science IFU, which covers $0.165$\,deg$^2$,
+59 and 60 for the sky IFUs, and 24 for the standards. The 1944 fibers are
+sorted into three pseudo-slits of 648 fibers, one per spectrograph, in blocks
+of 36 whose first and last fibers are sky fibers, which samples the sky along
+the whole slit. Each spectrograph covers $3600$--$9800$\,\AA{} in three
+channels ($b$, $r$, $z$) at resolving powers of about 2900, 4700 and 4900.
+
+A science observation is a single 900\,s exposure of a tile, or nine dithered
+exposures for the Magellanic Clouds and nearby galaxies; Galactic tiles are
+observed at any lunar phase if they are more than $60^\circ$ from the Moon.
+During the exposure SkyE and SkyW observe two sky fields that the scheduler
+selects for the tile and the time, and Spec observes 12 standards in turn. One
+field is the nearest ``WHAM Darkest'' field, a region of extremely faint
+H$\alpha$ ($<2.8\times10^{-18}$\,erg\,s$^{-1}$\,cm$^{-2}$\,arcsec$^{-2}$ in the
+Wisconsin H$\alpha$ Mapper) at Galactic latitude $|b|>30^\circ$, and is often
+far from the tile. The other is the nearest of 768 ``Gridded'' fields, one per
+element of a HEALPix tessellation with a mean separation of $7.3^\circ$, which
+are nearer but less clean. The two fields are assigned to SkyE and SkyW at
+random. Every science spectrum thus comes with two simultaneous sky spectra
+from lines of sight at different angular distances, airmasses and angles from
+the Moon, and neither field is entirely free of Galactic emission.
 
 We therefore replace direct subtraction by a prediction. We first decompose
 each spectrum into the contributions of physically distinct emitters

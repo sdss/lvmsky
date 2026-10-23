@@ -25,7 +25,10 @@ mismatches at a cost in observing efficiency \citep{Glazebrook2001}.
 Spectral sampling matters as well: \citet{Kelson2003} used the subpixel
 sampling that spectral curvature provides to fit B-spline sky models on the
 original detector grid, before rectification introduces interpolation
-errors. Modern slit-reduction software such as \texttt{PypeIt} builds
+errors.
+For extended, low-surface-brightness targets, variations of the instrumental line-spread function (LSF) along the slit or across the IFU field of view can become particularly important.
+\citet{Katkov2011} developed a Fourier-space reconstruction technique that explicitly accounts for such LSF variations, improving sky subtraction in long-slit observations of galaxy outskirts.
+Modern slit-reduction software such as \texttt{PypeIt} builds
 sophisticated background modelling into the reduction workflow
 \citep{Prochaska2020}.
 
@@ -69,7 +72,7 @@ Integral-field unit (IFU) spectroscopy extends these requirements to
 spatially resolved emission from sources that may fill the science field,
 which is why the MaNGA pipeline \citep{Law2016} and the SAMI reductions
 \citep{Sharp2010,Sharp2015} use dedicated sky IFUs. MaNGA fits B-spline sky
-models with adjustments for the background normalisation and for
+models with adjustments for the background normalization and for
 line-profile variations along the spectrograph slit, and reaches nearly
 Poisson-limited subtraction shortward of about $8500\,\mathrm{\AA}$ in the
 data examined \citep{Law2016}. SAMI combines 26 throughput-calibrated sky
@@ -92,25 +95,25 @@ components must therefore preserve astronomical features, particularly when
 those features recur across many spatial elements.
 
 Physical constraints can also reduce the freedom a sky model needs. In
-near-infrared spectroscopy, \citet{Davies2007} modelled variations among
+near-infrared spectroscopy, \citet{Davies2007} modeled variations among
 groups of OH lines and small wavelength shifts, and \texttt{skycorr} extends
 physically motivated line-group scaling across optical and near-infrared
 spectra, fitting the lines separately from the continuum \citep{Noll2014}.
 More recently, PALACE combines spectroscopic data with extensive Paranal
 observations to model airglow lines, unresolved continuum components and
 their climatological variability \citep{Noll2025}. Airglow intensities vary
-on several timescales, so typical behaviour and a particular exposure can
+on several timescales, so typical behavior and a particular exposure can
 differ considerably. Such predictions can inform a fit to one exposure, but
 they still have to be adapted to the instantaneous sky and instrumental
 response, and other background components, such as scattered moonlight, need
 a treatment of their own.
 
 Recent data-driven methods complement these physical models.
-\citet{Kolganov2025} used non-negative matrix factorisation to model
+\citet{Kolganov2025} used non-negative matrix factorization to model
 two-dimensional optical sky spectra, including short-slit observations that
 the source fills, without separate offset-sky exposures. In the
 near-infrared, \citet{Dauphin2024} combined PCA reconstruction and
-Gaussian-process analysis to characterise OH variability and moonlight, with
+Gaussian-process analysis to characterize OH variability and moonlight, with
 implications for observing cadence and sky modelling. These developments
 point toward combining instrumental forward models, physical sky components
 and learned spectral or temporal correlations. Success, in the end, means
