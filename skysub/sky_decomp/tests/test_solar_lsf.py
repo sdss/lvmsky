@@ -343,8 +343,9 @@ def test_integration_smoke_fits_one_spectrum(tmp_path, monkeypatch):
     source_coefficients={k:v.copy() for k,v in state.coefficients.items()}
     def forbidden_lsf_fit(*args,**kwargs):
         raise AssertionError('Fixed-LSF decomposition must never optimize LSF')
-    monkeypatch.setattr(model,'_fit_lsf_channels',forbidden_lsf_fit)
-    transferred=model.fit(np.asarray(data['flux'])*1.07,np.asarray(data['ivar']),fixed_lsf_state=state)
+    with monkeypatch.context() as fixed_patch:
+        fixed_patch.setattr(model,'_fit_lsf_channels',forbidden_lsf_fit)
+        transferred=model.fit(np.asarray(data['flux'])*1.07,np.asarray(data['ivar']),fixed_lsf_state=state)
     assert transferred.fit_status in model._SOLVED
     assert 'lsf_optimization_steps=0' in transferred.fit_summary
     assert all('lsf_status' not in m or 'fixed_lsf_lines' in m['stage'] for m in model.stage_metrics)
@@ -353,7 +354,6 @@ def test_integration_smoke_fits_one_spectrum(tmp_path, monkeypatch):
         np.testing.assert_array_equal(state.coefficients[channel],source_coefficients[channel])
     assert not np.array_equal(transferred.coef,result.coef)
     # --blue-lsf reference: B held at a (different, still convex) reference, r and z refitted.
-    del model._fit_lsf_channels
     reference = load_lsf_surface_state(output, 0)
     central = np.zeros_like(reference.coefficients["B"])
     central[central.shape[0] // 2] = 1.0

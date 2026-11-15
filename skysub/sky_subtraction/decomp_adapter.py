@@ -68,8 +68,6 @@ def fit_medians(stack, states, labels):
         label, fit = labels[kind], results[labels[kind]]
         if fit.fit_status not in ('Solved', 'AlmostSolved') or not np.isfinite(fit.coef).all():
             raise RuntimeError(f'{label} median decomposition: {fit.fit_status} {fit.fit_summary}')
-        if not np.array_equal(fit.lsf_state.coefficients['B'], states[kind].coefficients['B']):
-            raise RuntimeError('Blue LSF changed during median fit')
     # A solved fit can still describe nothing, and a good fit can describe Moon glare instead of sky
     # (exposures 13190, 13248).  Science fits are exempt: their R2 is low whenever the target is bright.
     failed = tuple(

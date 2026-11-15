@@ -225,7 +225,7 @@ def test_public_callable_signatures():
         "(self, *args, config=None, spline_config=None, **kwargs)"
     )
     assert _signature_without_annotations(iterative.SkyDecompLSFSurfaceIterative.fit) == (
-        "(self, flux, ivar, *, verbose=False)"
+        "(self, flux, ivar, *, verbose=False, fixed_lsf_state=None)"
     )
 
 
@@ -377,6 +377,7 @@ def test_batch_run_restores_row_order_and_writes_three_outputs(monkeypatch, tmp_
         output_dir=tmp_path,
         chunk_size=2,
         max_in_flight=2,
+        blue_lsf="solar",
     )
 
     # Every row here comes back with no reliability columns (the stub future

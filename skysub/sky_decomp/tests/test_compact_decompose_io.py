@@ -62,7 +62,10 @@ def _result():
 def test_compact_cache_preserves_rows_and_marks_failures(tmp_path, monkeypatch):
     monkeypatch.setattr(parallel, "_WORKER_COMPACT_CACHE_DIR", str(tmp_path / "cache"))
     monkeypatch.setattr(parallel, "_WORKER_RUN_FINGERPRINT", "run")
-    parallel._save_compact_cache("sci", 0, result=_result())
+    result = _result()
+    for ch in "BRZ":
+        result.lsf_state.metrics[ch]["reference_n_fibers"] = 7
+    parallel._save_compact_cache("sci", 0, result=result)
     try:
         raise ValueError("invalid PWV")
     except ValueError as error:
@@ -85,7 +88,11 @@ def test_compact_cache_preserves_rows_and_marks_failures(tmp_path, monkeypatch):
         np.testing.assert_allclose(hdul["COEF"].data["OH_000"], [1.0, np.nan])
         assert hdul["META"].data["input_valid"].tolist() == [True, False]
         assert "invalid PWV" in hdul["META"].data["error_message"][1]
+        missing = hdul["LSF_META"].data["spectrum_index"] == 1
+        assert np.all(hdul["LSF_META"].data["reference_n_fibers"][missing] == -1)
 
-    assert load_lsf_surface_state(output, 0).completed_cycles == 5
+    state = load_lsf_surface_state(output, 0)
+    assert state.completed_cycles == 5
+    assert state.metrics["B"]["reference_n_fibers"] == 7
     with pytest.raises(ValueError, match="No fitted LSF state"):
         load_lsf_surface_state(output, 1)

@@ -92,6 +92,14 @@ products without this column using the full stored offset axis. The existing
 offset/wavelength/slit roughness and median-profile prior strengths, with their
 Hessian scaling. Median and initial states retain their original bases.
 
+LSF metadata tables now include `reference_n_fibers`: the number of measured
+survey profiles contributing to that channel's initial reference mean, or -1
+when unavailable. This includes `MED_LSF_META` for median fits. The optional
+column is preserved on read; older products without it remain readable. Batch
+reference headers also identify CSV versus legacy FITS, the reference/manifest
+SHA256, the equal-weight averaging convention, and use of `FIBER_ROLE`.
+
+
 ```python
 from skysub.sky_subtraction.reconstruction import SkyMLReconstructor
 

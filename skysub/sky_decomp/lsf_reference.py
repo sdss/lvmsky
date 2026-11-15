@@ -19,6 +19,50 @@ from .lsf_surface_iterative import LSFSurfaceState, _wave_fingerprint
 from .lsf_spline2d import LSF_SPLINE2D_REPRESENTATION, evaluate_bspline_basis
 from .result_io import STATE_CONFIG_COLUMNS, _text_value
 
+BUNDLED_CALIBRATION = Path(__file__).resolve().parent / "data/lsf"
+
+
+def survey_calibration_manifest(directory=BUNDLED_CALIBRATION):
+    """Read and validate the current CSV bundle, including its file checksums."""
+    directory = Path(directory).resolve()
+    digest = hashlib.sha256((directory / "manifest.json").read_bytes()).hexdigest()
+    # Validate again at each run boundary even when this process has used the bundle before.
+    _survey_ascii_tables.cache_clear()
+    return _survey_ascii_tables(str(directory), digest)[0]
+
+
+def load_fiber_references(fiberids, wave, calibration=BUNDLED_CALIBRATION):
+    """B/R/Z states on the exact target grid; None preloads all supported physical IDs."""
+    manifest = survey_calibration_manifest(calibration)
+    fingerprint = _wave_fingerprint(np.asarray(wave, dtype=float))
+    if fingerprint != tuple(manifest["wave_fingerprint"]):
+        raise ValueError("Target grid differs from the empirical calibration grid")
+    if fiberids is None:
+        directory = Path(calibration).resolve()
+        digest = hashlib.sha256((directory / "manifest.json").read_bytes()).hexdigest()
+        tables = _survey_ascii_tables(str(directory), digest)[1]
+        fiberids = sorted(set.intersection(*(set(tables[ch]) for ch in "BRZ")))
+    return {int(fiberid): load_survey_ascii_lsf(calibration, int(fiberid), allow_warning=True)
+            for fiberid in np.unique(fiberids)}
+
+
+def mean_reference(states):
+    """Equal mean of measured profiles; approximates the LSF of their median spectrum."""
+    states = list(states)
+    if not states:
+        raise ValueError("No selected fibers for the median LSF reference")
+    # A canonical order gives identical means for the same membership in shuffled SLITMAPs.
+    states.sort(key=lambda state: int(state.metrics["B"]["fiberid"]))
+    result = deepcopy(states[0])
+    for ch in "BRZ":
+        values = [s.coefficients[ch] for s in states if s.metrics[ch].get("quality") == "measured"]
+        if not values:
+            raise ValueError(f"No usable {ch} survey reference in selected fibers")
+        result.coefficients[ch] = np.mean(values, axis=0)
+        result.metrics[ch] = dict(status="Solved", model="selected_fiber_equal_mean",
+                                  n_fibers=len(values), n_fibers_requested=len(states))
+    return result
+
 
 def validate_coefficients(coefficients, tolerance=2e-7):
     """Validate the convex constraints, including the common central component."""

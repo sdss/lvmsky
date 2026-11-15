@@ -30,7 +30,7 @@ def test_parser_defaults_are_the_deployed_configuration():
     kw = dp._run_kwargs_from_args(args)
     assert kw["fit_model"] == dp.FIT_MODEL
     assert kw["n_refinement_cycles"] == dp.N_REFINEMENT_CYCLES
-    assert kw["blue_lsf"] == "solar"
+    assert kw["blue_lsf"] == "reference"
 
 
 def test_individual_fiber_cli_and_input_pixel_weights(monkeypatch):
@@ -75,7 +75,7 @@ def test_blue_lsf_options_and_reference_file(tmp_path):
     import pytest
 
     kw = dp._run_kwargs_from_args(dp.build_arg_parser().parse_args(["stack.fits"]))
-    assert kw["blue_lsf"] == "solar"
+    assert kw["blue_lsf"] == "reference"
     assert kw["lsf_calibration"] == dp.DEFAULT_LSF_CALIBRATION_DIR
     kw = dp._run_kwargs_from_args(dp.build_arg_parser().parse_args(
         ["stack.fits", "--blue-lsf", "reference", "--lsf-calibration", str(tmp_path)]))
@@ -94,6 +94,7 @@ def test_blue_lsf_options_and_reference_file(tmp_path):
 def test_blue_reference_follows_the_stacked_telescope_or_the_fiber(monkeypatch):
     import numpy as np
 
+    monkeypatch.setattr(dp, "_WORKER_BLUE_REFERENCE_FILE", None)
     means = {"Sci": "SCI", "SkyE": "SKYE", "SkyW": "SKYW"}
     monkeypatch.setattr(dp, "_WORKER_BLUE_REFERENCE", dict(means))
     stacked = np.array([("SkyE", "SkyW"), ("skyw", "skye")],
@@ -120,6 +121,7 @@ def test_blue_reference_averages_the_fiber_role_fibers(monkeypatch):
         def mean(self, fiberids, label=""):
             return ("MEAN", tuple(int(f) for f in fiberids), label)
 
+    monkeypatch.setattr(dp, "_WORKER_BLUE_REFERENCE_FILE", None)
     means = {"Sci": "SCI", "SkyE": "SKYE", "SkyW": "SKYW"}
     monkeypatch.setattr(dp, "_WORKER_BLUE_REFERENCE", dict(means))
     monkeypatch.setattr(dp, "_WORKER_BLUE_REFERENCE_SET", FakeReferences())
@@ -156,7 +158,7 @@ def test_solarblue_cli_routing_and_provenance():
     assert kw["fit_model"] == dp.FIT_MODEL
     assert dp.PALACE_OH_SUFFIX == dp.SKYFAR_LINEAR_RIDGE_PALACE_OH_SUFFIX
     assert dp.FIT_MODEL_SUFFIX.endswith("_solarblue")
-    meta = dp._fit_model_primary_meta()
+    meta = dp._fit_model_primary_meta("solar")
     assert meta["BLUELSF"] == "solar_continuum_joint"
     assert meta["OHRIDGE"] == dp.SKYFAR_LINEAR_RIDGE_LAMBDA
 

@@ -95,6 +95,7 @@ def _lsf_meta_row(spectrum_index, state, channel, *, available=True, reason=None
         "wave_min": state.wave_min,
         "wave_max": state.wave_max,
         "wave_sha256": state.wave_sha256,
+        "reference_n_fibers": int(metric.get("reference_n_fibers", -1)) if available else -1,
     }
     for name in ("offset_half_width_angstrom", "offset_roughness_fraction"):
         if name in state.config:
@@ -289,6 +290,8 @@ def lsf_surface_state_from_cubes(cubes, spectrum_index: int = 0):
         for name, converter in CONVERGENCE_METRIC_COLUMNS:
             if name in meta.dtype.names:
                 metrics[channel][name] = _text_value(row[name]) if converter is str else converter(row[name])
+        if "reference_n_fibers" in meta.dtype.names:
+            metrics[channel]["reference_n_fibers"] = int(row["reference_n_fibers"])
     return LSFSurfaceState(
         coefficients=coefficients,
         knot_vectors=knots,

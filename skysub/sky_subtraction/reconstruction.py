@@ -17,7 +17,8 @@ from skysub.sky_decomp.result_io import lsf_surface_state_from_cubes
 from skysub.sky_decomp.solar_lsf import SkyDecompPalaceCorrSolarBlueLSF
 
 from .fiber_lsf import sky_designs
-from .io import BUNDLED_CALIBRATION, read_cframe
+from .io import read_cframe
+from skysub.sky_decomp.lsf_reference import BUNDLED_CALIBRATION
 from .product import read_json_hdu, sha256
 from .rendering import (
     FACTOR,

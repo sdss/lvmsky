@@ -56,6 +56,9 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from skysub.sky_decomp.result_io import results_to_fits
+from skysub.sky_decomp.lsf_reference import (
+    BUNDLED_CALIBRATION, load_fiber_references, mean_reference, survey_calibration_manifest,
+)
 from skysub.sky_decomp.moon_zodi_model import (
     DEFAULT_DATA_ROOT as DEFAULT_MOON_ZODI_DATA_ROOT,
     SKYFAR_LINEAR_RIDGE_LAMBDA,
@@ -201,17 +204,16 @@ FIT_MODEL_SUFFIX = "_palacecorr_aijc_vnf_split_zodi_lsf_spline2d_solarblue"
 PALACE_OH_SUFFIX = SKYFAR_LINEAR_RIDGE_PALACE_OH_SUFFIX
 # Blue-channel LSF: "solar" fits it from the solar lines in the Moon/Zodi
 # continuum; "reference" holds it at the empirical survey-wide reference of
-# lsf_calibration/ (per fiber for individual-fiber rows, the mean over the
-# fibers that entered the median -- FIBER_ROLE -- or over the telescope's
-# fibers for fiber-stacked rows).  r and z are fitted in situ either way.
+# bundled CSV profiles (per fiber, or a shared selected-fiber mean for a median).
+# Legacy FITS directories remain explicit; R/Z are fitted in situ either way.
 BLUE_LSF_CHOICES = ("solar", "reference")
-DEFAULT_LSF_CALIBRATION_DIR = Path(__file__).resolve().parent / "lsf_calibration"
+DEFAULT_LSF_CALIBRATION_DIR = BUNDLED_CALIBRATION
 SURVEY_LSF_REFERENCE = Path("survey") / "lsf_survey.fits"
 # Refinement-cycle limit; the cycles stop earlier on convergence.
 N_REFINEMENT_CYCLES = 30
 
 
-def _fit_model_primary_meta(blue_lsf="solar", lsf_reference_file=None):
+def _fit_model_primary_meta(blue_lsf="reference", lsf_reference_file=None):
     metadata = {
         "DECOMPM": FIT_MODEL,
         "ZODICORR": (SPLIT_ZODI_ZODI_CORRECTION, "Leinert zodi correction used by the anchor"),
@@ -219,9 +221,14 @@ def _fit_model_primary_meta(blue_lsf="solar", lsf_reference_file=None):
         "OHRIDGE": SKYFAR_LINEAR_RIDGE_LAMBDA,
     }
     if blue_lsf == "reference":
+        if lsf_reference_file is None:
+            lsf_reference_file = _survey_lsf_reference_file(blue_lsf, None)
         metadata["BLUELSF"] = "survey_reference"
         metadata["LSFREF"] = (str(lsf_reference_file), "blue LSF reference file")
         metadata["LSFREFSH"] = (file_sha256(lsf_reference_file), "sha256 of LSFREF")
+        csv_reference = Path(lsf_reference_file).name == "manifest.json"
+        metadata["LSFSRC"] = "csv" if csv_reference else "fits"
+        metadata["LSFMEAN"] = "selected_fiber_equal_mean" if csv_reference else "legacy_fiber_equal_mean"
     else:
         metadata["BLUELSF"] = "solar_continuum_joint"
     return metadata
@@ -234,9 +241,12 @@ def _survey_lsf_reference_file(blue_lsf, lsf_calibration):
     if blue_lsf == "solar":
         return None
     path = Path(DEFAULT_LSF_CALIBRATION_DIR if lsf_calibration is None else lsf_calibration)
-    path = path.expanduser().resolve() / SURVEY_LSF_REFERENCE
+    root = path.expanduser().resolve()
+    path = root / "manifest.json" if (root / "manifest.json").is_file() else root / SURVEY_LSF_REFERENCE
     if not path.is_file():
         raise FileNotFoundError(f"Survey LSF reference not found: {path}")
+    if path.name == "manifest.json":
+        survey_calibration_manifest(path.parent)
     return path
 
 
@@ -793,6 +803,24 @@ def _science_mask_lsf_reference(wave, lsf_by_role):
 
 
 
+def _validate_csv_membership(hdul):
+    """CSV median references require explicit physical-fiber membership."""
+    meta = hdul["META"].data
+    names = set(meta.dtype.names or ())
+    if {"fiberid", "telescope"} <= names:
+        return
+    if "FIBER_ROLE" not in hdul:
+        raise ValueError("CSV median decomposition requires FIBER_ROLE")
+    from skysub.medians_computation.src.lvm_medians.stack import N_FIBERS
+    roles = np.asarray(hdul["FIBER_ROLE"].data)
+    if roles.shape != (len(meta), N_FIBERS) or not np.isin(roles, (0, 1, 2, 3)).all():
+        raise ValueError("Invalid FIBER_ROLE shape or role codes")
+    for kind, column in FIT_PIXEL_WEIGHT_FIBRE_COLUMN.items():
+        if column in names and not np.array_equal(
+                (roles == FIBER_ROLE_OF_KIND[kind]).sum(axis=1), np.asarray(meta[column])):
+            raise ValueError(f"FIBER_ROLE counts differ from META {column}")
+
+
 def init_worker(
     wave,
     lsf_sigma,
@@ -864,7 +892,7 @@ def init_worker(
     _WORKER_BLUE_REFERENCE = {}
     _WORKER_BLUE_REFERENCE_SET = None
     _WORKER_FIBER_ROLE = None
-    if lsf_reference_file is not None:
+    if lsf_reference_file is not None and Path(lsf_reference_file).name != "manifest.json":
         from skysub.sky_decomp.lsf_reference import SurveyReferenceSet
 
         _WORKER_BLUE_REFERENCE_SET = SurveyReferenceSet(
@@ -909,6 +937,16 @@ def init_worker(
         for kind in kinds
     }
     _WORKER_META = _WORKER_HDU["META"].data
+    if lsf_reference_file is not None and Path(lsf_reference_file).name == "manifest.json":
+        _validate_csv_membership(_WORKER_HDU)
+        names = set(_WORKER_META.dtype.names or ())
+        if not {"fiberid", "telescope"} <= names:
+            _WORKER_FIBER_ROLE = np.asarray(_WORKER_HDU["FIBER_ROLE"].data)
+        # Unsupported selected IDs fail their own row, not pool initialization or --limit.
+        _WORKER_BLUE_REFERENCE = load_fiber_references(
+            None, wave, Path(lsf_reference_file).parent)
+        if worker_rank == 0:
+            print("[blue lsf] bundled CSV reference; selected-fiber mean; B fixed, R/Z seeded", flush=True)
 
     from lvmdrp.core.fluxcal import TelluricCalculator
     from skysub.sky_decomp.lsf_surface_iterative import LSFSurfaceIterativeConfig
@@ -1919,6 +1957,13 @@ def _blue_reference_lsf(kind, row_index):
     """
     row = _WORKER_META[row_index]
     names = set(_WORKER_META.dtype.names or ())
+    if _WORKER_BLUE_REFERENCE_FILE is not None and Path(_WORKER_BLUE_REFERENCE_FILE).name == "manifest.json":
+        if {"fiberid", "telescope"} <= names:
+            return _WORKER_BLUE_REFERENCE[int(row["fiberid"])]
+        fiberids = np.flatnonzero(_WORKER_FIBER_ROLE[row_index] == FIBER_ROLE_OF_KIND[kind]) + 1
+        if not fiberids.size:
+            raise ValueError(f"No FIBER_ROLE fibers for {kind} row {row_index}")
+        return mean_reference([_WORKER_BLUE_REFERENCE[int(f)] for f in fiberids])
     if {"fiberid", "telescope"} <= names:
         fiberid = int(row["fiberid"])
         if fiberid not in _WORKER_BLUE_REFERENCE:
@@ -1954,13 +1999,24 @@ def _fit_worker_row(kind, idx, flux_row, ivar_row, fixed_lsf_state=None, initial
         return result, _reliability_flags(result, row_index=idx, kind=kind)
     # Tracing allocations costs ~2.8x the fit; only on request (LVMSKY_MEASURE_PEAK_MEMORY=1).
     decomposer._measure_peak_memory = _WORKER_COMPACT_CACHE_DIR is None and peak_memory_requested()
-    if _WORKER_BLUE_REFERENCE_FILE is not None:
-        decomposer.blue_reference_lsf = _blue_reference_lsf(kind, idx)
-    if initial_lsf_state is not None:
-        decomposer.blue_reference_lsf = initial_lsf_state
+    reference = initial_lsf_state
+    if reference is None and _WORKER_BLUE_REFERENCE_FILE is not None:
+        try:
+            reference = _blue_reference_lsf(kind, idx)
+        except (ValueError, KeyError) as error:
+            result = decomposer.failed_input_result(f"LSF reference: {error}")
+            return result, _reliability_flags(result, row_index=idx, kind=kind)
+    if reference is not None:
+        decomposer.blue_reference_lsf = reference
     _install_split_zodi_amplitude_prior(decomposer, kind, idx)
     result, retried, bound, was_reversed = _fit_split_zodi_with_reversal_retry(
         decomposer, flux_row, ivar_row, fixed_lsf_state=fixed_lsf_state)
+    if reference is not None and result.fit_status in ("Solved", "AlmostSolved"):
+        if fixed_lsf_state is None and not np.array_equal(
+                result.lsf_state.coefficients["B"], reference.coefficients["B"]):
+            raise RuntimeError("Blue LSF changed during median fit")
+        for ch in "BRZ":
+            result.lsf_state.metrics[ch]["reference_n_fibers"] = int(reference.metrics[ch].get("n_fibers", 1))
     return result, _reliability_flags(
         result, retried, bound, was_reversed,
         decomposer=decomposer, ivar=ivar_row, row_index=idx, kind=kind)
@@ -2101,7 +2157,7 @@ def run(
     compact_only=False,
     kinds=("sci", "sky1", "sky2"),
     start_method="spawn",
-    blue_lsf="solar",
+    blue_lsf="reference",
     lsf_calibration=None,
 ):
     """Decompose every row of `data_file` and write the products to `output_dir`.
@@ -2126,6 +2182,8 @@ def run(
     with fits.open(data_file, memmap=True) as hdul:
         n_rows_total = int(hdul["FLUX_SCI"].data.shape[0])
         fiber_role = "FIBER_ROLE" in hdul
+        if lsf_reference_file is not None and Path(lsf_reference_file).name == "manifest.json":
+            _validate_csv_membership(hdul)
 
     n_rows = n_rows_total if limit is None else min(n_rows_total, int(limit))
 
@@ -2528,13 +2586,13 @@ def build_arg_parser():
     parser.add_argument(
         "--blue-lsf",
         choices=BLUE_LSF_CHOICES,
-        default="solar",
+        default="reference",
         help=(
             "Blue-channel LSF: 'solar' fits it from the solar lines in the "
             "Moon/Zodi continuum; 'reference' holds it at the survey-wide "
-            "empirical reference (per fiber for individual-fiber rows, the mean "
-            "over the FIBER_ROLE fibers, or the telescope's, for fiber-stacked "
-            "rows).  r and z are fitted in situ either way (default: %(default)s)"
+            "empirical reference (per fiber, or the mean over FIBER_ROLE fibers "
+            "for median rows). R/Z start from those references and refine in situ "
+            "(default: %(default)s)"
         ),
     )
     parser.add_argument(
@@ -2542,7 +2600,7 @@ def build_arg_parser():
         type=Path,
         default=DEFAULT_LSF_CALIBRATION_DIR,
         help=(
-            "lsf_calibration directory holding survey/lsf_survey.fits, used by "
+            "CSV calibration directory holding manifest.json, or legacy survey/lsf_survey.fits, used by "
             "--blue-lsf reference (default: %(default)s)"
         ),
     )
@@ -2659,7 +2717,8 @@ def decompose_in_process(data_file, rows=(0,), kinds=("sci", "sky1", "sky2"),
     args = build_arg_parser().parse_args(
         ["<in-memory stack>" if in_memory else str(data_file), *map(str, argv)])
     kw = _run_kwargs_from_args(args)
-    lsf_reference_file = _survey_lsf_reference_file(kw["blue_lsf"], kw["lsf_calibration"])
+    lsf_reference_file = (None if initial_lsf_states is not None or fixed_lsf_state is not None else
+                          _survey_lsf_reference_file(kw["blue_lsf"], kw["lsf_calibration"]))
     base_dir = resolve_data_root(kw["palace_dir"])
     wave = (np.asarray(data_file["WAVE"].data) if in_memory
             else fits.getdata(str(data_file), "WAVE")).astype(np.float64)

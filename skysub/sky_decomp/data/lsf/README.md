@@ -17,7 +17,7 @@ The authoritative Gaia source is `$SAS_BASE_DIR/sdsswork/users/u6058164/gaia_fib
 
 After screening, every retained observed MJD night gets equal weight; exposures within a night get equal weight. Coefficient distances across epochs never downweight a clean night. Each physical fiber and channel is measured separately, with no cross-fiber smoothing, borrowing or centroid alignment. The survey reference represents the retained observed-night mixture, rather than all survey exposure times or a single calibration epoch.
 
-All Blue fibers are measured. Z fibers 84/85 carry `elevated_chi2`: their diagnostic tables use chi-square <5 because no <3 archival solution exists. Strict loading refuses these Z rows; `allow_warning=True` is an explicit diagnostic opt-in. Fixed-Blue loading requests B only and uses its measured per-fiber reference. R/Z initialization then uses the target DRP profiles and is refined on target sky lines.
+All Blue fibers are measured. Z fibers 84/85 carry `elevated_chi2`: their diagnostic tables use chi-square <5 because no <3 archival solution exists. Strict loading refuses these Z rows; `allow_warning=True` is an explicit diagnostic opt-in. The common batch/Sky Subtraction path loads B/R/Z, excludes warning profiles from each channel mean, fixes Blue and refines R/Z from their selected-fiber CSV means.
 
 ## Precision and epoch variation
 
@@ -32,7 +32,7 @@ from skysub.sky_decomp.lsf_reference import load_survey_ascii_lsf
 state = load_survey_ascii_lsf("skysub/sky_decomp/data/lsf", 1812, channels=("B",))
 ```
 
-The existing `--blue-lsf reference` mode defaults to this bundled directory and fixes each physical fiber's B profile; R/Z are still refined on the target spectrum. Existing FITS calibration directories remain supported through `--lsf-calibration`. The real-spectrum check is reproducible with `python -m analysis.lsf_epoch_coverage.check_fixed_blue_ascii`.
+The existing `--blue-lsf reference` mode defaults to this bundled directory and fixes each physical fiber's B profile; R/Z are still refined on the target spectrum. Existing FITS calibration directories remain supported through `--lsf-calibration`. CSV median stacks require `FIBER_ROLE`, identifying the actual contributing physical fibers. Batch and Sky Subtraction share loading, averaging and fixed-Blue validation.
 
 Regenerate with `python -m analysis.lsf_epoch_coverage.build_survey_ascii` in the documented lvmdrp311 environment; publish the figures with `python -m analysis.lsf_epoch_coverage.publish_survey_ascii`.
 

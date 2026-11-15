@@ -80,3 +80,11 @@ python -m ruff check skysub/sky_subtraction && python -m ruff format --check sky
 ```
 
 The controlled LSF tests use known profiles under broad/narrow stellar structure and a documented STScI Pickles M5V fixture. The report `analysis/sky_subtraction_validation/00_MAIN_sky_subtraction_report.html` shows direct SFrame FLUX comparisons, individual fiber fits, line-scale windows, LSF surfaces and iteration histories; regenerate it with `python analysis/sky_subtraction_validation/report_fibers.py` (`run_manifest_v2.json` lists the five outputs) and publish with `publish_report.py`. Presentation rules: [PLOTTING_AND_REPORT_RULES.md](../../PLOTTING_AND_REPORT_RULES.md). The sample demonstrates execution and quality controls; it does not establish survey-wide generalization or independence from ML training. The development history is in `analysis/sky_subtraction_validation/history/IMPLEMENTATION_PLAN.md`.
+
+## Shared median reference LSF
+
+Median preparation and batch `decompose_parallel.py` use the same CSV loader and
+selected-fiber mean in `sky_decomp/lsf_reference.py`. Blue is held fixed and
+checked after fitting; R/Z start at the measured selected-fiber means and refine
+in situ. The CSV bundle is validated against its manifest and target grid.
+Per-channel reference contributor counts are retained in the saved LSF metadata.

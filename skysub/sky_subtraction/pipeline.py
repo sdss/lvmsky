@@ -19,11 +19,11 @@ from astropy.time import Time
 from skysub.medians_computation.src.lvm_medians.metadata import median_meta
 from skysub.medians_computation.src.lvm_medians.stack import fiber_roles
 from skysub.sky_decomp import reliability as rel
-from skysub.sky_decomp.lsf_reference import load_survey_ascii_lsf
+from skysub.sky_decomp.lsf_reference import BUNDLED_CALIBRATION, load_fiber_references, mean_reference
 
 from . import decomp_adapter as adapter
 from .fiber_lsf import FIT_CHANNELS, FiberFit, fit_fiber, sky_designs
-from .io import BUNDLED_CALIBRATION, TELESCOPES, median_spectrum, read_cframe, resolve_gaia, select_fibers
+from .io import TELESCOPES, median_spectrum, read_cframe, resolve_gaia, select_fibers
 from .ml import (
     E_SCALE,
     NEBULAR_LINES_RED,
@@ -150,35 +150,6 @@ def code_provenance():
     except (OSError, subprocess.CalledProcessError):
         revision = None
     return hashes, revision
-
-
-def load_fiber_references(frame, calibration):
-    """Survey LSF of every usable Sci/SkyE/SkyW fiber, keyed by CFrame row."""
-    slit = frame.slit
-    fingerprint = adapter.wave_fingerprint(frame.wave)
-    references = {}
-    for i, fiberid in enumerate(slit['fiberid']):
-        if int(slit['fibstatus'][i]) == 0 and str(slit['telescope'][i]).strip() in TELESCOPES:
-            reference = load_survey_ascii_lsf(calibration, int(fiberid), allow_warning=True)
-            if fingerprint != (reference.wave_n, reference.wave_min, reference.wave_max, reference.wave_sha256):
-                raise ValueError('CFrame grid differs from the empirical calibration grid')
-            references[i] = reference
-    return references
-
-
-def mean_reference(states):
-    """Approximation: the equal mean of the selected fibers' profiles stands in for the LSF of their median.
-
-    Revisit when profiles or wavelength coverage vary strongly between contributors.
-    """
-    result = deepcopy(states[0])
-    for ch in 'BRZ':
-        values = [s.coefficients[ch] for s in states if s.metrics[ch].get('quality') == 'measured']
-        if not values:
-            raise ValueError(f'No usable {ch} survey reference in selected fibers')
-        result.coefficients[ch] = np.mean(values, axis=0)
-        result.metrics[ch] = dict(status='Solved', model='selected_fiber_equal_mean', n_fibers=len(values))
-    return result
 
 
 def build_stack(frame, path, medians, references, selected, settings=SETTINGS):
@@ -467,7 +438,10 @@ def run(
     frame = read_cframe(input_path)
     expnum = int(frame.header['EXPOSURE'])
     calibration = Path(lsf_calibration).resolve() if lsf_calibration else BUNDLED_CALIBRATION
-    references = load_fiber_references(frame, calibration)
+    good_rows = np.flatnonzero((np.asarray(frame.slit['fibstatus']) == 0)
+                               & np.isin(np.char.strip(np.asarray(frame.slit['telescope']).astype(str)), TELESCOPES))
+    by_fiber = load_fiber_references(frame.slit['fiberid'][good_rows], frame.wave, calibration)
+    references = {int(i): by_fiber[int(frame.slit['fiberid'][i])] for i in good_rows}
 
     LOG.info('Exposure %s: Gaia photometry and masked medians', expnum)
     gaia = resolve_gaia(input_path, frame, gaia_dir, output.parent / '.skyml-gaia')

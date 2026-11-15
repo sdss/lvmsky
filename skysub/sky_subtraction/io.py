@@ -12,6 +12,7 @@ from astropy.io import fits
 from astropy.table import Table
 
 from skysub.medians_computation.src.lvm_medians.stack import FLUX_UNIT, gaia_ratio_clean_mask
+from skysub.sky_decomp.lsf_reference import BUNDLED_CALIBRATION
 
 from . import decomp_adapter as adapter
 from .settings import SETTINGS
@@ -19,7 +20,6 @@ from .settings import SETTINGS
 LOG = logging.getLogger(__name__)
 TELESCOPES = ('Sci', 'SkyE', 'SkyW')
 GAIA_RETRIES = 3
-BUNDLED_CALIBRATION = Path(__file__).resolve().parents[1] / 'sky_decomp/data/lsf'
 
 
 class CFrame(NamedTuple):
