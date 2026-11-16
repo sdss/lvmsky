@@ -20,10 +20,6 @@ Example:
 """
 
 import os
-import socket
-
-# Bound optional network requests triggered by DRP/Astroquery imports in each worker.
-socket.setdefaulttimeout(3)
 
 os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["MKL_NUM_THREADS"] = "1"

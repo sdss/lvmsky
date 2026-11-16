@@ -4,8 +4,9 @@
 
 ### Changed
 
-- Set a three-second default socket timeout before batch decomposition imports,
-  including spawned workers, to limit optional DRP/Astroquery network waits.
+- Set a three-second default socket timeout when importing `sky_decomp`, covering
+  decomposition and Sky Subtraction workers and existing-product validation
+  before DRP/Astroquery imports.
 - Batch decomposition and Sky Subtraction share CSV LSF loading, physical-fiber
   selection averaging, and fixed-Blue validation. Blue is held fixed; R/Z start
   from the same selected-fiber CSV means and are refined on the target spectrum.
