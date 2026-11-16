@@ -38,7 +38,7 @@ from .ml import (
     sky_arm_residual_correction,
     sky_line_scaling_correction,
 )
-from .product import MLCoefficients, ProductInputs, _json, build_product, sha256, write_product
+from .product import MLCoefficients, ProductInputs, _json, build_product, file_identity, sha256, write_product
 from .rendering import (
     FACTOR,
     FAMILIES,
@@ -420,11 +420,14 @@ def run(
     survey_only=False,
     render_sky=True,
     return_hdus=False,
+    hash_input=True,
 ):
     """Process one lvmCFrame and publish ``lvmSFrame-skyml-<exposure>.fits``; returns its path.
 
     With ``return_hdus`` nothing is written and the product's HDUList is returned (``output`` only
     names the Gaia cache folder); the caller owns it.
+    The block pipeline sets ``hash_input=False`` to record file size/mtime instead of reading
+    the entire CFrame again for its content hash.
 
     Workers are forked after the ML ensemble is released. Callers outside the CLI should
     limit native threads (OPENBLAS/OMP/MKL_NUM_THREADS=1) before importing numpy.
@@ -510,7 +513,8 @@ def run(
     )
     provenance = dict(
         input=str(input_path),
-        input_sha256=sha256(input_path),
+        input_sha256=sha256(input_path) if hash_input else None,
+        input_stat=file_identity(input_path),
         ensemble=str(Path(ensemble_path).resolve()),
         ensemble_sha256=sha256(ensemble_path),
         calibration=str(calibration),

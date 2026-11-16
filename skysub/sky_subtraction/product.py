@@ -60,6 +60,12 @@ def sha256(path):
     return digest.hexdigest()
 
 
+def file_identity(path):
+    """Cheap file identity; does not detect edits preserving size and modification time."""
+    stat = Path(path).stat()
+    return dict(size=stat.st_size, mtime_ns=stat.st_mtime_ns)
+
+
 def _json(value):
     if isinstance(value, np.ndarray):
         return value.tolist()

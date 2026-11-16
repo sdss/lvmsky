@@ -19,7 +19,7 @@ from skysub.sky_decomp.solar_lsf import SkyDecompPalaceCorrSolarBlueLSF
 from .fiber_lsf import sky_designs
 from .io import read_cframe
 from skysub.sky_decomp.lsf_reference import BUNDLED_CALIBRATION
-from .product import read_json_hdu, sha256
+from .product import file_identity, read_json_hdu, sha256
 from .rendering import (
     FACTOR,
     FAMILIES,
@@ -96,8 +96,11 @@ class SkyMLReconstructor:
     def _read_observed(self):
         if self._observed_input is None:
             stat = self.source.stat()
-            if _input_hash(str(self.source), stat.st_size, stat.st_mtime_ns) != self.provenance['input_sha256']:
-                raise ValueError('CFrame hash differs from recorded input')
+            if self.provenance.get('input_sha256'):
+                if _input_hash(str(self.source), stat.st_size, stat.st_mtime_ns) != self.provenance['input_sha256']:
+                    raise ValueError('CFrame hash differs from recorded input')
+            elif file_identity(self.source) != self.provenance.get('input_stat'):
+                raise ValueError('CFrame size or modification time differs from recorded input')
             frame = read_cframe(self.source)
             if not np.array_equal(frame.slit['fiberid'], self.h['SLITMAP'].data['fiberid']):
                 raise ValueError('CFrame SLITMAP fiber IDs differ from the product')

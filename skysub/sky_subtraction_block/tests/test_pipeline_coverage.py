@@ -1,6 +1,7 @@
 """Median coefficients are the default; individual Sky fits are opt-in."""
 from types import SimpleNamespace
 import numpy as np
+import pytest
 from skysub.sky_subtraction_block import pipeline
 
 
@@ -33,3 +34,17 @@ def test_default_uses_own_telescope_median_without_fitting(monkeypatch):
         np.testing.assert_array_equal(row['coef'],expected)
         assert row['usable'] and row['status']=='MedianCoefficients'
         assert not np.shares_memory(row['coef'],coefficients)
+
+
+def test_block_preparation_disables_cframe_hash(tmp_path, monkeypatch):
+    captured = {}
+    class Prepared(BaseException):
+        pass
+    def prepare(*args, **kwargs):
+        captured.update(kwargs)
+        raise Prepared()
+    monkeypatch.setattr(pipeline.common, 'run', prepare)
+    with pytest.raises(Prepared):
+        pipeline.run(tmp_path / 'lvmCFrame-00011017.fits', ensemble=tmp_path / 'model.pt',
+                     output=tmp_path / 'lvmSFrame-skyml-block-00011017.fits')
+    assert captured['hash_input'] is False

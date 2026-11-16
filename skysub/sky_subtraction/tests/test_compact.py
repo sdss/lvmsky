@@ -72,3 +72,28 @@ def test_survey_reconstruction_uses_recorded_calibration(tmp_path):
     r.provenance = dict(calibration=str(other), calibration_manifest=manifest)
     with pytest.raises(ValueError, match='differs'):
         _ = r.calibration
+
+
+def test_stat_identity_reconstructs_without_hashing(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    import pytest
+    from skysub.sky_subtraction import reconstruction
+    from skysub.sky_subtraction.product import file_identity
+
+    source = tmp_path / 'input.fits'
+    source.write_bytes(b'input')
+    r = reconstruction.SkyMLReconstructor.__new__(reconstruction.SkyMLReconstructor)
+    r.source = source
+    r.provenance = dict(input_sha256=None, input_stat=file_identity(source))
+    r._observed_input = None
+    r.wave = np.arange(4.)
+    slit = np.array([(1,)], dtype=[('fiberid', int)])
+    r.h = {'SLITMAP': SimpleNamespace(data=slit)}
+    frame = SimpleNamespace(slit=slit, wave=r.wave, flux=np.ones((1, 4)), ivar=np.ones((1, 4)), mask=np.zeros((1, 4)))
+    monkeypatch.setattr(reconstruction, 'read_cframe', lambda _: frame)
+    monkeypatch.setattr(reconstruction, '_input_hash', lambda *args: pytest.fail('Unexpected content hash'))
+    np.testing.assert_array_equal(r.observed, frame.flux)
+    source.write_bytes(b'changed input')
+    r._observed_input = None
+    with pytest.raises(ValueError, match='size or modification time'):
+        _ = r.observed

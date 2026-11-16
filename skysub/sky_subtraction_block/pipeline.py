@@ -19,7 +19,7 @@ from skysub.sky_decomp.reliability import misfit
 import re
 from skysub.sky_subtraction.io import read_cframe
 from skysub.sky_subtraction.fiber_lsf import unfitted_qa
-from skysub.sky_subtraction.product import lsf_hdus,lvmsframe_layout,publish,publish_product,set_prediction_reliability
+from skysub.sky_subtraction.product import file_identity,lsf_hdus,lvmsframe_layout,publish,publish_product,set_prediction_reliability
 from skysub.sky_decomp import reliability as rel
 from skysub.sky_subtraction.reconstruction import SkyMLReconstructor
 from skysub.sky_subtraction.rendering import arm_sky,exposure_line_masks,fwhm_grid
@@ -120,12 +120,18 @@ def run(input_path, *, output=None, seed=None, ensemble=None, gaia_dir=None, job
         else:
             if ensemble is None:raise ValueError('Supply an ensemble for median/ML preparation or an existing --seed product')
             # Median/ML/correction stage of the common pipeline, kept in memory; per-fiber LSF fits are off.
-            prepared=common.run(input_path,ensemble,gaia_dir=gaia_dir,output=default,jobs=jobs,survey_only=True,render_sky=False,return_hdus=True)
+            prepared=common.run(input_path,ensemble,gaia_dir=gaia_dir,output=default,jobs=jobs,survey_only=True,render_sky=False,return_hdus=True,hash_input=False)
             if keep_preparation:publish_product(prepared,default,input_path);seed_path=default.resolve()
     header,slit,wave,flux,ivar,mask,_=read_cframe(input_path)
     with SkyMLReconstructor(prepared if prepared is not None else seed_path,cframe=input_path) as r:
-        if prepared is None and common.sha256(input_path)!=r.provenance['input_sha256']:
-            raise ValueError('Preparation belongs to a different input CFrame')
+        if prepared is None:
+            if r.provenance.get('input_stat') is not None:
+                matches = file_identity(input_path) == r.provenance['input_stat']
+            else:
+                # Legacy snapshots have no stat identity; explicit reuse retains their hash check.
+                matches = common.sha256(input_path) == r.provenance['input_sha256']
+            if not matches:
+                raise ValueError('Preparation belongs to a different input CFrame')
         np.testing.assert_array_equal(slit['fiberid'],r.h['SLITMAP'].data['fiberid'])
         np.testing.assert_array_equal(wave,r.wave)
         templates={label:r.state('MED_',r.labels.index(label)) for label in r.labels}
@@ -243,7 +249,7 @@ def run(input_path, *, output=None, seed=None, ensemble=None, gaia_dir=None, job
         provenance['settings'].update(residual_max_angstrom=r.settings.residual_max_angstrom,
             residual_line_protection=r.settings.residual_line_protection)
         provenance.setdefault('residual_correction',{})['line_protection_velocities_km_s']=velocities
-        provenance.update(block_timing=block_timing,input=str(input_path),method=method,preparation=str(seed_path) if seed_path else 'in-memory',preparation_sha256=common.sha256(seed_path) if seed_path else None,
+        provenance.update(block_timing=block_timing,input=str(input_path),method=method,preparation=str(seed_path) if seed_path else 'in-memory',preparation_stat=file_identity(seed_path) if seed_path else None,
             block_settings=dict(fitted_channels='RZ',blue_lsf='each Science fiber keeps its survey LSF from the preparation; B is not fitted',offset_basis=offset_count,wave_basis=wave_count,slit_basis=slit_count,slit_degree=3,coordinate='SLITMAP.fiberid within spectrograph',
                 wavelength_solution='input, unchanged',constraints='nonnegative, unit integral'+(', zero first moment' if centered else '; no centroid constraint')+' at all wavelength/slit control pairs',
                 regularization=dict(offset_roughness=offset_roughness,wave_roughness=wave_roughness,slit_roughness=slit_roughness,reference_prior=reference_prior,

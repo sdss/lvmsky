@@ -17,7 +17,7 @@ limit_environment()
 
 def main(request_path):
     from .batch import atomic_json
-    from .planning import file_sha256
+    from .planning import Exposure, make_plan
 
     request = json.loads(Path(request_path).read_text())
     result_path = Path(request["result_path"])
@@ -30,10 +30,16 @@ def main(request_path):
         raise KeyboardInterrupt
     signal.signal(signal.SIGTERM, interrupted)
     result = dict(state="running", pid=__import__("os").getpid(), cpu_ids=request["cpu_ids"])
+    item = None
     try:
-        for path, expected in entry["dependencies"].items():
-            if file_sha256(path) != expected:
-                raise ValueError(f"Input dependency changed after planning: {path}")
+        item = Exposure(**entry)
+        item.input_path = Path(item.input_path)
+        make_plan([item], request["model"], implementation=request.get("implementation"), **request["plan_options"])
+        entry = item.record()
+        result["exposure"] = entry
+        if item.status in ("reused", "skipped_input"):
+            result["state"] = item.status
+            return 0
         limit_numerics()
         from .pipeline import run
         result["resources_start"] = runtime_resources()
@@ -57,6 +63,8 @@ def main(request_path):
         result.update(state="error", error=f"{type(error).__name__}: {error}")
         return 1
     finally:
+        if item is not None:
+            result["exposure"] = item.record()
         own = resource.getrusage(resource.RUSAGE_SELF)
         children = resource.getrusage(resource.RUSAGE_CHILDREN)
         result.update(elapsed_seconds=time.monotonic() - started,

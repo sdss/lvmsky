@@ -87,6 +87,19 @@ selection and may combine with MJD/tile/exposure-time/calibration filters,
 but not `--expnum` or `--all-exposures`. Path lists are explicit inputs and
 cannot combine with catalogue filters.
 
+Ordinary path-list batches queue paths without opening CFrames or hashing their
+contents. Each worker reads its assigned file's header, determines the output
+path and checks existing-output/state policies before calculating the sky.
+Missing or invalid files are handled per worker under `--missing-input` and
+`--on-error`. Conflicting paths for the same exposure ID are rejected. Path lists
+are ordered by exposure number/path; catalogue selections retain
+version/MJD/exposure/tile/path sorting.
+
+The progress panel includes per-file preparation. `plan.ecsv` initially has
+unresolved identities/output paths for explicit inputs; `results.ecsv` records
+resolved values as workers finish. `--dry-run` explicitly resolves headers and
+destinations for inspection, without hashing CFrame contents or launching workers.
+
 Interactive batches show one live panel with processed/total, successful,
 failed, running and queued exposures, elapsed wall time, successful exposures
 per minute, approximate ETA and active exposure IDs. Reused/skipped inputs are
@@ -124,7 +137,7 @@ Preserved output placement is
 `--flat-output` writes directly in OUTPUT_DIR (default: `./skyml-block-output`).
 For unavailable explicit inputs, `--missing-input skip` records the path; unknown
 header identities use `-1` and the output path stays unset. `--on-existing skip` verifies
-scientific fingerprints, complete FITS layout and checksums before reuse.
+file-metadata/settings fingerprints, complete FITS layout and FITS checksums before reuse.
 To recompute and replace existing final products, add
 `--on-existing overwrite` to `batch` or `single`. The previous final FITS
 stays in place during fitting and writing; only a fully written replacement
@@ -133,6 +146,15 @@ untouched. This policy does not overwrite input CFrames or saved preparation
 snapshots, and does not change the existing preparation-reuse rules.
 The default remains `--on-existing error`; `skip` verifies and reuses
 matching products rather than recomputing them.
+
+Ordinary block calculations record CFrame size and nanosecond modification time
+as `input_stat`, with `input_sha256: null`; they do not read CFrames again for
+SHA256. CLI fingerprints use size/mtime for the input, model, Gaia cache and
+saved state, plus scientific settings and implementation identity. This does
+not detect edits preserving both size and modification time. Old CLI
+fingerprints are incompatible and rejected by `skip`; use a separate output
+directory or explicitly recompute with `overwrite`. Reuse of legacy
+preparations that have only `input_sha256` retains their CFrame hash check.
 
 Run plans, results, status, exact invocations and individual logs are stored
 under `OUTPUT_DIR/.batch/<run ID>`, or the explicit `--run-dir`.
@@ -190,7 +212,7 @@ taskset -c 0 python -m skysub.sky_subtraction_block /path/lvmCFrame-00014350.fit
 
 ## Compact storage and diagnostics
 
-The shared [compact product contract](../sky_subtraction/FITS_STRUCTURE.md) applies. `BLOCK_LSF_COEF` stores the six blocks × offset × wavelength × slit controls; `BLOCK_SLIT_KNOTS`, `BLOCK_WAVE_KNOTS` and `BLOCK_LSF_META` store exact domains, degrees, solver status, rank, input counts, chi-square, and moment checks. `SKY_FIBER_COEF` records every selected Sky fiber's identity, frozen component vector and status (`MedianCoefficients` by default, QP status with `--fit-sky-fibers`). `SKYML_META.block_settings` records `fit_sky_fibers` and the coefficient source; CLI reuse fingerprints distinguish the modes. The usual `LSF_COEF/KNOTS/META` contain evaluations of the R/Z global solution at Science fibers together with their survey B LSF, so existing `SkyMLReconstructor.sky()` works directly. No intermediate model images are persisted. `SKYML_META` records preparation/input hashes, settings and implementation hashes. `SkyBlockReconstructor.global_state()` and `.sky_fiber()` reconstruct block profiles and selected Sky-fiber models in memory.
+The shared [compact product contract](../sky_subtraction/FITS_STRUCTURE.md) applies. `BLOCK_LSF_COEF` stores the six blocks × offset × wavelength × slit controls; `BLOCK_SLIT_KNOTS`, `BLOCK_WAVE_KNOTS` and `BLOCK_LSF_META` store exact domains, degrees, solver status, rank, input counts, chi-square, and moment checks. `SKY_FIBER_COEF` records every selected Sky fiber's identity, frozen component vector and status (`MedianCoefficients` by default, QP status with `--fit-sky-fibers`). `SKYML_META.block_settings` records `fit_sky_fibers` and the coefficient source; CLI reuse fingerprints distinguish the modes. The usual `LSF_COEF/KNOTS/META` contain evaluations of the R/Z global solution at Science fibers together with their survey B LSF, so existing `SkyMLReconstructor.sky()` works directly. No intermediate model images are persisted. `SKYML_META` records preparation/input file identities, settings and implementation hashes. `SkyBlockReconstructor.global_state()` and `.sky_fiber()` reconstruct block profiles and selected Sky-fiber models in memory.
 
 ## Sky coverage and explicit reference fallback
 

@@ -265,7 +265,8 @@ def batch(
         "Select every exposure row in the chosen catalogue. Off by default. Use instead of filters."),
         rich_help_panel="Catalogue selection")] = False,
     max_exposures: Annotated[int | None, typer.Option(min=1, help=(
-        "First N selected entries after filtering/deduplication and version/MJD/expnum/tile/path sorting. "
+        "First N selected entries after filtering/deduplication. Catalogue: version/MJD/expnum/tile/path; "
+        "explicit paths: expnum/path. "
         "Not a quality ranking. Later skips are not replaced. Default: the whole selected set."),
         rich_help_panel="Catalogue selection")] = None,
     output_dir: Annotated[Path, typer.Option(help="Generated product root; relative to the launch directory.",
@@ -275,7 +276,7 @@ def batch(
         "Flat: write final FITS directly in OUTPUT_DIR. EXPNUM has eight digits."),
         rich_help_panel="Final output")] = True,
     on_existing: Annotated[Existing, typer.Option(help=(
-        "error: destination conflict; skip: verify complete FITS, input/scientific fingerprint and checksums. "
+        "error: destination conflict; skip: verify complete FITS, file metadata/settings fingerprint and checksums. "
         "Mismatches remain conflicts in skip mode. overwrite: recompute and atomically replace the final "
         "FITS only on success; retain the old output on failure. No automatic filename versions."),
         rich_help_panel="Final output")] = Existing.error,
@@ -321,10 +322,12 @@ def batch(
             inputs=inputs, input_list=input_list, drpall=drpall, sas_base_dir=sas_base_dir,
             cframe_root=cframe_root, expnum=expnum, mjd=mjd,
             tileid=tileid, exptime=exptime, catalog_fluxcal=catalog_fluxcal,
-            all_exposures=all_exposures, max_exposures=max_exposures, missing_input=missing_input.value)
-        make_plan(entries, model, output_dir=output_dir, flat_output=not preserve_drp_tree,
-                  reuse_state_dir=reuse_state_dir, on_existing=on_existing.value,
-                  missing_input=missing_input.value)
+            all_exposures=all_exposures, max_exposures=max_exposures, missing_input=missing_input.value,
+            defer_headers=not dry_run)
+        plan_options = dict(output_dir=str(output_dir.expanduser().resolve()), flat_output=not preserve_drp_tree,
+                            reuse_state_dir=str(reuse_state_dir.expanduser().resolve()) if reuse_state_dir else None,
+                            on_existing=on_existing.value, missing_input=missing_input.value)
+        make_plan(entries, model, **plan_options, defer=not dry_run)
         if dry_run or log_level == Level.debug:
             typer.echo("Resolved paths: " + str(context))
             typer.echo("CPU allocation: " + str(budget))
@@ -343,7 +346,7 @@ def batch(
         from .batch import run_batch, _timing_lines
         result = run_batch(entries, model, budget, output_dir=output_dir, run_dir=run_dir,
                            context=context, on_error=on_error.value, log_level=log_level.value,
-                           no_progress=no_progress)
+                           no_progress=no_progress, plan_options=plan_options)
     except KeyboardInterrupt:
         raise typer.Exit(130) from None
     except (ValueError, OSError, KeyError) as error:

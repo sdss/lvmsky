@@ -24,14 +24,13 @@ class Exposure:
     seed: Path | None = None
     state_mode: str = ""
     fingerprint: str = ""
-    input_sha256: str = ""
-    dependencies: dict | None = None
     status: str = "queued"
     error: str = ""
     log: str = ""
     pid: int | None = None
     elapsed_seconds: float = 0.0
     overwrite: bool = False
+    deferred: bool = False
 
     @property
     def identity(self):
@@ -209,7 +208,7 @@ def _catalogue_exposures(catalogue, root, version, selectors, exptime, fluxcal, 
 def select_exposures(*, inputs=None, input_list=None, drpall=None, sas_base_dir=None,
                      cframe_root=None, expnum=None, mjd=None,
                      tileid=None, exptime=None, catalog_fluxcal=None, all_exposures=False,
-                     max_exposures=None, missing_input="error"):
+                     max_exposures=None, missing_input="error", defer_headers=False):
     if inputs and input_list:
         raise ValueError("Choose positional INPUTS or --input-list, not both")
     if input_list is not None:
@@ -245,7 +244,13 @@ def select_exposures(*, inputs=None, input_list=None, drpall=None, sas_base_dir=
     if explicit:
         exposures = []
         for path in inputs:
-            path = Path(path).expanduser().resolve()
+            path = Path(path).expanduser().absolute()
+            if defer_headers:
+                match = re.fullmatch(r"lvmCFrame-(\d+)\.fits(?:\.gz)?", path.name)
+                if not match:
+                    raise ValueError(f"Input must be an lvmCFrame FITS, got {path}")
+                exposures.append(Exposure(path, int(match[1]), -1, -1, "", "", deferred=True))
+                continue
             if not path.is_file() and missing_input == "skip":
                 # Unknown header identities use -1; retain each skipped path in run records.
                 match = re.fullmatch(r"lvmCFrame-(\d+)\.fits(?:\.gz)?", path.name)
@@ -262,12 +267,14 @@ def select_exposures(*, inputs=None, input_list=None, drpall=None, sas_base_dir=
                                          exptime, catalog_fluxcal, all_exposures)
     unique = {}
     for item in exposures:
-        key = ("skipped", str(item.input_path)) if item.status == "skipped_input" else item.identity
+        key = ("exposure", item.expnum) if item.deferred else (
+            ("skipped", str(item.input_path)) if item.status == "skipped_input" else item.identity)
         previous = unique.get(key)
         if previous is not None and previous.input_path != item.input_path:
             raise ValueError(f"Conflicting paths for exposure identity {item.identity}")
         unique[key] = item
-    selected = sorted(unique.values(), key=lambda v: (*v.identity, str(v.input_path)))
+    selected = sorted(unique.values(), key=(lambda v: (v.expnum, str(v.input_path))) if explicit
+                      else (lambda v: (*v.identity, str(v.input_path))))
     if not selected:
         raise ValueError("The selection contains no exposures")
     return selected[:max_exposures] if max_exposures else selected, context
@@ -290,7 +297,7 @@ def scientific_implementation():
     return digest.hexdigest()
 
 
-def _check_state(seed, item, input_hash):
+def _check_state(seed, item, input_stat):
     import numpy as np
     from astropy.io import fits
 
@@ -299,7 +306,13 @@ def _check_state(seed, item, input_hash):
     with fits.open(seed, memmap=True) as saved, fits.open(item.input_path, memmap=True) as source:
         if not required.issubset({h.name for h in saved}):
             raise ValueError(f"Saved state needs compact SkyML median/ML extensions: {seed}")
-        if read_metadata(saved)["input_sha256"] != input_hash:
+        provenance = read_metadata(saved)
+        if provenance.get("input_stat") is not None:
+            matches = provenance["input_stat"] == input_stat
+        else:
+            # Old snapshots require their original hash check only when explicitly reused.
+            matches = provenance.get("input_sha256") == file_sha256(item.input_path)
+        if not matches:
             raise ValueError(f"Saved state belongs to a different CFrame: {seed}")
         if (not np.array_equal(saved["WAVE"].data, source["WAVE"].data)
             or not np.array_equal(saved["SLITMAP"].data["fiberid"], source["SLITMAP"].data["fiberid"])):
@@ -331,6 +344,7 @@ def verify_product(item):
 def prepare_exposure(item, model, *, seed=None, implementation=None, on_existing="error"):
     """Resolve actual state mode and fingerprint without loading numerical models."""
     from ..sky_subtraction.settings import SETTINGS
+    from ..sky_subtraction.product import file_identity
 
     validate_model(model)
     if on_existing not in ("error", "skip", "overwrite"):
@@ -342,62 +356,49 @@ def prepare_exposure(item, model, *, seed=None, implementation=None, on_existing
         raise FileExistsError(f"Output exists: {item.output}; use --on-existing skip or --on-existing overwrite")
     if not item.input_path.is_file():
         raise FileNotFoundError(item.input_path)
-    hash_cache = {}
-    def hashed(path):
-        path = Path(path).expanduser().resolve()
-        if path not in hash_cache:
-            hash_cache[path] = file_sha256(path)
-        return hash_cache[path]
-
-    item.input_sha256 = hashed(item.input_path)
+    input_stat = file_identity(item.input_path)
     adjacent = item.output.parent / ("lvmSFrame-skyml-preparation-" +
                                       item.input_path.name.removeprefix("lvmCFrame-").removesuffix(".gz"))
     item.seed = Path(seed).expanduser().resolve() if seed else (adjacent if adjacent.exists() else None)
     item.state_mode = "reuse explicitly selected state" if seed else (
         "reuse adjacent saved state" if item.seed else "compute state in memory")
-    dependencies = {str(item.input_path): item.input_sha256}
-    state_hash = None
-    ensemble_hash = None
+    state_stat = None
+    ensemble_stat = None
     same_computed_snapshot = False
     if item.seed is not None:
         if item.seed == item.output:
             raise ValueError("Saved state and output must differ")
-        _check_state(item.seed, item, item.input_sha256)
-        state_hash = hashed(item.seed)
-        dependencies[str(item.seed)] = state_hash
+        _check_state(item.seed, item, input_stat)
+        state_stat = file_identity(item.seed)
         if seed is None and item.output.exists() and on_existing == "skip" and model.get("ensemble"):
             from astropy.io import fits
             with fits.open(item.output, memmap=True) as previous:
                 provenance = read_metadata(previous)
             same_computed_snapshot = (
-                provenance.get("preparation_sha256") == state_hash
+                provenance.get("preparation_stat") == state_stat
                 and provenance.get("cli_run", {}).get("state_mode") == "compute state in memory"
             )
             if same_computed_snapshot:
                 # --keep-preparation must not prevent resuming its own completed calculation.
-                state_hash = None
+                state_stat = None
                 ensemble = Path(model["ensemble"]).expanduser().resolve()
-                ensemble_hash = hashed(ensemble)
-                dependencies[str(ensemble)] = ensemble_hash
+                ensemble_stat = file_identity(ensemble)
     else:
         if not model.get("ensemble"):
             raise ValueError(f"--ml-model-file (alias --ensemble) is required for exposure {item.expnum} computing state anew")
         ensemble = Path(model["ensemble"]).expanduser().resolve()
-        ensemble_hash = hashed(ensemble)
-        dependencies[str(ensemble)] = ensemble_hash
-    gaia_hash = None
+        ensemble_stat = file_identity(ensemble)
+    gaia_stat = None
     if (item.seed is None or same_computed_snapshot) and model.get("gaia_dir"):
         gaia = Path(model["gaia_dir"]).expanduser().resolve() / f"lvmGAIA-fibers-{item.expnum:08d}.fits"
         if gaia.is_file():
-            gaia_hash = hashed(gaia)
-            dependencies[str(gaia)] = gaia_hash
+            gaia_stat = file_identity(gaia)
     scientific = {name: model[name] for name in DEFAULTS if name != "keep_preparation"}
-    fingerprint = dict(input_sha256=item.input_sha256, state_sha256=state_hash,
-                       ensemble_sha256=ensemble_hash, gaia_cache_sha256=gaia_hash,
+    fingerprint = dict(input_stat=input_stat, state_stat=state_stat,
+                       ensemble_stat=ensemble_stat, gaia_cache_stat=gaia_stat,
                        block_settings=scientific, settings=SETTINGS.asdict(),
                        implementation_sha256=implementation or scientific_implementation())
     item.fingerprint = hashlib.sha256(json.dumps(fingerprint, sort_keys=True).encode()).hexdigest()
-    item.dependencies = dependencies
     if item.output.exists() and on_existing == "skip":
         verify_product(item)
         item.status = "reused"
@@ -405,12 +406,17 @@ def prepare_exposure(item, model, *, seed=None, implementation=None, on_existing
 
 
 def make_plan(exposures, model, *, output_dir, flat_output=False, reuse_state_dir=None,
-              on_existing="error", missing_input="error"):
+              on_existing="error", missing_input="error", defer=False, implementation=None):
     output_dir = Path(output_dir).expanduser().resolve()
-    implementation = scientific_implementation()
+    validate_model(model)
+    if defer:
+        for item in exposures:
+            item.overwrite = on_existing == "overwrite"
+        return exposures
+    implementation = implementation or scientific_implementation()
     destinations = set()
     for item in exposures:
-        if item.status == "skipped_input":
+        if item.status == "skipped_input" or item.deferred:
             continue
         relative = Path() if flat_output else Path(item.tilegroup, str(item.tileid), str(item.mjd))
         item.output = output_dir / relative / f"lvmSFrame-skyml-block-{item.expnum:08d}.fits"
@@ -426,8 +432,14 @@ def make_plan(exposures, model, *, output_dir, flat_output=False, reuse_state_di
                 continue
             raise FileNotFoundError(item.input_path)
         actual = exposure_from_file(item.input_path)
-        if actual.identity != item.identity:
+        if not item.deferred and actual.identity != item.identity:
             raise ValueError(f"Catalogue and CFrame identity disagree: {item.input_path}")
+        if item.deferred:
+            item.version, item.mjd, item.expnum, item.tileid = actual.identity
+            item.tilegroup = actual.tilegroup
+            relative = Path() if flat_output else Path(item.tilegroup, str(item.tileid), str(item.mjd))
+            item.output = output_dir / relative / f"lvmSFrame-skyml-block-{item.expnum:08d}.fits"
+            item.deferred = False
         seed = None
         if reuse_state_dir:
             relative = Path() if flat_output else Path(item.tilegroup, str(item.tileid), str(item.mjd))

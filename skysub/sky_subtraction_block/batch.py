@@ -136,7 +136,7 @@ def _progress_panel(entries, elapsed):
 
 
 def run_batch(entries, model, budget, *, output_dir, run_dir=None, context=None,
-              on_error="continue", log_level="INFO", no_progress=False):
+              on_error="continue", log_level="INFO", no_progress=False, plan_options=None):
     run_dir = Path(run_dir).expanduser().resolve() if run_dir else new_run_dir(output_dir).resolve()
     if run_dir.exists() and any(run_dir.iterdir()):
         raise ValueError(f"Run directory must be new/empty: {run_dir}")
@@ -184,6 +184,8 @@ def run_batch(entries, model, budget, *, output_dir, run_dir=None, context=None,
         console.print(Text(f"Run records: {run_dir}"))
         if live:
             live.start()
+        from .planning import scientific_implementation
+        implementation = scientific_implementation()
         stop = False
         reported_errors = 0
         while queue or active:
@@ -195,6 +197,8 @@ def run_batch(entries, model, budget, *, output_dir, run_dir=None, context=None,
                 result_path = run_dir / (stem + ".result.json")
                 entry.log = str(run_dir / (stem + ".log"))
                 request = dict(exposure=entry.record(), model=model,
+                               plan_options=plan_options,
+                               implementation=implementation,
                                cpu_ids=budget["subsets"][slot], budget=budget,
                                result_path=str(result_path), log_level=log_level,
                                command=state["command"])
@@ -228,7 +232,15 @@ def run_batch(entries, model, budget, *, output_dir, run_dir=None, context=None,
                 except (OSError, ValueError):
                     result = dict(error=f"Worker exited {code}; inspect {entry.log}")
                 entry.elapsed_seconds = float(result.get("elapsed_seconds", 0))
-                if code == 0 and result.get("state") == "complete" and entry.output.is_file():
+                if "exposure" in result:
+                    resolved = result["exposure"]
+                    for name in ("expnum", "mjd", "tileid", "version", "tilegroup", "state_mode", "fingerprint", "error"):
+                        setattr(entry, name, resolved[name])
+                    entry.output = Path(resolved["output"]) if resolved["output"] else None
+                    entry.seed = Path(resolved["seed"]) if resolved["seed"] else None
+                if code == 0 and result.get("state") in ("reused", "skipped_input"):
+                    entry.status = result["state"]
+                elif code == 0 and result.get("state") == "complete" and entry.output is not None and entry.output.is_file():
                     entry.status = "complete"
                     log.info("Exposure %s complete in %.1f s: %s", entry.expnum, entry.elapsed_seconds, entry.output)
                     event(f"✓ {entry.expnum} completed in {_duration(entry.elapsed_seconds)}",

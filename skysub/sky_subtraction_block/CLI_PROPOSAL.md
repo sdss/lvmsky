@@ -324,7 +324,7 @@ SELECT CATALOGUE EXPOSURES
   --all-exposures           Every row in the selected catalogue. [off]
                             Use instead of filters; not needed for INPUTS.
   --max-exposures N         First N entries after selection, deduplication and
-                            version/MJD/expnum/tile/path sorting. [all selected]
+                            catalogue version/MJD/expnum/tile/path sorting; path lists use expnum/path. [all selected]
                             N must be an integer >=1.
                             A reproducible subset, not a quality ranking.
   --missing-input POLICY    error: stop planning; skip: record unavailable input.
@@ -467,3 +467,13 @@ skyml-block batch \
 Release checks cover legacy argv/defaults and improved help, single/legacy scientific equivalence, input-source rules and selectors, deterministic maximum selection, SAS/environment/explicit-path precedence, actual Gaia cache/error cases, same-exposure state checks, mirrored/flat collision handling, compatible-product reuse, atomic publication and interruptions. Test P/J/C arithmetic and observe the actual process-tree affinity and native threads during both J=1 and explicitly parallel exposure runs.
 
 The revision was checked against the argparse entry point, runner, Gaia producer/consumer, regularization code, shared threading bootstrap and SDSS directory documentation. Local real-data commands, measured process resources and product checks are stored under `analysis/cli_validation/` in the validation workspace.
+
+## Deferred input preparation
+
+Ordinary batches queue explicit paths without opening CFrames. Workers resolve
+headers, final paths and reuse policies for their own exposure. Initial plan
+records may have unresolved identities/paths; final records contain the resolved
+values. Dry runs resolve headers for display. Ordinary block calculations use
+size/mtime input identity instead of CFrame content hashes. CLI reuse fingerprints
+use file metadata and scientific settings; edits preserving size/mtime are not
+detected. Legacy hash-only saved states retain their hash validation on reuse.

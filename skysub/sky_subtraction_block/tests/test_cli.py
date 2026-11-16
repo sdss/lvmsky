@@ -21,6 +21,13 @@ from skysub.sky_subtraction_block.options import DEFAULTS
 RUNNER = CliRunner()
 
 
+@pytest.fixture(autouse=True)
+def linux_affinity_on_other_platforms(monkeypatch):
+    if not hasattr(resources.os, "sched_getaffinity"):
+        monkeypatch.setattr(resources.os, "sched_getaffinity", lambda _: set(range(64)), raising=False)
+        monkeypatch.setattr(resources.os, "sched_setaffinity", lambda *args: None, raising=False)
+
+
 @pytest.fixture
 def cframe(tmp_path):
     def make(expnum=11017, mjd=60325, tileid=1029016, root=None):
@@ -574,13 +581,14 @@ def test_snapshot_saved_by_computation_can_be_resumed(cframe, model, tmp_path):
         hdus = [fits.PrimaryHDU(), original["WAVE"].copy(), original["SLITMAP"].copy()]
     for name in ("MED_COEF", "MED_LABELS", "ML_COEF", "MED_LSF_COEF", "RENDER_META", "LSF_FIBERS"):
         hdus.append(fits.ImageHDU(np.zeros(1), name=name))
-    payload = json.dumps(dict(input_sha256=item.input_sha256)).encode()
+    from skysub.sky_subtraction.product import file_identity
+    payload = json.dumps(dict(input_stat=file_identity(source), input_sha256=None)).encode()
     hdus.append(fits.ImageHDU(np.frombuffer(payload, dtype="u1"), name="SKYML_META"))
     fits.HDUList(hdus).writeto(snapshot)
     make_product(item)
     with fits.open(item.output, mode="update") as product:
         meta = dict(cli_run=dict(fingerprint=item.fingerprint, state_mode="compute state in memory"),
-                    preparation_sha256=planning.file_sha256(snapshot))
+                    preparation_stat=file_identity(snapshot))
         product["SKYML_META"].data = np.frombuffer(json.dumps(meta).encode(), dtype="u1")
         for hdu in product:
             hdu.add_checksum()
@@ -727,3 +735,132 @@ def test_missing_worker_dependency_stops_before_batch(cframe, model, tmp_path, m
     assert result.exit_code == 2, result.output
     assert "threadpoolctl unavailable" in result.output
     assert not (tmp_path / "out").exists()
+
+
+def test_path_batch_queues_without_opening_inputs(tmp_path, model, monkeypatch):
+    from skysub.sky_subtraction_block import batch as scheduler
+
+    manifest = tmp_path / 'inputs.txt'
+    manifest.write_text('lvmCFrame-00011017.fits\nlvmCFrame-00011018.fits\n')
+    def forbidden(*args, **kwargs):
+        pytest.fail('Coordinator must not open or hash CFrames')
+    monkeypatch.setattr(planning, 'exposure_from_file', forbidden)
+    monkeypatch.setattr(planning, 'file_sha256', forbidden)
+    monkeypatch.setattr(planning, 'scientific_implementation', forbidden)
+    monkeypatch.setattr(cli, 'apply_affinity', lambda _: None)
+    monkeypatch.setattr(cli, 'check_runtime_dependencies', lambda: None)
+    captured = {}
+    def run(entries, *args, **kwargs):
+        captured.update(entries=entries, options=kwargs['plan_options'])
+        return dict(state='complete', counts={})
+    monkeypatch.setattr(scheduler, 'run_batch', run)
+    result = RUNNER.invoke(cli.app, ['batch', '--input-list', str(manifest), *model_arguments(model),
+                                    '--output-dir', str(tmp_path / 'out')])
+    assert result.exit_code == 0, result.output
+    assert len(captured['entries']) == 2
+    assert all(e.deferred and e.output is None and e.mjd == -1 for e in captured['entries'])
+
+
+def test_deferred_worker_resolves_one_file_without_hashing(cframe, model, tmp_path, monkeypatch):
+    from skysub.sky_subtraction_block import _worker
+
+    source = cframe()
+    entries, _ = planning.select_exposures(inputs=[source], defer_headers=True)
+    output = tmp_path / 'out'
+    options = dict(output_dir=str(output), flat_output=False)
+    request_path = tmp_path / 'request.json'
+    result_path = tmp_path / 'result.json'
+    request_path.write_text(json.dumps(dict(
+        exposure=entries[0].record(), model=model, plan_options=options,
+        implementation='test-implementation',
+        result_path=str(result_path), log_level='INFO', cpu_ids=None, budget={}, command='test'), default=str))
+    calls = []
+    def fake_run(input_path, **kwargs):
+        calls.append((input_path, kwargs))
+        destination = Path(kwargs['output'])
+        destination.parent.mkdir(parents=True)
+        fits.HDUList([fits.PrimaryHDU(), fits.BinTableHDU(
+            Table(dict(adopted=[True])), name='BLOCK_LSF_META')]).writeto(destination)
+        return destination
+    monkeypatch.setitem(sys.modules, 'skysub.sky_subtraction_block.pipeline', SimpleNamespace(run=fake_run))
+    monkeypatch.setattr(_worker, 'limit_numerics', lambda: None)
+    monkeypatch.setattr(_worker, 'runtime_resources', lambda: {})
+    monkeypatch.setattr(_worker, 'apply_affinity', lambda _: None)
+    def forbidden(*args):
+        pytest.fail('New calculations must not hash CFrames')
+    monkeypatch.setattr(planning, 'file_sha256', forbidden)
+    monkeypatch.setattr(planning, 'scientific_implementation', forbidden)
+    assert _worker.main(request_path) == 0
+    result = json.loads(result_path.read_text())
+    assert result['state'] == 'complete'
+    assert Path(result['exposure']['output']) == output / '1029XX/1029016/60325/lvmSFrame-skyml-block-00011017.fits'
+    assert len(calls) == 1 and calls[0][0] == source
+    assert result['exposure']['mjd'] == 60325
+
+
+def test_deferred_missing_input_is_skipped_in_worker(tmp_path, model):
+    source = tmp_path / 'lvmCFrame-00011017.fits'
+    entries, _ = planning.select_exposures(inputs=[source], defer_headers=True)
+    planning.make_plan(entries, model, output_dir=tmp_path / 'out', defer=True)
+    assert entries[0].status == 'queued'
+    planning.make_plan(entries, model, output_dir=tmp_path / 'out', missing_input='skip')
+    assert entries[0].status == 'skipped_input' and entries[0].output is None
+
+
+def test_deferred_duplicate_exposure_paths_are_rejected(tmp_path):
+    with pytest.raises(ValueError, match='Conflicting paths'):
+        planning.select_exposures(inputs=[tmp_path / 'one/lvmCFrame-00011017.fits',
+                                          tmp_path / 'two/lvmCFrame-00011017.fits'], defer_headers=True)
+
+
+def test_dry_run_and_deferred_selection_use_same_limit(cframe):
+    sources = [cframe(11018, mjd=60324), cframe(11017, mjd=60325)]
+    eager, _ = planning.select_exposures(inputs=sources, max_exposures=1)
+    deferred, _ = planning.select_exposures(inputs=sources, max_exposures=1, defer_headers=True)
+    assert eager[0].expnum == deferred[0].expnum == 11017
+
+
+def test_deferred_batch_workers_resolve_results_and_isolate_bad_inputs(cframe, model, tmp_path, monkeypatch):
+    from skysub.sky_subtraction_block import batch as scheduler
+
+    good = cframe()
+    missing = tmp_path / 'lvmCFrame-00011018.fits'
+    invalid = tmp_path / 'lvmCFrame-00011019.fits'
+    invalid.write_bytes(b'not FITS')
+    entries, _ = planning.select_exposures(inputs=[good, missing, invalid], defer_headers=True)
+    def forbidden(*args, **kwargs):
+        pytest.fail('Parent must not read CFrame headers')
+    monkeypatch.setattr(planning, 'exposure_from_file', forbidden)
+    real_popen = subprocess.Popen
+    probe = '''
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+from astropy.io import fits
+from astropy.table import Table
+from skysub.sky_subtraction_block import _worker
+def run(input_path, **kwargs):
+    output = Path(kwargs['output'])
+    output.parent.mkdir(parents=True, exist_ok=True)
+    fits.HDUList([fits.PrimaryHDU(), fits.BinTableHDU(
+        Table(dict(adopted=[True])), name='BLOCK_LSF_META')]).writeto(output)
+    return output
+sys.modules['skysub.sky_subtraction_block.pipeline'] = SimpleNamespace(run=run)
+_worker.apply_affinity = lambda _: None
+_worker.limit_numerics = lambda: None
+_worker.runtime_resources = lambda: {}
+raise SystemExit(_worker.main(sys.argv[1]))
+'''
+    monkeypatch.setattr(scheduler.subprocess, 'Popen', lambda command, **kwargs:
+                        real_popen([sys.executable, '-c', probe, command[-1]], **kwargs))
+    monkeypatch.setattr(scheduler, 'apply_affinity', lambda _: None)
+    budget = dict(processes=2, jobs=1, cpus=2, cpu_ids=[0, 1], subsets=[[0], [1]])
+    output = tmp_path / 'out'
+    result = scheduler.run_batch(entries, model, budget, output_dir=output, no_progress=True,
+        plan_options=dict(output_dir=str(output), missing_input='skip'))
+    assert [e.status for e in entries] == ['complete', 'skipped_input', 'error']
+    assert entries[0].output == output / '1029XX/1029016/60325/lvmSFrame-skyml-block-00011017.fits'
+    assert entries[0].output.is_file() and entries[1].output is None
+    assert result['state'] == 'complete_with_errors'
+    recorded = Table.read(Path(result['run_dir']) / 'results.ecsv')
+    assert recorded['mjd'][0] == 60325 and recorded['status'][1] == 'skipped_input'
