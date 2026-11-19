@@ -458,6 +458,11 @@ def run(
     median_fits = adapter.fit_medians(stack, {kind: median_references[label] for kind, label in labels.items()}, labels)
     LOG.info('Predicting one Science IFU coefficient vector')
     ml, prediction_diagnostics = predict_ifu(ensemble_path, frame, median_fits)
+    extra = rel.RELIABILITY_GAIA_FALLBACK if any(d['fallback'] for d in selection.diagnostics.values()) else 0
+    if any(f.fit_status not in ('Solved', 'AlmostSolved') for f in median_fits.results.values()):
+        extra |= rel.RELIABILITY_FIT_FAILED
+    bits = np.asarray(prediction_diagnostics['reliability'], np.int32)
+    prediction_diagnostics['reliability'] = np.where(bits < 0, bits, bits | extra).astype(np.int32)
     corrections = estimate_corrections(frame, median_fits, ml, medians, stack, near, settings)
     ml.oh_coef = corrections.oh_coef
 
@@ -536,6 +541,7 @@ def run(
             for label, fit in median_fits.results.items()
         },
         selected_fiberids={k: work.fiberids[v] for k, v in selection.indices.items()},
+        fiber_selection=selection.diagnostics,
         median_lsf_rule='equal mean of selected valid fiber profiles; median approximation',
         sky_fiber_model='SkyE/SkyW rows: telescope median decomposition rendered with the median LSF; '
         'FLUX is a residual of the fibers that build that median, not an independent test',

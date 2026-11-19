@@ -6,6 +6,7 @@ used by rendering.py and fiber_lsf.py.
 """
 
 from dataclasses import asdict, dataclass, field
+import logging
 from pathlib import Path
 
 import numpy as np
@@ -27,6 +28,7 @@ GAIA_TAP_MAX_RECORDS = 1_000_000
 line_design = _line_design
 wave_fingerprint = _wave_fingerprint
 zodi_correction = dp.SPLIT_ZODI_ZODI_CORRECTION
+LOG = logging.getLogger(__name__)
 
 
 def telescope_coords(header, label):
@@ -66,8 +68,13 @@ def fit_medians(stack, states, labels):
     reliability = {labels[kind]: fitted[(kind, 0)][1] for kind in KINDS}
     for kind in KINDS:
         label, fit = labels[kind], results[labels[kind]]
-        if fit.fit_status not in ('Solved', 'AlmostSolved') or not np.isfinite(fit.coef).all():
+        finite = np.size(fit.coef) > 0 and np.isfinite(fit.coef).all()
+        retained = fit.fit_status.startswith('failed:') and fit.fit_status.endswith(':InsufficientProgress')
+        if not finite or (fit.fit_status not in ('Solved', 'AlmostSolved') and not retained):
             raise RuntimeError(f'{label} median decomposition: {fit.fit_status} {fit.fit_summary}')
+        if retained:
+            reliability[label]['reliability'] = int(reliability[label]['reliability']) | rel.RELIABILITY_FIT_FAILED
+            LOG.warning('%s: retaining finite median fit with %s; fit_failed is propagated', label, fit.fit_status)
     # A solved fit can still describe nothing, and a good fit can describe Moon glare instead of sky
     # (exposures 13190, 13248).  Science fits are exempt: their R2 is low whenever the target is bright.
     failed = tuple(

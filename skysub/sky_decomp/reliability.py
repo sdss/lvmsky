@@ -70,6 +70,7 @@ RELIABILITY_DIFFUSE_OH_CAP_BINDING = 1 << 21   # diffuse/OH block cap active
 RELIABILITY_DIFFUSE_RATIO_PINNED = 1 << 22     # a species ratio on its bracket
 RELIABILITY_SHAPE_BOUND_ACTIVE = 1 << 23   # moon/zodi adjacent-knot bound active
 RELIABILITY_ONE_ARM_FALLBACK = 1 << 24     # prediction: one sky arm stood in for a misfit one
+RELIABILITY_GAIA_FALLBACK = 1 << 25        # a median used the least contaminated eligible fibers
 
 # MEASURED OCCUPANCY, so a near-universal warning is not misread as a rare
 # event (24 every10 telluric rows, sci arm, verified against the solver's own
@@ -170,6 +171,7 @@ RELIABILITY_BITS = (
     (RELIABILITY_DIFFUSE_RATIO_PINNED, "diffuse_ratio_pinned"),
     (RELIABILITY_SHAPE_BOUND_ACTIVE, "shape_bound_active"),
     (RELIABILITY_ONE_ARM_FALLBACK, "one_arm_fallback"),
+    (RELIABILITY_GAIA_FALLBACK, "gaia_selection_fallback"),
 )
 
 
@@ -545,6 +547,7 @@ __all__ = [
     "RELIABILITY_DIFFUSE_COLLAPSED", "RELIABILITY_SCI_COLOUR_EXCESS",
     "RELIABILITY_MISFIT", "MISFIT_R2_MIN", "misfit",
     "RELIABILITY_ARM_MISFIT", "RELIABILITY_ONE_ARM_FALLBACK", "fallback_bits",
+    "RELIABILITY_GAIA_FALLBACK",
     "RELIABILITY_MOON_GLARE", "MOON_GLARE_SEP_MAX", "MOON_GLARE_FLI_MIN", "MOON_GLARE_COLOUR_MIN",
     "ARM_COLOUR_BLUE_BAND", "ARM_COLOUR_RED_BAND", "arm_colour_excess", "moon_glare", "ARM_FAILURE_MASK",
     "RELIABILITY_REVERSAL_UNTESTABLE", "RELIABILITY_REVERSAL_RETRIED",

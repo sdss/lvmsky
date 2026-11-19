@@ -83,6 +83,30 @@ Example: exposure 59750, 1944 input fibers × 12401 wavelengths; 1754 processed 
 
 ## Reconstruction API
 
+### Selection and numerical quality flags
+
+New products record `GAIAFB` in the primary header when any median used the
+least-contaminated-fiber fallback; `GAIAFBS`, `GAIAFBE`, and `GAIAFBW` identify
+Science, SkyE, and SkyW. An absent keyword in an older product means unknown.
+`SKYMLREL` also carries `gaia_selection_fallback` (`1 << 25`, a warning) when
+prediction reliability was evaluated. The `-1` not-evaluated sentinel is retained.
+`SKYML_META.fiber_selection[label]` records eligible, clean and selected counts,
+the fallback boolean and its reason. `GAIA.selected` and `selection_reason`
+identify the actual fibers. The clean-fiber targets are 50 for Science and 10
+for each Sky telescope. Below the target, select up to that many eligible fibers
+by increasing Gaia-to-observed flux ratio, breaking ties by fiber ID. Larger clean
+samples are retained in full. No spectrum or wavelength grid is transformed by
+this selection.
+
+Median fits ending in `InsufficientProgress` may continue with their finite
+coefficient vector. `MEDFITFL=True` in the primary header identifies this case,
+including when prediction reliability was not evaluated. `MED_QA` retains the
+original status; `SKYML_META.median_fits` retains the status and summary.
+`fit_failed` (`1 << 0`, an error) is propagated to evaluated prediction reliability.
+This does not certify convergence or scientific quality.
+Nonfinite coefficients, invalid input/coordinates, other solver failures, and
+the existing rejection of two unusable sky arms remain fatal.
+
 Block basis searches can use distinct offset dimensions in B and R/Z.
 `LSF_META.n_offset` records the actual offset count for each channel;
 `LSF_COEF` is NaN-padded to the largest channel count. The reader accepts older

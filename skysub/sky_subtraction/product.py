@@ -257,6 +257,15 @@ def build_product(input_path, inputs, provenance):
     bits = provenance.get('prediction_diagnostics', {}).get('reliability')
     if bits is not None:
         set_prediction_reliability(product[0].header, int(np.asarray(bits).ravel()[0]))
+    selection = provenance.get('fiber_selection', {})
+    for label, keyword in (('Sci', 'GAIAFBS'), ('SkyE', 'GAIAFBE'), ('SkyW', 'GAIAFBW')):
+        product[0].header[keyword] = (bool(selection.get(label, {}).get('fallback', False)),
+                                     f'{label} median used Gaia selection fallback')
+    product[0].header['GAIAFB'] = (any(d.get('fallback', False) for d in selection.values()),
+                                  'Any median used Gaia selection fallback')
+    product[0].header['MEDFITFL'] = (any(f.fit_status not in ('Solved', 'AlmostSolved')
+                                       for f in inputs.median_fits.results.values()),
+                                    'Retained median with failed solver status')
     product.append(json_hdu('SKYML_META', provenance, indent=2, allow_nan=True))
     return product
 

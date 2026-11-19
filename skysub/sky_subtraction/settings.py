@@ -8,6 +8,7 @@ class Settings:
     # Gaia-clean fiber selection and medians.
     gaia_ratio_threshold: float = 0.01
     science_min_fibers: int = 50
+    sky_min_fibers: int = 10
     min_valid_fraction: float = 0.95
     # Per-fiber R/Z LSF fit.
     continuum_spacing_angstrom: float = 20.0

@@ -2,6 +2,8 @@
 
 from copy import deepcopy
 from pathlib import Path
+from types import SimpleNamespace
+from dataclasses import dataclass
 
 import numpy as np
 import pytest
@@ -11,6 +13,8 @@ from skysub.sky_decomp.lsf_reference import load_survey_ascii_lsf
 from skysub.sky_decomp.lsf_spline2d import _integrated_components, _line_design, evaluate_lsf_diagnostics
 from skysub.sky_decomp.lsf_surface_iterative import evaluate_bspline_basis
 from skysub.sky_subtraction import fiber_lsf
+from skysub.sky_subtraction import decomp_adapter as adapter
+from skysub.sky_decomp import reliability as rel
 from skysub.sky_subtraction.fiber_lsf import fit_channel
 from skysub.sky_subtraction.io import median_spectrum, select_fibers
 
@@ -42,14 +46,73 @@ def test_selection_join_order_and_science_fallback():
     annotated = selection.annotate(table)
     assert annotated['selected'].sum() == 60 and set(annotated['selection_reason']) == {
         'lowest_ratio_50',
-        'gaia_clean',
+        'reduced_sample',
         'not_selected',
     }
     assert len(selected['SkyE']) == len(selected['SkyW']) == 5
+    assert selection.diagnostics['SkyE'] == dict(eligible=5, clean=5, selected=5,
+                                                fallback=True, reason='reduced_sample')
     assert np.max(table['ratio_gaia_to_lvm_flux_plus_sky_g'][selected['Sci']]) < 0.085
     table['gaia_g_n_valid_sources'][60:65] = 0
     with pytest.raises(ValueError, match='SkyE'):
         select_fibers(slit, table)
+
+
+def test_sky_selection_relaxes_contamination_cut_but_keeps_eligibility():
+    n = 180
+    slit = Table(dict(fiberid=np.arange(n), fibstatus=np.zeros(n, int),
+                      telescope=np.repeat(['Sci', 'SkyE', 'SkyW'], 60)))
+    photometry = Table(dict(n_gaia_sources=np.ones(n, int), gaia_g_n_valid_sources=np.ones(n, int),
+        ratio_gaia_to_lvm_flux_plus_sky_g=np.tile(np.linspace(0.02, 0.5, 60), 3),
+        lvm_flux_plus_sky_g=np.ones(n), lvm_flux_plus_sky_g_valid_fraction=np.ones(n)))
+    slit['fibstatus'][60] = 1
+    selected = select_fibers(slit, photometry)
+    assert selected.indices['SkyE'].tolist() == list(range(61, 71))
+    assert selected.indices['SkyW'].tolist() == list(range(120, 130))
+    assert len(selected.indices['Sci']) == 50
+    assert selected.diagnostics['SkyW']['reason'] == 'lowest_ratio_10'
+    assert all(d['fallback'] and d['clean'] == 0 for d in selected.diagnostics.values())
+    photometry['ratio_gaia_to_lvm_flux_plus_sky_g'][120:130] = 0.001
+    assert not select_fibers(slit, photometry).diagnostics['SkyW']['fallback']
+    photometry['ratio_gaia_to_lvm_flux_plus_sky_g'][129] = 0.02
+    assert select_fibers(slit, photometry).diagnostics['SkyW']['fallback']
+    photometry['ratio_gaia_to_lvm_flux_plus_sky_g'] = 0.001
+    clean = select_fibers(slit, photometry)
+    assert len(clean.indices['SkyE']) == 59
+    assert not any(d['fallback'] for d in clean.diagnostics.values())
+
+
+@pytest.mark.parametrize('status,finite,accepted', [
+    ('Solved', True, True),
+    ('failed:cycle_1_continuum:InsufficientProgress', True, True),
+    ('failed:cycle_1_continuum:InsufficientProgress', False, False),
+    ('failed:cycle_1_continuum:PrimalInfeasible', True, False),
+    ('failed_input', True, False),
+])
+def test_median_fit_retains_finite_insufficient_progress_with_flag(monkeypatch, status, finite, accepted):
+    @dataclass
+    class Config:
+        value: int = 1
+
+    results = {k: (SimpleNamespace(fit_status='Solved', coef=np.ones(2), t_o2=190.,
+                                  fit_summary='test'), {'reliability': 0}) for k in adapter.KINDS}
+    results['sky1'][0].fit_status = status
+    if not finite:
+        results['sky1'][0].coef[0] = np.nan
+    monkeypatch.setattr(adapter.dp, 'decompose_in_process', lambda *a, **kw: {(k, 0): v for k, v in results.items()})
+    monkeypatch.setattr(adapter.dp, '_WORKER_FACTOR', adapter.FACTOR)
+    monkeypatch.setattr(adapter.dp, '_WORKER_DECOMPOSER_KWARGS', dict(config=Config(), base_dir=ROOT))
+    monkeypatch.setattr(adapter.dp, '_science_line_mask_for_row', lambda _: np.zeros(4))
+    monkeypatch.setattr(adapter.dp, '_telluric_decomposer', lambda *a: SimpleNamespace(
+        pwv_mm=2., source_airmass=1., drp_transmission=np.ones(4)))
+    labels = dict(sci='Sci', sky1='SkyE', sky2='SkyW')
+    if not accepted:
+        with pytest.raises(RuntimeError):
+            adapter.fit_medians(None, None, labels)
+    else:
+        fitted = adapter.fit_medians(None, None, labels)
+        assert fitted.results['SkyE'].fit_status == status
+        assert bool(fitted.reliability['SkyE']['reliability'] & rel.RELIABILITY_FIT_FAILED) == status.startswith('failed:')
 
 
 def test_masked_median_and_gaussian_variance():

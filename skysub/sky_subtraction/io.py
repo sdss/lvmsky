@@ -47,7 +47,8 @@ class GaiaPhotometry(NamedTuple):
 class Selection(NamedTuple):
     indices: dict  # telescope -> selected row indices
     eligible: np.ndarray
-    reasons: np.ndarray  # per row: gaia_clean, lowest_ratio_50, reduced_sample or not_selected
+    reasons: np.ndarray  # per row: gaia_clean, lowest_ratio_N, reduced_sample or not_selected
+    diagnostics: dict
 
     def annotate(self, photometry):
         """Copy of the photometry table with the selection columns of the GAIA extension."""
@@ -152,7 +153,7 @@ def resolve_gaia(path, frame, directory, cache):
 
 
 def select_fibers(slit, photometry, settings=SETTINGS):
-    """Gaia-clean usable fibers per telescope; Science falls back to its lowest-ratio fibers."""
+    """Prefer Gaia-clean fibers; fill small samples from the least contaminated eligible fibers."""
     clean = gaia_ratio_clean_mask(photometry, settings.gaia_ratio_threshold)
     ratio = np.asarray(photometry['ratio_gaia_to_lvm_flux_plus_sky_g'], float)
     n, valid = np.asarray(photometry['n_gaia_sources']), np.asarray(photometry['gaia_g_n_valid_sources'])
@@ -165,21 +166,28 @@ def select_fibers(slit, photometry, settings=SETTINGS):
         & (np.asarray(photometry['lvm_flux_plus_sky_g_valid_fraction']) >= settings.min_valid_fraction)
     )
     telescopes = np.char.strip(np.asarray(slit['telescope']).astype(str))
-    minimum = settings.science_min_fibers
+    diagnostics = {}
     selected, reasons = {}, np.full(len(slit), 'not_selected', dtype='U24')
     for label in TELESCOPES:
         candidates = np.flatnonzero(eligible & (telescopes == label))
         indices = np.flatnonzero(eligible & clean & (telescopes == label))
+        minimum = settings.science_min_fibers if label == 'Sci' else settings.sky_min_fibers
+        n_clean = len(indices)
         reason = 'gaia_clean'
-        if label == 'Sci' and len(indices) < minimum:
+        if len(indices) < minimum:
             order = np.lexsort((np.asarray(slit['fiberid'])[candidates], ratio[candidates]))
             indices = candidates[order[:minimum]]
             reason = f'lowest_ratio_{minimum}' if len(indices) == minimum else 'reduced_sample'
         if not len(indices):
-            raise ValueError(f'{label}: no eligible Gaia-selected fibers')
+            raise ValueError(f'{label}: no eligible fibers before the Gaia contamination cut')
+        diagnostics[label] = dict(eligible=len(candidates), clean=n_clean, selected=len(indices),
+                                  fallback=reason != 'gaia_clean', reason=reason)
+        if reason != 'gaia_clean':
+            LOG.warning('%s: Gaia selection fallback: %s clean, %s eligible, %s selected (%s)',
+                        label, n_clean, len(candidates), len(indices), reason)
         selected[label] = indices
         reasons[indices] = reason
-    return Selection(selected, eligible, reasons)
+    return Selection(selected, eligible, reasons, diagnostics)
 
 
 def median_spectrum(flux, ivar, mask, indices):

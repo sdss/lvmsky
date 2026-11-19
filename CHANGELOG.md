@@ -4,6 +4,11 @@
 
 ### Changed
 
+- Extend the least-contaminated-fiber median fallback to SkyE/SkyW, targeting
+  10 eligible fibers per Sky telescope (Science keeps 50). Persist fallback headers, selection counts
+  and a prediction reliability warning. Retain finite `InsufficientProgress`
+  median coefficients with their original status and a propagated fit-failure
+  bit; invalid inputs and nonfinite coefficients remain fatal.
 - Queue block-CLI path lists without scanning CFrame headers or contents first.
   Workers resolve each input and output path independently, with batch progress
   active during preparation. Missing/invalid inputs follow per-worker policies.

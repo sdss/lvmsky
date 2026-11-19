@@ -11,6 +11,7 @@ from astropy.table import Table
 
 from skysub.sky_decomp.lsf_reference import load_survey_ascii_lsf
 from skysub.sky_subtraction import pipeline
+from skysub.sky_decomp import reliability as rel
 from skysub.sky_subtraction.decomp_adapter import MedianFits
 from skysub.sky_subtraction.io import Median
 from skysub.sky_subtraction.product import MLCoefficients, ProductInputs, build_product, sha256, write_product
@@ -108,6 +109,21 @@ def test_output_is_reconstructible_and_atomic(tmp_path):
         assert h['FLUX'].data[2, 5] == 0 and h['SKY'].data[2, 5] == np.float32(1e-14)
     # The in-memory product (used by the block method) equals what is published.
     memory = build_product(source, inputs, {})
+    assert not memory[0].header['GAIAFB']
+    results['SkyE'].fit_status = 'failed:cycle_1_continuum:InsufficientProgress'
+    flagged = build_product(source, inputs, dict(
+        fiber_selection={'SkyE': dict(fallback=True)},
+        prediction_diagnostics={'reliability': [rel.RELIABILITY_GAIA_FALLBACK | rel.RELIABILITY_FIT_FAILED]}))
+    flagged_path = tmp_path / 'flagged.fits'
+    flagged.writeto(flagged_path)
+    with fits.open(flagged_path) as h:
+        assert h[0].header['GAIAFB'] and h[0].header['GAIAFBE']
+        assert not h[0].header['GAIAFBS'] and not h[0].header['GAIAFBW']
+        assert h[0].header['SKYMLREL'] & rel.RELIABILITY_GAIA_FALLBACK
+        assert h[0].header['SKYMLREL'] & rel.RELIABILITY_FIT_FAILED
+        assert h[0].header['MEDFITFL']
+        assert h['MED_QA'].data['fit_status'][1] == results['SkyE'].fit_status
+    results['SkyE'].fit_status = 'Solved'
     with fits.open(dest) as h:
         assert sorted(x.name for x in memory) == sorted(x.name for x in h)
         for name in ('FLUX', 'SKY', 'MED_COEF'):
