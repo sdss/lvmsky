@@ -887,6 +887,53 @@ GROUP_EFFECTIVE_WAVELENGTH_A = {
     'ionospheric': 6300.0,
 }
 
+# Optional split of the 'ionospheric' group into one head per emission
+# mechanism (experiments_ionospheric_split_heads_v1).  Each subgroup keeps every
+# group-level setting of 'ionospheric' (285 km layer, airglow geometry, sqrt
+# compressor, no PCA), so only the head structure changes.  Off unless a caller
+# applies split_ionospheric_group() to its group_indices.
+IONOSPHERIC_SPLIT = {
+    'iono_red': ('ATOM_Or',),                              # [O I] 6300/6364, O2+ dissociative recombination
+    'iono_n': ('ATOM_N',),                                 # [N I] 5199
+    'iono_rec': ('ATOM_Orc_OI0777', 'ATOM_Orc_OI0845'),    # O I 7774/8446, radiative recombination
+}
+for _g in IONOSPHERIC_SPLIT:
+    AIRGLOW_GROUPS.add(_g)
+    GROUP_HEIGHT_FEATURE[_g] = GROUP_HEIGHT_FEATURE['ionospheric']
+    GROUP_EFFECTIVE_WAVELENGTH_A[_g] = GROUP_EFFECTIVE_WAVELENGTH_A['ionospheric']
+
+# Optional split of [O I] 5577 out of 'atomic' (experiments_ionospheric_branches_v1).
+# 'oi_green' keeps every group-level setting of 'atomic' (95 km layer, sqrt, no PCA).
+ATOMIC_SPLIT = {
+    'atomic': ('ATOM_K', 'ATOM_Na'),                       # mesopause metals
+    'oi_green': ('ATOM_Og',),                              # [O I] 5577, ~97 km
+}
+AIRGLOW_GROUPS.add('oi_green')
+GROUP_HEIGHT_FEATURE['oi_green'] = GROUP_HEIGHT_FEATURE['atomic']
+GROUP_EFFECTIVE_WAVELENGTH_A['oi_green'] = GROUP_EFFECTIVE_WAVELENGTH_A['atomic']
+
+
+def _split_group(group_indices, coef_names, group, split):
+    """Replace ``group`` by the ``split`` subgroups, in its place in the group order."""
+    names = [str(n) for n in coef_names]
+    parts = {g: np.asarray([names.index(n) for n in members], dtype=int) for g, members in split.items()}
+    if sorted(int(j) for idx in parts.values() for j in idx) != sorted(int(j) for j in group_indices[group]):
+        raise RuntimeError(f'the split does not partition the {group} group')
+    out = {}
+    for g, idx in group_indices.items():
+        out.update(parts if g == group else {g: idx})
+    return out
+
+
+def split_ionospheric_group(group_indices, coef_names):
+    """Replace 'ionospheric' by the IONOSPHERIC_SPLIT subgroups, in its place in the group order."""
+    return _split_group(group_indices, coef_names, 'ionospheric', IONOSPHERIC_SPLIT)
+
+
+def split_atomic_group(group_indices, coef_names):
+    """Move [O I] 5577 out of 'atomic' into its own 'oi_green' group (ATOMIC_SPLIT)."""
+    return _split_group(group_indices, coef_names, 'atomic', ATOMIC_SPLIT)
+
 
 def _group_height_feature_name(group_name):
     """van Rhijn context feature (hence effective layer height) for a group.

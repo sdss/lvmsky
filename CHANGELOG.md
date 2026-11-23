@@ -4,6 +4,22 @@
 
 ### Changed
 
+- `mlp_predictor`: optional split of the `ionospheric` group into one group per
+  emission mechanism (`data.IONOSPHERIC_SPLIT`, `data.split_ionospheric_group()`),
+  a per-group `head_dim` mapping in the model, and a `group_weight_overrides`
+  trainer key. Off by default; the deployed ensemble loads and predicts as before.
+  Used by `experiments_ionospheric_split_heads_v1` (not adopted).
+
+- `mlp_predictor`: optional isolated airglow branches (`isolated_branches`,
+  `isolated_branch_inputs` model/trainer keys): small per-group MLPs that bypass the
+  trunk, read the full sci/near/far context plus chosen groups' near/far scores, and
+  add to the group's alpha blend. Also `data.split_atomic_group()` moving [O I] 5577
+  into its own `oi_green` group (95 km). Off by default; the deployed ensemble loads
+  and predicts as before. Used by `experiments_ionospheric_branches_v1`.
+
+- `mlp_predictor`: optional `fixed_blend_alpha` model/trainer key holding a group's
+  near/far blend weight fixed instead of learned. Off by default.
+
 - Extend the least-contaminated-fiber median fallback to SkyE/SkyW, targeting
   10 eligible fibers per Sky telescope (Science keeps 50). Persist fallback headers, selection counts
   and a prediction reliability warning. Retain finite `InsufficientProgress`

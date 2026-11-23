@@ -50,6 +50,19 @@ def _make_mlp(in_dim: int, dims: Sequence[int]) -> nn.Module:
     return nn.Sequential(*layers) if layers else nn.Identity()
 
 
+def as_head_dim(head_dim):
+    """An int for every group, or a {group: int} mapping whose 'default' covers the rest."""
+    if isinstance(head_dim, Mapping):
+        return {str(g): int(v) for g, v in head_dim.items()}
+    return int(head_dim)
+
+
+def head_dim_for(head_dim, group: str) -> int:
+    if isinstance(head_dim, Mapping):
+        return int(head_dim.get(group, head_dim['default']))
+    return int(head_dim)
+
+
 def _make_shared_head(in_dim: int, head_dim: int, n_out: int) -> nn.Module:
     """trunk_out -> head_dim -> n_out with a single GELU between."""
     return nn.Sequential(
@@ -126,7 +139,7 @@ class DualEncoderGroupHeadMLPCompressed(nn.Module):
         encoder_dims: tuple[int, ...] = (768, 384),
         ctx_dims: tuple[int, ...] = (96,),
         trunk_dims: tuple[int, ...] = (320, 160),
-        head_dim: int = 192,
+        head_dim: int | Mapping[str, int] = 192,
         zodi_head_extra_dims: tuple[int, ...] = (32,),
         continuum_head_extra_dims: tuple[int, ...] = (64,),
         continuum_branch_dims: tuple[int, ...] = (128, 64),
@@ -136,6 +149,9 @@ class DualEncoderGroupHeadMLPCompressed(nn.Module):
         continuum_ctx_restriction: Sequence[str] = (),
         moon_zodi_ctx_restriction: Sequence[str] = (),
         moon_zodi_coupling_dims: tuple[int, ...] = (64, 32),
+        isolated_branches: Mapping[str, Sequence[int]] | None = None,
+        isolated_branch_inputs: Sequence[str] = (),
+        fixed_blend_alpha: Mapping[str, float] | None = None,
     ) -> None:
         super().__init__()
         if not zodi_ctx_restriction:
@@ -169,9 +185,11 @@ class DualEncoderGroupHeadMLPCompressed(nn.Module):
         trunk_out = int(trunk_dims[-1]) if len(trunk_dims) > 0 else fusion_in
 
         # ---- Shared-trunk heads (one per group) -------------------------------
+        # Groups in ``isolated_branches`` get no trunk head (see the branch block below).
+        self.isolated_branches = {str(g): tuple(int(v) for v in d) for g, d in (isolated_branches or {}).items()}
         self.heads = nn.ModuleDict({
-            g: _make_shared_head(trunk_out, int(head_dim), int(n_g))
-            for g, n_g in group_score_dims.items()
+            g: _make_shared_head(trunk_out, head_dim_for(head_dim, g), int(n_g))
+            for g, n_g in group_score_dims.items() if g not in self.isolated_branches
         })
 
         # ---- Per-group learnable blend alpha (direct parametrization) --------
@@ -202,6 +220,13 @@ class DualEncoderGroupHeadMLPCompressed(nn.Module):
             str(g): nn.Parameter(torch.tensor(_init_by_group[str(g)]))
             for g in group_score_dims
         })
+        # Optional fixed blend weights (off by default): the forward pass uses the
+        # given alpha exactly, and the group's parameter is frozen at its clipped value.
+        self.fixed_blend_alpha = {str(g): float(a) for g, a in (fixed_blend_alpha or {}).items()}
+        for g, a in self.fixed_blend_alpha.items():
+            with torch.no_grad():
+                self.blend_alpha_direct[g].fill_(_clip(a))
+            self.blend_alpha_direct[g].requires_grad_(False)
 
         # ---- Context-dependent alpha for the anisotropic groups --------------
         idx, self.alpha_ctx_features = _resolve_ctx_indices(
@@ -276,6 +301,22 @@ class DualEncoderGroupHeadMLPCompressed(nn.Module):
             f"continuum_head_extra_dims={tuple(continuum_head_extra_dims)}."
         )
 
+        # ---- Isolated airglow branches (optional, off by default) -------------
+        # One small MLP per listed group, bypassing the trunk: it reads the full
+        # sci/near/far context and the near/far scores of the
+        # ``isolated_branch_inputs`` groups, and its output is added to the
+        # group's own alpha blend exactly like a trunk head's.
+        self.isolated_branch_inputs = tuple(str(g) for g in isolated_branch_inputs)
+        missing = [g for g in (*self.isolated_branches, *self.isolated_branch_inputs) if g not in group_score_dims]
+        if missing or (self.isolated_branches and not self.isolated_branch_inputs):
+            raise ValueError(f"isolated branches need known groups and inputs; unknown: {missing}")
+        n_branch_score = sum(int(group_score_dims[g]) for g in self.isolated_branch_inputs)
+        self.airglow_branches = nn.ModuleDict({
+            g: nn.Sequential(_make_mlp(3 * int(n_ctx) + 2 * n_branch_score, dims),
+                             nn.Linear(int(dims[-1]), int(group_score_dims[g])))
+            for g, dims in self.isolated_branches.items()
+        })
+
         # ---- Additive moon-zodi coupling (Phase F) ---------------------------
         mz_idx, self.moon_zodi_ctx_restriction = _resolve_ctx_indices(
             ctx_names, moon_zodi_ctx_restriction, "moon_zodi_ctx_restriction")
@@ -341,15 +382,21 @@ class DualEncoderGroupHeadMLPCompressed(nn.Module):
         mz_latent = self.moon_zodi_coupling_branch(mzin)
 
         alpha_ctx_sci = sci_ctx[:, self.alpha_ctx_idx]
+        if self.airglow_branches:
+            branch_in = torch.cat(
+                [sci_ctx, near_ctx, far_ctx]
+                + [s[:, slice(*self._score_offsets[g])] for s in (near_score, far_score)
+                   for g in self.isolated_branch_inputs], dim=1)
 
         out: dict[str, torch.Tensor] = {}
-        for g, head in self.heads.items():
+        for g in self.group_score_dims:
+            head = self.heads[g] if g in self.heads else self.airglow_branches[g]
             lo, hi = self._score_offsets[g]
             if g in self.alpha_predictors:
                 alpha = torch.sigmoid(self.alpha_predictors[g](alpha_ctx_sci))
                 blend = alpha * near_score[:, lo:hi] + (1.0 - alpha) * far_score[:, lo:hi]
             else:
-                alpha = self.blend_alpha_direct[g]
+                alpha = self.fixed_blend_alpha.get(g, self.blend_alpha_direct[g])
                 blend = alpha * near_score[:, lo:hi] + (1.0 - alpha) * far_score[:, lo:hi]
 
             if g == "zodi":
@@ -375,6 +422,8 @@ class DualEncoderGroupHeadMLPCompressed(nn.Module):
             elif g == "moon":
                 head_out = head(h) + self.moon_zodi_moon_projector(mz_latent)
                 out[g] = blend + head_out
+            elif g in self.airglow_branches:
+                out[g] = blend + head(branch_in)
             else:
                 out[g] = blend + head(h)
         return out

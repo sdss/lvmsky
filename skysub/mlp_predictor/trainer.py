@@ -95,7 +95,7 @@ from .ml_utils import (
     set_reproducibility,
     split_indices_by_moon_phase,
 )
-from .model import DualEncoderGroupHeadMLPCompressed
+from .model import DualEncoderGroupHeadMLPCompressed, as_head_dim
 
 DEFAULT_COEF_ERR_SIGMA_FLOOR_BY_GROUP = {
     # Per-group floors on the relative sigma (fraction of the per-column
@@ -688,6 +688,12 @@ def train_compressed_group_mlp(
     continuum_head_extra_dims=(64,),
     continuum_branch_dims=(128, 64),
     moon_zodi_coupling_dims=(64, 32),
+    # Optional isolated airglow branches {group: hidden dims} and the groups whose
+    # near/far scores they read (model.py); empty = the parent architecture.
+    isolated_branches=None,
+    isolated_branch_inputs=(),
+    # Optional {group: alpha} held fixed instead of learned (model.py).
+    fixed_blend_alpha=None,
     weight_decay=1e-4, grad_clip=1.0, patience=4,
     seed=42,
     moon_group_weight=1.0,
@@ -695,6 +701,9 @@ def train_compressed_group_mlp(
     continuum_group_weight=1.0,
     mesospheric_group_weight=1.0,
     ionospheric_group_weight=1.0,
+    # Multipliers for groups without a named *_group_weight argument (e.g. the
+    # IONOSPHERIC_SPLIT subgroups); a missing group keeps m_g = 1.
+    group_weight_overrides=None,
     blend_init_alpha=0.7,
     # 2026-09-01: learning-rate multiplier for the blend-alpha parameters
     # (``blend_alpha_direct`` + the ctx-alpha predictors).  At the default 1.0
@@ -794,6 +803,7 @@ def train_compressed_group_mlp(
                           'continuum': float(continuum_group_weight),
                           'mesospheric': float(mesospheric_group_weight),
                           'ionospheric': float(ionospheric_group_weight)}
+    _group_multipliers.update({str(g): float(v) for g, v in (group_weight_overrides or {}).items()})
     group_loss_weight = {
         g: (1.0 / max(float(np.sqrt(max(int(n), 1))), 1.0))
            * _group_multipliers.get(g, 1.0)
@@ -1123,11 +1133,14 @@ def train_compressed_group_mlp(
         encoder_dims=tuple(int(v) for v in encoder_dims),
         ctx_dims=tuple(int(v) for v in ctx_dims),
         trunk_dims=tuple(int(v) for v in trunk_dims),
-        head_dim=int(head_dim),
+        head_dim=as_head_dim(head_dim),
         zodi_head_extra_dims=tuple(int(v) for v in zodi_head_extra_dims),
         continuum_head_extra_dims=tuple(int(v) for v in continuum_head_extra_dims),
         continuum_branch_dims=tuple(int(v) for v in continuum_branch_dims),
         moon_zodi_coupling_dims=tuple(int(v) for v in moon_zodi_coupling_dims),
+        isolated_branches=isolated_branches,
+        isolated_branch_inputs=tuple(isolated_branch_inputs),
+        fixed_blend_alpha=fixed_blend_alpha,
         blend_init_alpha=(dict(blend_init_alpha) if isinstance(blend_init_alpha, Mapping)
                           else float(blend_init_alpha)),
         alpha_ctx_features=alpha_ctx_features,
@@ -1776,7 +1789,7 @@ def train_compressed_group_mlp(
             'lr': float(lr), 'encoder_dims': tuple(int(v) for v in encoder_dims),
             'ctx_dims': tuple(int(v) for v in ctx_dims),
             'trunk_dims': tuple(int(v) for v in trunk_dims),
-            'head_dim': int(head_dim), 'weight_decay': float(weight_decay),
+            'head_dim': as_head_dim(head_dim), 'weight_decay': float(weight_decay),
             'zodi_head_extra_dims': tuple(int(v) for v in zodi_head_extra_dims),
             'continuum_head_extra_dims': tuple(int(v) for v in continuum_head_extra_dims),
             'continuum_branch_dims': tuple(int(v) for v in continuum_branch_dims),
@@ -1784,6 +1797,9 @@ def train_compressed_group_mlp(
             'continuum_ctx_restriction': tuple(str(x) for x in continuum_ctx_restriction),
             'moon_zodi_ctx_restriction': tuple(str(x) for x in moon_zodi_ctx_restriction),
             'moon_zodi_coupling_dims': tuple(int(v) for v in moon_zodi_coupling_dims),
+            'isolated_branches': {str(g): tuple(int(v) for v in d) for g, d in (isolated_branches or {}).items()},
+            'isolated_branch_inputs': tuple(str(g) for g in isolated_branch_inputs),
+            'fixed_blend_alpha': {str(g): float(a) for g, a in (fixed_blend_alpha or {}).items()},
             'alpha_ctx_features': tuple(str(x) for x in alpha_ctx_features),
             'patience': int(patience), 'seed': int(seed),
             'moon_group_weight': float(moon_group_weight),
@@ -1791,6 +1807,7 @@ def train_compressed_group_mlp(
             'continuum_group_weight': float(continuum_group_weight),
             'mesospheric_group_weight': float(mesospheric_group_weight),
             'ionospheric_group_weight': float(ionospheric_group_weight),
+            'group_weight_overrides': dict(group_weight_overrides or {}),
             'blend_init_alpha': (dict(blend_init_alpha) if isinstance(blend_init_alpha, Mapping)
                                  else float(blend_init_alpha)),
             'alpha_lr_mult': float(alpha_lr_mult),
@@ -2387,7 +2404,8 @@ class Trainer:
     # the failure mode _CONSUMED_CFG_KEYS exists to catch.
     _OPTIONAL_CFG_KEYS = frozenset({
         # read via cfg.get(); absent means the trainer default applies
-        "ensemble_workers", "ensemble_start_method",
+        "ensemble_workers", "ensemble_start_method", "group_weight_overrides",
+        "isolated_branches", "isolated_branch_inputs", "fixed_blend_alpha",
         "moon_down_amp_free", "moon_down_amp_rule", "moon_down_alt_deg",
         "moon_down_frac_max", "moon_down_ratio_transfer",
         "zodi_ceiling_rule", "zodi_ceiling_amp_free",
@@ -2430,12 +2448,15 @@ class Trainer:
             encoder_dims=tuple(int(v) for v in c["encoder_dims"]),
             ctx_dims=tuple(int(v) for v in c["ctx_dims"]),
             trunk_dims=tuple(int(v) for v in c["trunk_dims"]),
-            head_dim=int(c["head_dim"]),
+            head_dim=as_head_dim(c["head_dim"]),
             zodi_head_extra_dims=tuple(int(v) for v in c["zodi_head_extra_dims"]),
             continuum_head_extra_dims=tuple(int(v) for v in c["continuum_head_extra_dims"]),
             continuum_branch_dims=tuple(int(v) for v in c["continuum_branch_dims"]),
             moon_zodi_ctx_restriction=c["moon_zodi_ctx_restriction"],
             moon_zodi_coupling_dims=tuple(int(v) for v in c["moon_zodi_coupling_dims"]),
+            isolated_branches=c.get("isolated_branches"),
+            isolated_branch_inputs=tuple(c.get("isolated_branch_inputs", ())),
+            fixed_blend_alpha=c.get("fixed_blend_alpha"),
             blend_init_alpha=(dict(c["blend_init_alpha"])
                               if isinstance(c["blend_init_alpha"], Mapping)
                               else float(c["blend_init_alpha"])),
@@ -2447,6 +2468,7 @@ class Trainer:
             continuum_group_weight=float(c["continuum_group_weight"]),
             mesospheric_group_weight=float(c["mesospheric_group_weight"]),
             ionospheric_group_weight=float(c["ionospheric_group_weight"]),
+            group_weight_overrides=dict(c.get("group_weight_overrides") or {}),
             coef_err_sigma_floor_rel=c["coef_err_sigma_floor_rel"],
             zodi_ctx_restriction=c["zodi_ctx_restriction"],
             continuum_ctx_restriction=c["continuum_ctx_restriction"],

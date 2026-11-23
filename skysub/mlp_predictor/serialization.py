@@ -26,7 +26,7 @@ from typing import Mapping, Any
 
 import torch
 
-from .model import DualEncoderGroupHeadMLPCompressed
+from .model import DualEncoderGroupHeadMLPCompressed, as_head_dim
 
 # v2 (2026-09-09) added the constraint-derived amplitude rules; a v1 file
 # loads without them and silently mis-predicts, so v1 is refused.
@@ -164,11 +164,14 @@ def _build_model_from_config(cfg: Mapping[str, Any], *, n_input_score: int,
         encoder_dims=tuple(int(v) for v in cfg["encoder_dims"]),
         ctx_dims=tuple(int(v) for v in cfg["ctx_dims"]),
         trunk_dims=tuple(int(v) for v in cfg["trunk_dims"]),
-        head_dim=int(cfg["head_dim"]),
+        head_dim=as_head_dim(cfg["head_dim"]),
         zodi_head_extra_dims=tuple(int(v) for v in cfg["zodi_head_extra_dims"]),
         continuum_head_extra_dims=tuple(int(v) for v in cfg["continuum_head_extra_dims"]),
         continuum_branch_dims=tuple(int(v) for v in cfg["continuum_branch_dims"]),
         moon_zodi_coupling_dims=tuple(int(v) for v in cfg["moon_zodi_coupling_dims"]),
+        isolated_branches=cfg.get("isolated_branches"),
+        isolated_branch_inputs=tuple(cfg.get("isolated_branch_inputs", ())),
+        fixed_blend_alpha=cfg.get("fixed_blend_alpha"),
         # Scalar or per-group mapping; a restored ensemble must rebuild the
         # SAME model or its alphas start somewhere the training never saw.
         blend_init_alpha=(dict(cfg["blend_init_alpha"])
