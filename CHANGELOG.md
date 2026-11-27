@@ -4,6 +4,161 @@
 
 ### Changed
 
+- `mlp_predictor.sky_field` (new) and `OI6300Model(sky_field=True)`: optional inputs from a night-long field of the
+  zenith [O I] 6300 measured by SkyNear and SkyFar (Gaussian process over all exposures of the night, read at the
+  Science and SkyNear pierce points; 4 field inputs plus the number of samples within 1 h). Ported from
+  `experiments_external_data_v1/WP8_lvm_internal/skyfield.py`; the new module reproduces its values to 3e-5 dex
+  (one gradient to 7e-4 in the worst row) when given its kernel parameters. The kernel parameters are learned from
+  the sky telescopes of the corpus at build time (`sky_field.fit`, 80 random nights) and stored on the model as
+  `field_hyper` and in its JSON, so a rebuild on another DRP version learns them again.
+  Post-processing only: the field uses later exposures of the night. Default off; saved models load unchanged.
+  `oi6300_build --sky-field` builds the inputs. Three more models in `skysub/oi6300_models/` (`*_field_ens5`),
+  test nights, 4,834 rows: no Science lines 0.0083 -> 0.0073 dex; OH, O2, 5577, 7774, 8446 0.0062 -> 0.0056; plus
+  5199 0.0056 -> 0.0051 (0.0072, 0.0056, 0.0051 with the experiment's parameters). The default model is now OH, O2, 5577, 7774, 8446 with the night field (`oi6300_model_oh_o2_5577_7774_8446_field_ens5`); the description is rewritten around it. Test added
+  (`sky_decomp/tests/test_oi6300.py`, 8 pass).
+- Science [O I] 6300 model, second review before the first commit (against the independent review in the Obsidian
+  note `OI 6300 Uncommitted Review 2026-11-27`); all six models rebuilt. Fixes: exposures with a pointing at
+  ra = dec = 0 no longer give samples to the night field; a missing ROTI stays missing (it was read as 0.005
+  TECU/min); a sky telescope of zero weight is no longer read by the base (a missing SkyFar line gave NaN at
+  `a = 1`); the cross-validation learns the OH groups, the kernel parameters of the night field and the input
+  ranges inside each run from the other nights only; `sky_field.fit` picks nights by usable exposures, records
+  nights, samples, likelihood and convergence, and treats overflowing parameters as a rejected point; `build_table`
+  compares every corpus line with the coefficient files, rejects repeated exposure numbers, and checks the rows and
+  grid of the decomposition files through residual + best fit = stack flux; repeated `sci_lines`, a non-positive
+  guard or ensemble size and too few nights are rejected before the fit; `iono_corpus._match` takes the nearer of
+  the two neighbours (a time 5e-8 d above an entry was not matched). New: `OI6300Model.lines_used`, `quality`,
+  `INPUTS_VERSION` (`load` refuses a model built for other inputs: models saved before this entry must be rebuilt);
+  each build also writes `<name>_cv.csv` (test-night prediction of every training row) and records input files
+  with checksums, git commit, module checksums, settings and package versions in `<name>.json`. Test-night sigma
+  after the rebuild [dex]: default (Science lines + night field) 0.0055 (was 0.0056), + [N I] 5199 0.0051 (0.0051),
+  Science lines without field 0.0062 (0.0062), + 5199 0.0056 (0.0056), field without Science lines 0.0071 (0.0073),
+  neither 0.0083 (0.0083). `OI6300_MODEL.md` rewritten as a step-by-step description of the data selection and the
+  build. The corpus label of `h6300` is corrected to the emission-weighted mean height (values unchanged).
+- `OI6300Model.predict`: a guarded Science line that is missing for an exposure is now handled like a line above
+  the guard, with the model trained without it; before, it was passed to the full model as a missing value. No
+  retraining: saved models pick the rule up on load. On the knox 1.3.2 corpus no clean row has a missing guarded
+  line, so predictions on the 10,426 clean rows are bit-identical and the test-night scores stand; 1,523 of 18,640
+  rows change (1,969 with [N I] 5199), median 0.002 dex, maximum 0.02-0.03 dex.
+- `mlp_predictor.oi6300_build` (new): one module that rebuilds the Science [O I] 6300 model from a decomposed median
+  stack: `python -m mlp_predictor.oi6300_build --decomp-root ROOT --stem STEM --out oi6300_models --sci-lines oh o2
+  5577 7774 8446`. Steps are separate functions (`build_table`, `row_sets`, `control_lines`, `cross_validate`,
+  `scores`); it replaces the table code that was repeated in the model notebook and in two experiment scripts. It
+  reproduces the earlier table exactly (same row sets, night groups, OH groups, control ratios), with three
+  differences: rows with ra = dec = 0 in any telescope pointing are excluded (32 corpus rows, 4 of the 4,838
+  training rows), the corpus must match the decomposition coefficients (checked), and the ROTI columns are the
+  corrected ones. Each run writes `<name>.pkl` and `<name>.json` (input files, corpus checksum, row counts, OH
+  groups, test-night scores, package versions); the same record is on the model as `meta`, the OH groups as
+  `oh_groups`. Models rebuilt in `skysub/oi6300_models/` (pickles git-ignored, JSON tracked), nested
+  cross-validation by nights on 4,834 rows, ensemble of 5: OH, O2, 5577, 7774, 8446 (current) 0.0062 dex, 10.5% of
+  rows with a dropped line; plus 5199 0.0056, 13.0%; no Science lines 0.0083. `OI6300Model`: `fit` rejects training
+  rows without a valid target, boosting early stopping is switched off explicitly (it was already off below 10,000
+  rows). `iono_corpus` CLI takes `--decomp-root` and `--stem`. Description of the current model:
+  `skysub/mlp_predictor/OI6300_MODEL.md`. Tests: `sky_decomp/tests/test_oi6300.py` (7 pass). The earlier pickles in
+  the experiment `outputs/` directories are kept as history. Not yet read by SkyML.
+
+- `mlp_predictor.roti`: the broadcast navigation file is now the first one with at least 24 GPS satellites
+  (`_get_nav`, `MIN_NAV_GPS`), not the first that exists. `BRDC00WRD_S` holds only 8-11 GPS satellites on 28 days
+  (MJD 60181-60213), so ROTI on those days came from a third of the rays. The cache for those days was refetched
+  (32 satellites; old files kept in `ionosphere_cache/roti/backup_incomplete_nav/`), the bundled ROTI table
+  `sky_decomp/data/ionosphere/roti/roti_ctx_...npz` was rebuilt, and the `<arm>_roti_*` and `<arm>_dvtec_event*`
+  columns of the ionosphere corpus were replaced on the 31 affected nights (546 rows; rows with a ROTI value
+  66% -> 98%, median ray samples 4 -> 13; night 60284 also gained samples from station-days cached after the first
+  build). No other column changed. The corpus column `log10_nmf2` is in log10 m^-3: the label was wrong (cm^-3) in
+  `iono_corpus.COLUMNS`, the corpus README and the file's `columns_json`; values are unchanged. Models trained
+  before this fix used the old ROTI values on those rows: the five `OI6300Model` pickles in
+  `experiments_ionospheric_oi_model/outputs/` and the ionospheric-context MLP candidates were not retrained; the two
+  Science-line ensembles in `experiments_external_data_v1/science_lines/outputs/` were. Test:
+  `sky_decomp/tests/test_roti.py::test_navigation_download_skips_an_incomplete_file`.
+
+- `mlp_predictor.oi6300`: optional Science-spectrum airglow lines as inputs of `OI6300Model` (`sci_lines`, default
+  none, so existing models and saved pickles behave as before). Allowed by the user on 2026-11-27: the mesospheric
+  control lines `'oh'` and `'o2'`, and `'5577'`, `'7774'`, `'8446'`; `'5199'` is an option to leave out where [N I]
+  may be nebular. All enter as Science/SkyNear zenith log ratios (`control_ratio`, `science_lines`); [O I] 6300 itself
+  is never an input. Lines a nebula can emit are guarded: the ratio of each is predicted from the sky telescopes and
+  the control lines, `line_levels` returns the excess in units of its scatter on nights left out of the fit, and
+  `predict` drops a line above `guard` (3) sigma for that exposure and uses the model trained without it (one model
+  per subset of the guarded lines; `guard=None` trains the full model only). Test-night sigma on the 4,838 model C
+  rows (`experiments_external_data_v1/science_lines/verify_model.py`): no Science lines 0.0084 dex; OH, O2 0.0074;
+  plus 5577, 7774, 8446 0.0063 (0.0062 unguarded); plus 5199 0.0057. The guard drops a line on 11-13% of clean rows.
+  With 1 dex of emission injected into one Science line the unguarded model is biased by up to 0.010 dex and the
+  guarded one is not (`science_lines/REPORT.md`). Ensembles of 5 saved by
+  `experiments_external_data_v1/science_lines/train_models.py` in `science_lines/outputs/` (`..._scilines_ens5.pkl`,
+  `..._scilines_ni_ens5.pkl` with 5199); the earlier models are unchanged. Not yet read by SkyML. Tests:
+  `sky_decomp/tests/test_oi6300.py` (5 pass).
+
+- `mlp_predictor.oi6300` (new): `OI6300Model` predicts the Science [O I] 6300 (slant, R; or the `ATOM_Or`
+  coefficient) from the two sky telescopes, log I_sci = log V_sci + a log z_near + (1 - a) log z_far + delta(x), with
+  delta a gradient-boosting correction on the sky lines, ctx and ionosphere of all three telescopes and their
+  geometry; no Science-spectrum input. `fit(..., members=5)` builds an ensemble of 5 models over random night groups
+  (predictions averaged). Inputs are kept only if the Clouds training rows cover the non-Clouds Science
+  range (>= 0.9); `predict` returns a quality flag. `clean_rows` (>= 10 fibres, log10 EW > 1.2, valid lines) and
+  `equivalent_width` define the training cuts. Trained and validated in
+  `experiments_ionospheric_oi_model/notebook_feature_histograms.ipynb` ("Final model") with cross-validation by
+  nights for three training sets: LMC+SMC Science, gas-poor Science elsewhere, and both. Trained on both, test-night
+  sigma is 0.0075 dex on LMC+SMC and 0.0086 dex on gas-poor Science elsewhere (SkyNear rescaled alone: 0.0129,
+  0.0122). Optional extra `oi6300` (scikit-learn). Not yet read by SkyML. Test: `sky_decomp/tests/test_oi6300.py`.
+
+- Ionosphere corpus (`mlp_predictor.iono_corpus`, new): one table with every ionospheric and thermospheric quantity per
+  exposure and telescope for the knox 1.3.2 corpus, `sky_decomp/data/ionosphere/corpus/iono_corpus_...npz` (18,640
+  rows, 146 columns, 8.7 MB): map and IGRF, IRI/NRLMSIS/HWM14 and model lines, bubble prior, ROTI, per-event dVTEC,
+  observed F-region and 5577 coefficients, sky-arm altimeter and q, solar activity, exposure ids, training flag.
+  `README.md` there lists each column (unit, source, spread); `diagnostics_cells/iono_corpus_hist.py` draws the
+  histograms in `figs/`. Not read by SkyML.
+
+- `mlp_predictor.roti.dvtec_event`: per-event electron deficit on the single ray nearest each pierce point
+  (field-aligned, elevation >= 30 deg, +-5 min); `diagnostics_cells/dvtec_events.py` tests it against the F-region
+  lines. Inside bubbles the sign and the line ordering are right (7774 slope +0.53 [+0.23, +0.88], 5577 control ~0)
+  but the slope is ~1/4 of the physical value because the nearest ray is a median 116 km away, about a bubble's
+  width; a correction of the Science prediction does not reduce held-out error. Not used by SkyML.
+
+- ROTI as a context option: `mlp_predictor.roti.roti_at`, `build_table` (`python -m mlp_predictor.roti table`) and
+  `bundled_table`; bundled per-exposure table `sky_decomp/data/ionosphere/roti/roti_ctx_...npz` (0.5 MB, 18,640 knox
+  rows, row-aligned with the ionosphere table; field-aligned 200 km / 10 min search, rays at 92% of rows).
+  `data._augment_triplet_with_roti` appends `iono_log10_roti_max`, `iono_log10_roti_med`, `iono_roti_avail`; inference
+  builds them for ensembles that read them, and `IONCTX` becomes `map+thermosphere+roti`. `features_at` uses a sorted
+  time window (same result, ~100x faster). Held-out test: no gain over the thermosphere variant (6300 +1.7%
+  [-5.2, +9.7]), so no ensemble uses it; the default is unchanged.
+
+- `mlp_predictor.thermosphere` (new): per-telescope F-layer and thermosphere context at the 285 km pierce point.
+  IRI-2020 profile (PyIRI) scaled to the UQRG VTEC (hmF2, NmF2, bottom thickness, VTEC/IRI ratio); NRLMSIS 2.1
+  (pymsis) O2, N2, O and T at hmF2; HWM14 magnetic-meridional wind and the vertical drift it drives; a Link & Cogger
+  (1988) model 6300 brightness, its emission height and a 7774 proxy. New `thermosphere` extra (pymsis, PyIRI);
+  HWM14 is compiled by `python -m mlp_predictor.thermosphere build-hwm` from a pinned, SHA256-checked upstream
+  commit (needs gfortran). Bundled table `sky_decomp/data/ionosphere/thermosphere/thermo_ctx_...npz` (18,640 knox
+  rows, row-aligned with the ionosphere table). `data._augment_triplet_with_thermosphere` appends six `iono_*`
+  columns (hmF2, log O2, T, log model 6300, h6300, wind drift); inference builds them for ensembles that use them.
+  Notebook variant `IONO_CTX=thermo` (`run_notebook.py --ionoctx-thermo`). Held-out clean MAD vs the ionospheric
+  context variant: 6300 -6.3% [-12.9, -0.4], 7774 -3.5%, 8446 -3.4% (-32/-28/-33% vs deployed);
+  `diagnostics_cells/thermosphere_signal.py` makes the report figures. `mlp_predictor.roti` now also keeps a
+  60-min high-passed vertical TEC perturbation (dvtec) per sample (cache files `*_v2.npz`).
+
+- `mlp_predictor.ionosphere` (new, not yet wired into the context or SkyML): IONEX vertical TEC
+  (UPC UQRG 15 min, CODE fallback, daily files cached in `skysub/ionosphere_cache/`) at the 285 km
+  pierce point of each telescope (Science, SkyE, SkyW). Also RMS, a +-30 min VTEC trend, IGRF
+  dip latitude and declination from the bundled `sky_decomp/data/geomag/igrf_285km_lco.npz`, and
+  pierce-point offsets along and across the magnetic meridian. All TEC values are vertical: the
+  van Rhijn factor stays applied only once, in `data.airglow_geometry_scale`.
+  `python -m mlp_predictor.ionosphere --oi-table ... --out ...` builds the per-exposure table.
+  `pyproject.toml` gains `ionosphere` and `geomag` (ppigrf, dev-only) extras.
+  Later additions: d log10 VTEC/dt, local VTEC gradient at the pierce point, and sun altitude at the IGRF-traced
+  magnetic conjugate point (+8.1 N, -74.5 W).
+
+- `mlp_predictor.bubbles` (new, not wired into the context or SkyML): plasma-bubble reach probability per
+  telescope. The ESA Swarm IBP climatology (`ibpmodel`, new `bubbles` extra) is calibrated in field-line apex height
+  on 2,538 Swarm A/B in-situ bubble-index passes over the LCO sector on the 771 corpus nights (VirES HAPI, cached in
+  `skysub/ionosphere_cache/swarm_ibi/`). Calibration: `sky_decomp/data/ionosphere/bubble_reach_calibration.json`.
+  `diagnostics_cells/bubble_signal.py` is the go/no-go: no gain on the deployed residual for any line (all 95%
+  night-bootstrap intervals contain zero), and Swarm-confirmed bubble exposures do not differ in the internal
+  near/far proxy q. Kept as infrastructure for a local measurement (GNSS ROTI); not adopted as a feature.
+
+- `mlp_predictor.roti` (new, not wired into SkyML): GNSS ROTI (5 min scatter of the 30 s geometry-free phase TEC
+  rate, GPS L1C/L2W, elevation >= 30 deg) at 285 km pierce points from public BKG 30 s RINEX 3 and broadcast
+  navigation (new `roti` extra, `hatanaka==2.8.1`); station-day results cached in `skysub/ionosphere_cache/roti/`,
+  raw RINEX not kept. `diagnostics_cells/roti_signal.py` pilot on 201 nights (OAFA, SANT, CORD; 3,568 clean
+  exposures): the near/far proxy q doubles when ROTI >= 1 TECU/min at a sky telescope (x2.0, 95% [1.2, 2.9],
+  37 nights), but such exposures are 3.8% of the total and adding ROTI gives no cross-validated gain on the
+  deployed residual. Candidate use: per-exposure bubble flag, not a model input.
+
 - `mlp_predictor`: optional split of the `ionospheric` group into one group per
   emission mechanism (`data.IONOSPHERIC_SPLIT`, `data.split_ionospheric_group()`),
   a per-group `head_dim` mapping in the model, and a `group_weight_overrides`

@@ -73,6 +73,7 @@ lvmsframe_*
 !skysub/sky_decomp/data/moon_zodi/meftah_solar_hrs_disk_integrated_v1_1_vacuum_velocity_step_2kms.npz
 !skysub/sky_decomp/data/palace/
 !skysub/sky_decomp/data/palace/PMD/
+!skysub/sky_decomp/data/geomag/igrf_285km_lco.npz
 !skysub/sky_decomp/data/palace/PMD/pmd_intdata_atom.dat
 !skysub/sky_decomp/data/palace/PMD/pmd_intmodel_Orc.dat
 !skysub/sky_decomp/data/palace/PMD/pmd_popmodel_O2.dat
@@ -125,3 +126,6 @@ analysis/sky_multifiber_method_discussion/59750_median_lsf_coefficient_metrics.c
 .kiro/
 figures*/
 lsf_calibration/
+
+# Trained Science [O I] 6300 models (rebuilt by mlp_predictor.oi6300_build; the .json summaries are tracked)
+skysub/oi6300_models/*.pkl

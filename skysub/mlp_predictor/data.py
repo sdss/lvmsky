@@ -3961,6 +3961,255 @@ def _sun_ecliptic_longitude_deg(obstime_mjd):
     return np.asarray(_sun.lon.degree, dtype=np.float64)
 
 
+# Per-arm ionospheric context (mlp_predictor.ionosphere).  Every value is VERTICAL (vertical TEC at the arm's 285 km
+# pierce point, its rate and local gradient, IGRF frame of the pierce point): the van Rhijn factor stays applied only
+# once, in airglow_geometry_scale.  ``iono_sun_alt_conjugate`` is per exposure and repeated in all three arms.
+IONOSPHERE_FEATURE_NAMES = (
+    'iono_log10_vtec', 'iono_vtec_rms', 'iono_dlog10vtec_dt', 'iono_dlog10vtec_dlat', 'iono_dlog10vtec_dlon',
+    'iono_dip_lat', 'iono_dx_mag_mer', 'iono_dx_mag_zon', 'iono_sun_alt_conjugate',
+)
+_IONOSPHERE_SOURCE = {
+    'iono_log10_vtec': 'vtec', 'iono_vtec_rms': 'vtec_rms', 'iono_dlog10vtec_dt': 'dlog10vtec_dt',
+    'iono_dlog10vtec_dlat': 'dlog10vtec_dlat', 'iono_dlog10vtec_dlon': 'dlog10vtec_dlon', 'iono_dip_lat': 'dip_lat',
+    'iono_dx_mag_mer': 'ipp_dx_mag_mer', 'iono_dx_mag_zon': 'ipp_dx_mag_zon',
+}
+
+
+def _augment_triplet_with_ionosphere(triplet, force=True):
+    """Append IONOSPHERE_FEATURE_NAMES to every arm's ctx, from each arm's own alt/az and obstime_mjd.
+
+    Rows found in a bundled per-corpus table (``mlp_predictor.ionosphere.CONTEXT_TABLE_DIR``, matched by obstime and
+    by every arm's alt/az) are read from it; only the remaining rows touch the IONEX cache, downloading missing days.
+    Records the per-row IONEX source of the Science arm in ``triplet['ionex_source']``.
+    """
+    from . import ionosphere
+
+    names = list(triplet['ctx_names'])
+    present = [i for i, n in enumerate(names) if n in IONOSPHERE_FEATURE_NAMES]
+    if present:
+        if not force:
+            return triplet
+        keep = [i for i in range(len(names)) if i not in present]
+        for arm in ('ctx_near', 'ctx_far', 'ctx_sci'):
+            triplet[arm] = np.asarray(triplet[arm], dtype=np.float32)[:, keep]
+        names = [names[i] for i in keep]
+    idx = {n: i for i, n in enumerate(names)}
+    missing = [n for n in ('alt', 'az_sin', 'az_cos') if n not in idx]
+    if missing or 'obstime_mjd' not in triplet:
+        raise RuntimeError(f'ionosphere augment needs ctx {missing} and obstime_mjd')
+    mjd = np.asarray(triplet['obstime_mjd'], dtype=np.float64)
+    roles = ionosphere.ROLES
+    ctx = {r: np.asarray(triplet[f'ctx_{r}'], dtype=np.float64) for r in roles}
+    alt = {r: ctx[r][:, idx['alt']] for r in roles}
+    az = {r: np.degrees(np.arctan2(ctx[r][:, idx['az_sin']], ctx[r][:, idx['az_cos']])) % 360.0 for r in roles}
+    n = mjd.size
+    raw = {r: {f: np.full(n, np.nan) for f in set(_IONOSPHERE_SOURCE.values())} for r in roles}
+    conj, source = np.full(n, np.nan), np.empty(n, dtype='<U4')
+
+    found, rows = ionosphere.context_from_tables(mjd, alt, az)
+    if found.any():
+        tab = ionosphere._bundled_tables()
+        for r in roles:
+            for f in raw[r]:
+                raw[r][f][found] = tab[f'{r}_{f}'][rows]
+        conj[found], source[found] = tab['sun_alt_conjugate'][rows], tab['sci_ionex_source'][rows]
+    miss = ~found
+    if miss.any():
+        m = int(miss.sum())
+        feats, src = ionosphere.telescope_features(np.tile(mjd[miss], len(roles)),
+                                                   np.concatenate([alt[r][miss] for r in roles]),
+                                                   np.concatenate([az[r][miss] for r in roles]))
+        for k, r in enumerate(roles):
+            for f in raw[r]:
+                raw[r][f][miss] = feats[f][k * m:(k + 1) * m]
+        conj[miss], source[miss] = ionosphere.sun_alt_conjugate(mjd[miss]), src[:m]
+    print(f'ionosphere augment: {int(found.sum())} rows from bundled tables, {int(miss.sum())} computed from IONEX')
+    for r in roles:
+        raw[r]['vtec'] = np.log10(np.clip(raw[r]['vtec'], 0.1, None))
+        cols = [raw[r][_IONOSPHERE_SOURCE[f]] for f in IONOSPHERE_FEATURE_NAMES[:-1]] + [conj]
+        triplet[f'ctx_{r}'] = np.hstack([np.asarray(triplet[f'ctx_{r}'], dtype=np.float32),
+                                         np.column_stack(cols).astype(np.float32)])
+    triplet['ctx_names'] = names + list(IONOSPHERE_FEATURE_NAMES)
+    triplet['ionex_source'] = source
+    return triplet
+
+
+THERMOSPHERE_FEATURE_NAMES = ('iono_hmf2', 'iono_log10_o2_hmf2', 'iono_tn_hmf2', 'iono_log10_model6300', 'iono_h6300',
+                              'iono_wind_w')
+_THERMOSPHERE_SOURCE = {'iono_hmf2': 'hmf2', 'iono_log10_o2_hmf2': 'log10_o2', 'iono_tn_hmf2': 'tn',
+                        'iono_log10_model6300': 'log10_model6300', 'iono_h6300': 'h6300', 'iono_wind_w': 'wind_w'}
+# The rest of the bundled thermosphere quantities (largely redundant with the six above; kept for the full variant).
+THERMOSPHERE_EXTRA_NAMES = ('iono_log10_nmf2', 'iono_b_bot', 'iono_log10_tec_scale', 'iono_log10_n2_hmf2',
+                            'iono_log10_o_hmf2', 'iono_log10_model7774', 'iono_wind_mer')
+_THERMOSPHERE_SOURCE |= {'iono_log10_nmf2': 'log10_nmf2', 'iono_b_bot': 'b_bot', 'iono_log10_tec_scale': 'log10_tec_scale',
+                         'iono_log10_n2_hmf2': 'log10_n2', 'iono_log10_o_hmf2': 'log10_o',
+                         'iono_log10_model7774': 'log10_model7774', 'iono_wind_mer': 'wind_mer_mag'}
+BUBBLE_PRIOR_NAMES = ('iono_bubble_p',)
+SKY_LINE_NAMES = ('iono_sky_altimeter', 'iono_sky_q')
+ROTI_NAMES = ('iono_log10_roti_max', 'iono_log10_roti_med', 'iono_roti_avail')
+ROTI_QUIET = 0.05  # TECU/min, ~corpus median of the max: the value given to rows without GPS samples
+ROTI_FLOOR = 0.005  # TECU/min, below the noise of a 5 min ROTI bin
+
+
+def _augment_triplet_with_thermosphere(triplet, force=True, extra=False):
+    """Append THERMOSPHERE_FEATURE_NAMES (IRI hmF2, MSIS [O2] and T_n at hmF2, model 6300) to every arm's ctx.
+
+    Needs the ionospheric augment first (its ``iono_log10_vtec`` anchors the IRI profile).  Rows found in the bundled
+    tables are read from ``mlp_predictor.thermosphere.bundled_table``; the rest are computed with PyIRI and NRLMSIS.
+    """
+    from . import ionosphere, thermosphere
+
+    names = list(triplet['ctx_names'])
+    wanted = THERMOSPHERE_FEATURE_NAMES + (THERMOSPHERE_EXTRA_NAMES if extra else ())
+    present = [i for i, n in enumerate(names) if n in THERMOSPHERE_FEATURE_NAMES + THERMOSPHERE_EXTRA_NAMES]
+    if present:
+        if not force:
+            return triplet
+        keep = [i for i in range(len(names)) if i not in present]
+        for arm in ('ctx_near', 'ctx_far', 'ctx_sci'):
+            triplet[arm] = np.asarray(triplet[arm], dtype=np.float32)[:, keep]
+        names = [names[i] for i in keep]
+    idx = {n: i for i, n in enumerate(names)}
+    if 'iono_log10_vtec' not in idx:
+        raise RuntimeError('thermosphere augment needs the ionosphere augment first')
+    mjd = np.asarray(triplet['obstime_mjd'], dtype=np.float64)
+    roles = ionosphere.ROLES
+    ctx = {r: np.asarray(triplet[f'ctx_{r}'], dtype=np.float64) for r in roles}
+    alt = {r: ctx[r][:, idx['alt']] for r in roles}
+    az = {r: np.degrees(np.arctan2(ctx[r][:, idx['az_sin']], ctx[r][:, idx['az_cos']])) % 360.0 for r in roles}
+    n = mjd.size
+    raw = {r: {f: np.full(n, np.nan) for f in _THERMOSPHERE_SOURCE.values()} for r in roles}
+    found, rows = ionosphere.context_from_tables(mjd, alt, az)
+    tab = thermosphere.bundled_table() if found.any() else None
+    if tab is None:
+        found[:] = False
+    else:
+        for r in roles:
+            for f in raw[r]:
+                raw[r][f][found] = tab[f'{r}_{f}'][rows]
+    miss = ~found
+    if miss.any():
+        f107_prev = _solar_activity_lookup(mjd[miss] - 1.0, 'f107').astype(np.float64)
+        f107a = _solar_activity_lookup(mjd[miss], 'f107_81d').astype(np.float64)
+        ap = thermosphere.kp_to_ap(_solar_activity_lookup(mjd[miss], 'kp').astype(np.float64))
+        for r in roles:
+            lat, lon, _, _ = ionosphere.pierce_point(alt[r][miss], az[r][miss])
+            f = thermosphere.features(mjd[miss], lat, lon, 10 ** ctx[r][miss, idx['iono_log10_vtec']], f107_prev, f107a, ap)
+            for k in raw[r]:
+                raw[r][k][miss] = f[k]
+    print(f'thermosphere augment: {int(found.sum())} rows from bundled tables, {int(miss.sum())} computed')
+    triplet['thermosphere_source'] = np.where(found, 'table', 'computed')
+    triplet['thermosphere_models'] = thermosphere.model_versions()
+    for r in roles:
+        cols = [raw[r][_THERMOSPHERE_SOURCE[f]] for f in wanted]
+        triplet[f'ctx_{r}'] = np.hstack([np.asarray(triplet[f'ctx_{r}'], dtype=np.float32),
+                                         np.column_stack(cols).astype(np.float32)])
+    triplet['ctx_names'] = names + list(wanted)
+    return triplet
+
+
+def _drop_ctx(triplet, drop):
+    names = list(triplet['ctx_names'])
+    keep = [i for i, n in enumerate(names) if n not in drop]
+    for arm in ('ctx_near', 'ctx_far', 'ctx_sci'):
+        triplet[arm] = np.asarray(triplet[arm], dtype=np.float32)[:, keep]
+    triplet['ctx_names'] = [names[i] for i in keep]
+
+
+def _augment_triplet_with_bubble_prior(triplet, force=True):
+    """Append ``iono_bubble_p``: Swarm IBP climatological bubble probability, calibrated in field-line apex height
+    (``mlp_predictor.bubbles``), at each arm's pierce point.  Needs the ionospheric augment (dip latitude)."""
+    from . import bubbles, ionosphere
+
+    if any(n in BUBBLE_PRIOR_NAMES for n in triplet['ctx_names']):
+        if not force:
+            return triplet
+        _drop_ctx(triplet, BUBBLE_PRIOR_NAMES)
+    idx = {n: i for i, n in enumerate(triplet['ctx_names'])}
+    mjd = np.asarray(triplet['obstime_mjd'], dtype=np.float64)
+    for r in ionosphere.ROLES:
+        ctx = np.asarray(triplet[f'ctx_{r}'], dtype=np.float64)
+        az = np.degrees(np.arctan2(ctx[:, idx['az_sin']], ctx[:, idx['az_cos']])) % 360.0
+        _, lon, _, _ = ionosphere.pierce_point(ctx[:, idx['alt']], az)
+        apex = bubbles.apex_height_km(ctx[:, idx['iono_dip_lat']], ionosphere.IPP_HEIGHT_KM)
+        p = bubbles.reach_probability(mjd, lon, apex, ctx[:, idx['f107']])
+        triplet[f'ctx_{r}'] = np.hstack([np.asarray(triplet[f'ctx_{r}'], np.float32), p[:, None].astype(np.float32)])
+    triplet['ctx_names'] = list(triplet['ctx_names']) + list(BUBBLE_PRIOR_NAMES)
+    return triplet
+
+
+def _augment_triplet_with_roti(triplet, force=True):
+    """Append ROTI_NAMES: measured GNSS irregularity (``mlp_predictor.roti``) at each arm's pierce point.
+
+    log10 of the max and of the median ROTI of the GPS rays crossing 285 km within 200 km (field-aligned distance)
+    and 10 min, and ``iono_roti_avail`` = 1 when there was at least one such ray.  Rows without rays get
+    log10(ROTI_QUIET) and avail 0.  Rows in the bundled table are read from it; the rest come from the station-day
+    cache, downloading missing days.  ROTI is a structure measure, not a column: it carries no van Rhijn factor.
+    """
+    from . import ionosphere, roti
+
+    if any(n in ROTI_NAMES for n in triplet['ctx_names']):
+        if not force:
+            return triplet
+        _drop_ctx(triplet, ROTI_NAMES)
+    idx = {n: i for i, n in enumerate(triplet['ctx_names'])}
+    mjd = np.asarray(triplet['obstime_mjd'], dtype=np.float64)
+    ctx = {r: np.asarray(triplet[f'ctx_{r}'], dtype=np.float64) for r in ionosphere.ROLES}
+    alt = {r: ctx[r][:, idx['alt']] for r in ctx}
+    az = {r: np.degrees(np.arctan2(ctx[r][:, idx['az_sin']], ctx[r][:, idx['az_cos']])) % 360.0 for r in ctx}
+    raw = {r: np.full((mjd.size, 3), np.nan) for r in ctx}
+    found, rows = ionosphere.context_from_tables(mjd, alt, az)
+    tab = roti.bundled_table() if found.any() else None
+    if tab is None:
+        found[:] = False
+    else:
+        for r in ctx:
+            raw[r][found] = np.stack([tab[f'{r}_roti_max'][rows], tab[f'{r}_roti_med'][rows],
+                                      tab[f'{r}_roti_n'][rows]], axis=1)
+    miss = ~found
+    for r in ctx:
+        if miss.any():
+            lat, lon, _, _ = ionosphere.pierce_point(alt[r][miss], az[r][miss])
+            raw[r][miss] = roti.roti_at(mjd[miss], lat, lon, download=True, aligned=True)
+        ok = raw[r][:, 2] > 0
+        cols = [np.log10(np.maximum(np.where(ok, raw[r][:, k], ROTI_QUIET), ROTI_FLOOR)) for k in (0, 1)]
+        triplet[f'ctx_{r}'] = np.hstack([np.asarray(triplet[f'ctx_{r}'], np.float32),
+                                         np.stack(cols + [ok.astype(np.float64)], axis=1).astype(np.float32)])
+    triplet['ctx_names'] = list(triplet['ctx_names']) + list(ROTI_NAMES)
+    triplet['roti_source'] = np.where(found, 'table', 'computed')
+    return triplet
+
+
+def _augment_triplet_with_sky_lines(triplet, coef_near, coef_far, coef_names, force=True):
+    """Append the sky telescopes' own F-layer diagnostics, from their decomposition amplitudes (never Science's).
+
+    ``iono_sky_altimeter`` = log z6300 - 0.5 log z7774 (zenith-equivalent: each arm's coefficient divided by its own
+    vanrhijn_285km): the O2 density at the layer, ~67 km per dex.  SkyNear and SkyFar carry their own value; the
+    Science column carries SkyNear's, its nearest neighbour (26 km), because Science's own lines are the target.
+    ``iono_sky_q`` = |(log z7774_near - log z7774_far) - 2 (log VTEC_near - log VTEC_far)|, identical in all arms:
+    the near/far mismatch beyond the smooth map (bubble proxy).  Needs the ionospheric augment.
+    """
+    if any(n in SKY_LINE_NAMES for n in triplet['ctx_names']):
+        if not force:
+            return triplet
+        _drop_ctx(triplet, SKY_LINE_NAMES)
+    idx = {n: i for i, n in enumerate(triplet['ctx_names'])}
+    names = [str(n) for n in coef_names]
+    zen = {}
+    for arm, coef in (('near', coef_near), ('far', coef_far)):
+        v = np.asarray(triplet[f'ctx_{arm}'], np.float64)[:, idx['vanrhijn_285km']]
+        c = np.asarray(coef, np.float64)
+        zen[arm] = {k: np.log10(np.maximum(c[:, names.index(k)] / v, 1e-4)) for k in ('ATOM_Or', 'ATOM_Orc_OI0777')}
+    alt = {a: zen[a]['ATOM_Or'] - 0.5 * zen[a]['ATOM_Orc_OI0777'] for a in zen}
+    lv = {a: np.asarray(triplet[f'ctx_{a}'], np.float64)[:, idx['iono_log10_vtec']] for a in zen}
+    q = np.abs((zen['near']['ATOM_Orc_OI0777'] - zen['far']['ATOM_Orc_OI0777']) - 2.0 * (lv['near'] - lv['far']))
+    for arm, a in (('near', alt['near']), ('far', alt['far']), ('sci', alt['near'])):
+        triplet[f'ctx_{arm}'] = np.hstack([np.asarray(triplet[f'ctx_{arm}'], np.float32),
+                                           np.column_stack([a, q]).astype(np.float32)])
+    triplet['ctx_names'] = list(triplet['ctx_names']) + list(SKY_LINE_NAMES)
+    return triplet
+
+
 def _augment_triplet_with_physics_priors(triplet, force=True):
     """Append Leinert V-band zodi surface brightness (one column per arm) to ctx.
 

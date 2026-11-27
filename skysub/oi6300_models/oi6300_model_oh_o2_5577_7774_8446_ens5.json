@@ -1,0 +1,222 @@
+{
+ "name": "oi6300_model_oh_o2_5577_7774_8446_ens5",
+ "created": "2026-11-27 17:03:32+0400",
+ "sci_lines": [
+  "oh",
+  "o2",
+  "5577",
+  "7774",
+  "8446"
+ ],
+ "sky_field": false,
+ "guard_sigma": 3.0,
+ "members": 5,
+ "decomp_root": "/Users/ik52/obs/sas/sdsswork/users/u6058164/medians_1.3.2_knox/sky_decomposition_1.3.2_knox",
+ "stem": "lvmsframe_median_stack_1.3.2_knox_gaia1over100",
+ "decomp_suffix": "_palacecorr_aijc_vnf_split_zodi_lsf_spline2d_solarblue",
+ "corpus": "iono_corpus_lvmsframe_median_stack_1.3.2_knox_gaia1over100.npz",
+ "corpus_sha256_16": "7c0be81fa711f354",
+ "rows": {
+  "clean": 10426,
+  "lmcsmc": 1121,
+  "domain": 9305,
+  "gaspoor": 3713,
+  "train": 4834
+ },
+ "rows_dropped_for_zero_coordinates": 32,
+ "test_nights": {
+  "all": {
+   "rows": 4834,
+   "sigma": 0.00621,
+   "rms": 0.01629,
+   "bias": 0.00022,
+   "abs_p95": 0.02761
+  },
+  "LMC+SMC": {
+   "rows": 1121,
+   "sigma": 0.00642,
+   "rms": 0.01255,
+   "bias": 0.00023,
+   "abs_p95": 0.02048
+  },
+  "gas-poor": {
+   "rows": 3713,
+   "sigma": 0.00618,
+   "rms": 0.01726,
+   "bias": 0.00022,
+   "abs_p95": 0.0291
+  },
+  "separation 0-2 deg": {
+   "rows": 1127,
+   "sigma": 0.00299,
+   "rms": 0.00656,
+   "bias": 0.00026,
+   "abs_p95": 0.00916
+  },
+  "separation 2-4 deg": {
+   "rows": 1500,
+   "sigma": 0.00557,
+   "rms": 0.01073,
+   "bias": -0.00033,
+   "abs_p95": 0.01752
+  },
+  "separation 4-6 deg": {
+   "rows": 1334,
+   "sigma": 0.00885,
+   "rms": 0.01535,
+   "bias": 0.0008,
+   "abs_p95": 0.03006
+  },
+  "separation 6-10 deg": {
+   "rows": 628,
+   "sigma": 0.01127,
+   "rms": 0.01846,
+   "bias": 0.00085,
+   "abs_p95": 0.03601
+  },
+  "separation 10-90 deg": {
+   "rows": 245,
+   "sigma": 0.02415,
+   "rms": 0.04668,
+   "bias": 0.00364,
+   "abs_p95": 0.07654
+  },
+  "rows with a dropped line": 0.1032
+ },
+ "oh_groups": [
+  "OH_037",
+  "OH_043",
+  "OH_036",
+  "OH_039",
+  "OH_045",
+  "OH_034",
+  "OH_040",
+  "OH_041",
+  "OH_100",
+  "OH_046",
+  "OH_000",
+  "OH_038",
+  "OH_107",
+  "OH_114",
+  "OH_002",
+  "OH_048",
+  "OH_042",
+  "OH_163",
+  "OH_116",
+  "OH_001",
+  "OH_047",
+  "OH_003",
+  "OH_004",
+  "OH_212",
+  "OH_050",
+  "OH_165",
+  "OH_049",
+  "OH_115",
+  "OH_261",
+  "OH_108",
+  "OH_300",
+  "OH_118",
+  "OH_214",
+  "OH_117",
+  "OH_005",
+  "OH_164",
+  "OH_051",
+  "OH_263",
+  "OH_167",
+  "OH_302"
+ ],
+ "field_hyper": null,
+ "alpha": 1.0,
+ "inputs_kept": 218,
+ "inputs_total": 220,
+ "inputs_dropped": [
+  "sci ctx sci_sep",
+  "sci ctx ew"
+ ],
+ "line_level_sigma_dex": {
+  "5577": 0.00348,
+  "7774": 0.0126,
+  "8446": 0.01151
+ },
+ "input_files": {
+  "lvmsframe_median_stack_1.3.2_knox_gaia1over100.fits": {
+   "bytes": 6534169920,
+   "mtime": 1794770243
+  },
+  "lvmsframe_median_stack_1.3.2_knox_gaia1over100_meta_only.fits": {
+   "bytes": 11756160,
+   "sha256_16": "28ea2dc5ce5d1eca"
+  },
+  "iono_corpus_lvmsframe_median_stack_1.3.2_knox_gaia1over100.npz": {
+   "bytes": 8663070,
+   "sha256_16": "7c0be81fa711f354"
+  },
+  "lvmsframe_median_stack_1.3.2_knox_gaia1over100_sci_meta_coef_palacecorr_aijc_vnf_split_zodi_lsf_spline2d_solarblue.fits": {
+   "bytes": 243509760,
+   "sha256_16": "547c4f2812fb2041"
+  },
+  "lvmsframe_median_stack_1.3.2_knox_gaia1over100_sky1_meta_coef_palacecorr_aijc_vnf_split_zodi_lsf_spline2d_solarblue.fits": {
+   "bytes": 243492480,
+   "sha256_16": "ac3dee5cebb7ba79"
+  },
+  "lvmsframe_median_stack_1.3.2_knox_gaia1over100_sky2_meta_coef_palacecorr_aijc_vnf_split_zodi_lsf_spline2d_solarblue.fits": {
+   "bytes": 243492480,
+   "sha256_16": "9e7eb246e8058b4a"
+  },
+  "lvmsframe_median_stack_1.3.2_knox_gaia1over100_decomp_sci_palacecorr_aijc_vnf_split_zodi_lsf_spline2d_solarblue.fits": {
+   "bytes": 28017826560,
+   "mtime": 1794788761
+  },
+  "lvmsframe_median_stack_1.3.2_knox_gaia1over100_decomp_sky1_palacecorr_aijc_vnf_split_zodi_lsf_spline2d_solarblue.fits": {
+   "bytes": 28017809280,
+   "mtime": 1794788841
+  },
+  "lvmsframe_median_stack_1.3.2_knox_gaia1over100_decomp_sky2_palacecorr_aijc_vnf_split_zodi_lsf_spline2d_solarblue.fits": {
+   "bytes": 28017809280,
+   "mtime": 1794788911
+  }
+ },
+ "git_head": "be94923da91f2ef3b266f1225814d8431578b87b",
+ "inputs_version": 2,
+ "code_sha256_16": {
+  "oi6300.py": "890da7d7d623672e",
+  "oi6300_build.py": "1de0627696897d1f",
+  "sky_field.py": "d9f27d8f98fd9c8d"
+ },
+ "settings": {
+  "K_rayleigh_per_coefficient": {
+   "6300": 1.298,
+   "7774": 34.5,
+   "8446": 15.46,
+   "5199": 1.43
+  },
+  "hgb": {
+   "loss": "absolute_error",
+   "max_iter": 400,
+   "learning_rate": 0.03,
+   "max_leaf_nodes": 15,
+   "min_samples_leaf": 30,
+   "l2_regularization": 1.0,
+   "early_stopping": false,
+   "random_state": 0
+  },
+  "clean": [
+   10,
+   1.2
+  ],
+  "gas_poor": [
+   2.0,
+   10.0
+  ],
+  "n_oh": 40,
+  "folds": 5,
+  "roti_floor": 0.005
+ },
+ "versions": {
+  "python": "3.11.18",
+  "numpy": "1.26.4",
+  "scipy": "1.17.1",
+  "scikit-learn": "1.9.1",
+  "astropy": "7.2.3"
+ }
+}
