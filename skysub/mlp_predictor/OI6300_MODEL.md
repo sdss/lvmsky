@@ -7,15 +7,18 @@ change. The same text is kept in the repository (`skysub/mlp_predictor/OI6300_MO
 `OI 6300 Science Model`. The studies that led to the model are indexed in `skysub/EXPERIMENTS_CHANGELOG.md`
 (`experiments_ionospheric_oi_model`, `experiments_external_data_v1`, `experiments_dither_repeat_limits_v1`).
 
-Status (2026-11-27): trained and validated on the knox DRP 1.3.2 median stacks. SkyML does not read it yet.
+Status (2026-11-28): trained and validated on the knox DRP 1.3.2 median stacks. SkyML reads it with `--oi-model`
+(section 6): the model's [O I] 6300 goes into the subtracted sky. No sky-transfer ensemble has been trained with the
+model's value as an input yet.
 
 | File (under `skysub/`) | Role |
 |---|---|
 | `mlp_predictor/oi6300.py` | the model class: inputs, fit, guard, predict, save/load |
 | `mlp_predictor/sky_field.py` | night field of the sky telescopes: kernel fit and field inputs |
 | `mlp_predictor/oi6300_build.py` | the build: table, row selection, validation, final fit, saved files |
-| `mlp_predictor/iono_corpus.py` | the ionosphere corpus that the build reads (one row per exposure) |
-| `sky_decomp/tests/test_oi6300.py` | 10 tests of the three modules on a synthetic corpus |
+| `mlp_predictor/iono_corpus.py` | ionospheric context: the tables and the corpus of a stack (`build_context`), the same columns for one exposure (`exposure_columns`) |
+| `mlp_predictor/oi6300_exposure.py` | the model applied to single exposures (SkyML) |
+| `sky_decomp/tests/test_oi6300.py` | 12 tests of the three modules on a synthetic corpus |
 | `oi6300_models/<name>.json` | provenance and test-night accuracy of a saved model (tracked) |
 | `oi6300_models/<name>_cv.csv` | test-night prediction of every training row (tracked) |
 | `oi6300_models/<name>.pkl` | the trained model (not tracked, 6-100 MB; rebuilt by one command) |
@@ -218,7 +221,9 @@ So no row is scored by anything that saw its night. The test-night prediction of
 After the validation the model is fitted once more on all 4,834 training rows (OH groups, kernel parameters and
 input ranges from all nights). The test-night scores are its expected accuracy.
 
-- `<name>.pkl`: the model, with `oh_groups`, `field_hyper` and `meta`.
+- `<name>.pkl`: the model, with `oh_groups`, `field_hyper`, `meta` and `corpus`: for every corpus exposure the
+  night field and the model's prediction (the test-night prediction for the training rows). SkyML reads the
+  field from it; the sky-transfer ensemble is trained on the predictions (section 6).
 - `<name>.json` (= `meta`): the options, the input files with size and checksum (size and time for the multi-GB
   spectral files), the git commit and the checksums of the three modules, the settings (K, boosting settings,
   selection thresholds), the row counts, the OH groups, the kernel parameters and their fit record, the inputs
@@ -308,39 +313,113 @@ validation. The models with the night field improved slightly (0.0056 to 0.0055 
 
 ## 5. Rebuild
 
-Run from `skysub/` with the project environment (`lvmsky/.venv`; needs scikit-learn, extra `oi6300`). The model is
-used from a checkout of the repository; the wheel of the package does not include `mlp_predictor`.
-
-When the data change (new DRP version, new stack, new decomposition):
-
-1. Decompose the median stack (`python -m skysub.decompose_parallel`), which writes the `_meta_coef` and `_decomp`
-   files next to it.
-2. Build the ionosphere corpus of that stack (`python -m mlp_predictor.iono_corpus --decomp-root ROOT --stem STEM`;
-   see `sky_decomp/data/ionosphere/corpus/README.md`).
-3. Build the model:
+One command after the decomposition of the median stack. Run from `skysub/` with the project environment
+(`lvmsky/.venv`; needs scikit-learn, extra `oi6300`, and for the context the extra `thermosphere` with HWM14
+built by `python -m mlp_predictor.thermosphere build-hwm`). The model is used from a checkout of the repository; the
+wheel of the package does not include `mlp_predictor`.
 
 ```bash
-python -m mlp_predictor.oi6300_build --decomp-root ROOT --stem STEM --out oi6300_models --sci-lines oh o2 5577 7774 8446 --sky-field
+python -m mlp_predictor.oi6300_build --decomp-root ROOT --stem STEM --out oi6300_models
 ```
 
-4. Read `<name>.json`: the row counts of step 2, the test-night scores, and `field_hyper.fit` (converged or not).
+The same command is the `oi-model` step of the SkyML block command line
+(`python -m skysub.sky_subtraction_block.cli oi-model --decomp-root ROOT --stem STEM --out DIR`, from the repository
+root). It does, in this order:
+
+1. **Ionospheric context of the stack** (`iono_corpus.build_context`). Each file is built only if it is missing;
+   a file that is rebuilt forces the ones after it; `--rebuild-context` rebuilds all four.
+
+   | File under `sky_decomp/data/ionosphere/` | Built from | Downloads |
+   |---|---|---|
+   | `iono_ctx_STEM.npz` | pointings and times of the stack META | IONEX maps of every night |
+   | `roti/roti_ctx_STEM.npz` | the pierce points of the table above | GNSS station-days of every night |
+   | `thermosphere/thermo_ctx_STEM.npz` | pierce points, VTEC, solar activity (IRI, NRLMSIS, HWM14) | none |
+   | `corpus/iono_corpus_STEM.npz` | the three tables and the line coefficients of the decomposition | none |
+
+2. **Table, row selection, validation by nights, final fit** (steps 1 to 7 of section 2).
+3. **Saved files**: `<name>.pkl`, `<name>.json`, `<name>_cv.csv`.
+
+Without options the command builds the default model (Science lines OH, O2, 5577, 7774, 8446 and the night field).
+For a new DRP version the whole sequence is: medians (`lvm_medians`), decomposition (`decompose_parallel`), this
+command, then SkyML with `--oi-model`. Afterwards read `<name>.json`: the row counts of step 2, the test-night
+scores, and `field_hyper.fit` (converged or not).
+
+A new decomposition under an old stem leaves an old corpus behind; the build then stops with "rebuild the corpus".
+Run it again with `--rebuild-context`.
 
 | Option | Effect |
 |---|---|
-| `--sci-lines ...` | Science lines to read; append `5199` for the optional variant; omit for a model without Science lines |
-| `--sky-field` | learn the kernel parameters and add the night field; the file name gets `_field` |
+| `--sci-lines ...` | Science lines to read (default `oh o2 5577 7774 8446`); append `5199` for the optional variant; give the option without values for a model without Science lines |
+| `--no-sky-field` | leave the night field out; the file name loses `_field`. Needed for exposures that are not in the corpus (section 6) |
 | `--members N` | ensemble size (default 5; 1 = a single model) |
 | `--guard S` | guard threshold in sigma (default 3) |
-| `--no-cv` | skip the validation (no scores) |
-| `--corpus FILE`, `--name NAME` | another corpus file; another output name |
+| `--no-cv` | skip the validation (no scores, and no value for training the sky-transfer ensemble) |
+| `--rebuild-context`, `--workers N` | rebuild the context files; parallel downloads of station-days (default 4) |
+| `--corpus FILE`, `--name NAME` | use this corpus file and build no context; another output name |
 
-Time on 18 cores with 3 threads per build, several builds at once: about 1 minute without Science lines and field, 12 minutes with the field alone (six kernel fits), 9-14 minutes with Science lines, 22-27 minutes with Science lines and the field.
+Time on 18 cores with 3 threads per build, several builds at once: about 1 minute without Science lines and field, 12 minutes with the field alone (six kernel fits), 9-14 minutes with Science lines, 22-27 minutes with Science lines and the field. The context of a new stack adds the downloads and the three tables; this was not timed as a whole, because on the knox stack the tables existed. For scale: the context of 360 exposures, computed from the caches, took 154 s, and the corpus alone takes 1 minute and reproduces the stored one column by column.
 
 To change a step, call the functions of `oi6300_build` from a notebook: `build_table`, `row_sets`,
 `control_lines`, `night_field`, `cross_validate`, `scores`. Thresholds are the constants at the top of each module.
 When the meaning of an input changes, raise `oi6300.INPUTS_VERSION` and rebuild.
 
 ## 6. Use
+
+### In SkyML
+
+```bash
+python -m skysub.sky_subtraction CFRAME --ensemble ENSEMBLE.pt --oi-model oi6300_models/<name>.pkl
+python -m skysub.sky_subtraction_block.cli batch ... --ml-model-file ENSEMBLE.pt --oi-model oi6300_models/<name>.pkl
+```
+
+The model runs as a preparatory step, after the three medians of the exposure are decomposed and before the
+sky-transfer ensemble (`sky_subtraction.pipeline.oi6300_prediction`, `mlp_predictor/oi6300_exposure.py`):
+
+1. The input table of the exposure is built from its own data: the line coefficients of the Science, SkyNear and
+   SkyFar medians, the observing context, and the ionospheric context of the three pierce points
+   (`iono_corpus.exposure_columns`: the same functions as the corpus tables; IONEX maps and GNSS station-days are
+   downloaded if they are not cached).
+2. The night field cannot be computed from one exposure. It is read by exposure number from the table stored in
+   the model (`OI6300Model.corpus`: the field of every corpus exposure).
+3. The predicted `ATOM_Or` coefficient replaces the ensemble's coefficient of the line, so the rendered and
+   subtracted [O I] 6300/6364 is the model's. Its uncertainty is the test-night scatter of the model, converted
+   to coefficient units to first order. Without a finite scatter it is NaN, not the old ensemble's spread.
+4. The value is also offered to the ensemble as an input (next subsection); an ensemble trained without it ignores
+   it.
+
+The model gives no value, the ensemble coefficient is kept and the run continues when: a sky telescope is
+unusable; the sky-telescope [O I] 6300 is not valid; the context cannot be built (maps not yet public, HWM14 not
+built); or the model uses the night field and the exposure is not in its corpus. For exposures outside the corpus
+use a model built with `--no-sky-field`. The product records which case applied (`OI63SRC`, `OI63R`,
+`SKYML_META.oi6300`; `sky_subtraction/FITS_STRUCTURE.md`).
+
+Check on the knox corpus: for 360 exposures the table built this way gives the prediction of the build table within
+0.0001 dex for 95% of them (largest difference 0.0015 dex; the corpus tables store 32-bit values).
+
+### As an input of the sky-transfer ensemble
+
+```python
+from mlp_predictor import data
+
+data.augment_ionospheric_context(triplet, oi_model='oi6300_models/<name>.pkl', expnum=expnum)
+```
+
+This appends to a corpus triplet the ionospheric context the model reads (VTEC map, F layer and thermosphere,
+bubble prior, ROTI, sky-arm line diagnostics) and two columns from the model itself:
+
+| Column | Value |
+|---|---|
+| `iono_sqrt_oi6300_model` | square root of the predicted Science `ATOM_Or` coefficient: the transform the ensemble applies to the line coefficients of the sky telescopes; the context scaler standardises it like every other column |
+| `iono_oi6300_model_avail` | 1 where the model gave a value; 0 where the column holds the SkyNear coefficient instead |
+
+For the rows the model was trained on, the value is the test-night prediction (the model of that run never saw the
+night); for the other corpus rows it is the saved model's prediction. So the ensemble is trained on values of the
+quality it will get for a new exposure. This is not sufficient for an independent evaluation of a new
+MLP: its outer held-out nights must also be excluded from fitting the O I model and its learned preprocessing.
+The saved corpus CV predictions alone do not enforce that outer split. In SkyML the same columns are built from the model's prediction for the
+exposure. The ensemble's own [O I] 6300 output is not used when the model gives a value.
+
+### From Python
 
 ```python
 from mlp_predictor import oi6300, oi6300_build
@@ -355,14 +434,20 @@ used = m.lines_used(tab)        # (n_rows, n_guarded): guarded lines used for ea
 levels = m.line_levels(tab)     # excess of each guarded line [sigma]
 q = m.quality(tab)              # counts of inputs out of range and missing
 m.meta                          # what the model was trained on, and its scores
+m.corpus                        # per corpus exposure: night field, prediction, whether it is a test-night one
+m.corpus_coefficient(expnum)    # predicted ATOM_Or of corpus exposures, for training another model
 ```
+
+For single exposures outside a stack use `oi6300_exposure.predict(m, obstime_mjd=..., expnum=..., radec=...,
+coef=..., coef_names=..., near_is_skye=...)`.
 
 On the knox 1.3.2 corpus the default model gives a prediction for 18,576 of 18,640 exposures; the others
 have no valid SkyNear [O I] 6300.
 
 ## 7. Limits
 
-- **Post-processing only.** The default model needs every exposure of the night (night field).
+- **Post-processing only.** The default model needs every exposure of the night (night field). In SkyML the field
+  comes from the model's corpus table, so the default model serves only exposures of the stack it was built on.
 - **Where it is validated.** Clean rows of LMC+SMC and gas-poor fields. In fields with gas the target itself holds
   nebular [O I], so the accuracy there cannot be measured this way.
 - **The clean cut reads the Science spectrum** (its fibre count, the EW and validity of its lines, its Halpha), so
@@ -380,4 +465,9 @@ have no valid SkyNear [O I] 6300.
   versions and the checkout recorded in `meta`.
 - **ROTI cache.** `roti.py` keeps navigation files and reduced station days that were downloaded before its
   incomplete-file fix; on this machine they were refetched by hand. A fresh machine is not affected.
-- Not checked on single-fibre spectra; not wired into SkyML.
+- **SkyML.** Exposure 47284 (DRP 1.3.2) was checked with the no-field model and, on 2026-11-28, through the
+  standard block `cli single` on macOS with the night-field model. The latter writes `ATOM_Or=145.350874`
+  instead of the ensemble's `143.845123`, with `OI63SRC=model` and valid FITS checksums. The no-field value
+  agrees with the corpus prediction within 0.0004 dex. The effect on spectra across a sample has not been measured.
+- **Ensemble input.** No ensemble has been trained with the model's value as an input; its benefit is not measured.
+- Not checked on single-fibre spectra.

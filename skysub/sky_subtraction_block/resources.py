@@ -103,7 +103,8 @@ def runtime_resources():
     if (torch.get_num_threads() != 1 or torch.get_num_interop_threads() != 1
             or any(p["num_threads"] != 1 for p in pools)):
         raise RuntimeError("A supported native numerical pool exceeds one thread")
-    return dict(pid=os.getpid(), cpu_ids=sorted(os.sched_getaffinity(0)),
+    return dict(pid=os.getpid(),
+                cpu_ids=sorted(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else None,
                 torch_threads=torch.get_num_threads(),
                 torch_interop_threads=torch.get_num_interop_threads(), native_pools=pools,
                 environment={n: os.environ[n] for n in THREAD_VARIABLES})

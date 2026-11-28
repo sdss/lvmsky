@@ -4210,6 +4210,55 @@ def _augment_triplet_with_sky_lines(triplet, coef_near, coef_far, coef_names, fo
     return triplet
 
 
+OI6300_MODEL_NAMES = ('iono_sqrt_oi6300_model', 'iono_oi6300_model_avail')
+
+
+def _augment_triplet_with_oi6300(triplet, coef, coef_near, coef_names, force=True):
+    """Append OI6300_MODEL_NAMES: the Science [O I] 6300 of the dedicated model (``mlp_predictor.oi6300``).
+
+    ``coef`` (n_rows,) is the Science ``ATOM_Or`` coefficient that model predicts (``OI6300Model.corpus_coefficient``
+    for a training corpus, ``oi6300_exposure.predict`` for an exposure); NaN where it gives no value.  The column
+    holds its square root, the transform the compressor applies to the line coefficients of the sky telescopes, and
+    the ctx scaler standardises it like every other column.  Rows without a model value carry the SkyNear
+    coefficient of the exposure and ``iono_oi6300_model_avail`` = 0.  Identical in all three arms.
+    """
+    if any(n in OI6300_MODEL_NAMES for n in triplet['ctx_names']):
+        if not force:
+            return triplet
+        _drop_ctx(triplet, OI6300_MODEL_NAMES)
+    coef = np.asarray(coef, np.float64).ravel()
+    near = np.asarray(coef_near, np.float64)[:, [str(n) for n in coef_names].index('ATOM_Or')]
+    ok = np.isfinite(coef) & (coef > 0)
+    cols = np.column_stack([np.sqrt(np.clip(np.where(ok, coef, near), 0.0, None)), ok]).astype(np.float32)
+    for arm in ('ctx_near', 'ctx_far', 'ctx_sci'):
+        triplet[arm] = np.hstack([np.asarray(triplet[arm], np.float32), cols])
+    triplet['ctx_names'] = list(triplet['ctx_names']) + list(OI6300_MODEL_NAMES)
+    return triplet
+
+
+def augment_ionospheric_context(triplet, oi_model=None, expnum=None):
+    """The standard ionospheric context of the sky-transfer MLP, appended to a corpus triplet.
+
+    Every ionospheric quantity the dedicated [O I] 6300 model reads: the VTEC map (IONOSPHERE_FEATURE_NAMES), the F
+    layer and thermosphere (THERMOSPHERE_FEATURE_NAMES and THERMOSPHERE_EXTRA_NAMES), the bubble prior, GNSS ROTI and
+    the sky-arm line diagnostics.  With ``oi_model`` (an ``OI6300Model`` built on this corpus, or its path) and the
+    exposure numbers of the rows, also that model's prediction (OI6300_MODEL_NAMES).  ``inference`` builds the same
+    columns for an exposure from the ctx names of the trained ensemble.
+    """
+    _augment_triplet_with_ionosphere(triplet)
+    _augment_triplet_with_thermosphere(triplet, extra=True)
+    _augment_triplet_with_bubble_prior(triplet)
+    _augment_triplet_with_roti(triplet)
+    _augment_triplet_with_sky_lines(triplet, triplet['coef_near'], triplet['coef_far'], triplet['coef_names'])
+    if oi_model is not None:
+        from . import oi6300
+
+        model = oi_model if isinstance(oi_model, oi6300.OI6300Model) else oi6300.OI6300Model.load(oi_model)
+        _augment_triplet_with_oi6300(triplet, model.corpus_coefficient(expnum), triplet['coef_near'],
+                                     triplet['coef_names'])
+    return triplet
+
+
 def _augment_triplet_with_physics_priors(triplet, force=True):
     """Append Leinert V-band zodi surface brightness (one column per arm) to ctx.
 

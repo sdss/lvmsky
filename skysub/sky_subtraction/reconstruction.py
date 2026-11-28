@@ -8,7 +8,6 @@ from pathlib import Path
 
 import numpy as np
 from astropy.io import fits
-from lvmdrp.core.fluxcal import TelluricCalculator
 from scipy.interpolate import BSpline
 
 from skysub.sky_decomp.lsf_reference import load_survey_ascii_lsf
@@ -135,6 +134,10 @@ class SkyMLReconstructor:
         return lsf_surface_state_from_cubes(cubes, index)
 
     def model(self, label):
+        # Imported here, after skysub.sky_decomp set the 3 s socket timeout: lvmdrp imports
+        # astroquery.gaia, whose module-level client polls the Gaia archive status page.
+        from lvmdrp.core.fluxcal import TelluricCalculator
+
         if label not in self.models:
             i = next(i for i, m in enumerate(self.context['models']) if m['telescope'] == label)
             meta = self.context['models'][i]

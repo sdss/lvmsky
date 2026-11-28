@@ -15,6 +15,7 @@ python -m skysub.sky_subtraction /path/to/lvmCFrame-00012630.fits \
 - Existing destinations and standard DRP filenames are never overwritten; `--output` selects another path.
 - `--lsf-calibration` selects another survey ASCII LSF directory on the same wavelength grid (bundled by default).
 - `--survey-only` keeps survey R/Z LSFs (validation baseline).
+- `--oi-model FILE` takes the Science [O I] 6300 from the dedicated model (`mlp_predictor/OI6300_MODEL.md`) instead of the ensemble; without it the ensemble coefficient is used. The model step downloads the IONEX maps and GNSS station-days it does not have and never stops the run.
 - Without a matching `--gaia-dir` cache the ARI TAP Gaia DR3 query runs (three attempts); its source table is cached in `.skyml-gaia/` beside the output and the cache-miss reason is logged and recorded.
 - The ensemble archive must be trusted: its loader restores Python/PyTorch objects.
 - The CLI limits native threads to one per worker. When calling `pipeline.run()` from Python, set `OPENBLAS_NUM_THREADS`, `OMP_NUM_THREADS` and `MKL_NUM_THREADS` to 1 before importing numpy.
@@ -25,7 +26,7 @@ Supported inputs are calibrated CFrames on the bundled native DRP 1.3.2 waveleng
 
 1. Join Gaia to SLITMAP by fiber ID, recompute the observed G-band flux, select Gaia-clean fibers and form masked medians with contributor counts. Fewer than 50 clean Science fibers or 10 clean fibers in either Sky telescope triggers selection of up to that telescope's target count from eligible fibers with the lowest Gaia-to-observed flux ratios. Larger clean samples are retained in full. Basic status, photometry completeness, positive-flux and coverage checks remain mandatory; an empty eligible pool still stops processing.
 2. Fit the Science, SkyE and SkyW medians with the corpus decomposition: Blue fixed, R/Z seeded with the selected fibers' mean survey LSF.
-3. Predict one coefficient vector at the Science IFU centre. Estimate the full-band sky-arm residual transfer and common OH band scales/upper-level-energy tilts on the Science median. Inside windows around the nebular lines the transfer is interpolated (blueward of 5800 Å) or reduced to its OH part with the line cores zeroed (redward), so emission common to both sky fields does not reach the Science sky; for a pointing in the Magellanic Clouds the cores are also centred at their systemic velocity (`mlp_predictor.sky_arm_correction`). OH proposals with negative populations revert to the raw prediction.
+3. With `--oi-model`, predict the Science [O I] 6300 with the dedicated model from the three median fits and the ionospheric context of the exposure. Predict one coefficient vector at the Science IFU centre; the model's value is an input of an ensemble trained with it and replaces the ensemble's `ATOM_Or` coefficient. Estimate the full-band sky-arm residual transfer and common OH band scales/upper-level-energy tilts on the Science median. Inside windows around the nebular lines the transfer is interpolated (blueward of 5800 Å) or reduced to its OH part with the line cores zeroed (redward), so emission common to both sky fields does not reach the Science sky; for a pointing in the Magellanic Clouds the cores are also centred at their systemic velocity (`mlp_predictor.sky_arm_correction`). OH proposals with negative populations revert to the raw prediction.
 4. Fit the R/Z LSF of every usable Science fiber against the full sky model (emission plus lunar/zodiacal continuum) with a nonnegative source spline; adopt it only if it passes the checks below, else keep the fiber's survey LSF.
 5. Render each fiber's sky with its adopted LSF, add both corrections, subtract and publish atomically.
 
@@ -64,7 +65,7 @@ These are conservative operating points, not a calibrated recovery probability. 
 | `settings.py` | operating points (frozen dataclass) |
 | `io.py` | CFrame reading, Gaia photometry, fiber selection, medians |
 | `decomp_adapter.py` | the only calls into private `decompose_parallel`, `sky_decomp` and `lvm_medians` helpers |
-| `ml.py` | the only import point of `mlp_predictor` (needs `skysub/` on `sys.path`) |
+| `ml.py` | the only import point of `mlp_predictor` (needs `skysub/` on `sys.path`), including the dedicated [O I] 6300 model |
 | `rendering.py` | sky rendering, channel bounds and robust weights shared by fit and reconstruction |
 | `fiber_lsf.py` | per-fiber R/Z LSF fit and its design tensors |
 | `lsf_information.py` | observed line-information gate |

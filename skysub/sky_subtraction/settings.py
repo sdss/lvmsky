@@ -45,6 +45,10 @@ class Settings:
     residual_max_angstrom: float = 1e5
     residual_line_protection: str = 'cores'
     fwhm_probes: int = 33
+    # Plasma-bubble QA flag from GNSS ROTI near each telescope's 285 km pierce point (mlp_predictor.roti).
+    roti_bubble_threshold: float = 1.0  # TECU/min; quiet ionosphere ~0.03
+    roti_radius_km: float = 200.0
+    roti_window_min: float = 10.0
 
     def asdict(self):
         return asdict(self)

@@ -288,3 +288,82 @@ def test_default_publication_refuses_a_destination_created_during_write(tmp_path
         publish(RacingProduct(), output, 0o644)
     assert output.read_bytes() == b"other writer"
     assert not list(tmp_path.glob(".skyml-*.fits"))
+
+
+def test_bubble_flag_header():
+    from skysub.sky_subtraction.product import set_bubble_flag
+
+    header = fits.Header()
+    set_bubble_flag(header, {'bubble': 1, 'telescopes': {'Sci': {'roti_max': 1.73, 'n_samples': 4},
+                                                         'SkyE': {'roti_max': float('nan'), 'n_samples': 0}}})
+    assert header['BUBBLE'] == 1 and header['ROTISCI'] == pytest.approx(1.73)
+    assert header['ROTISKE'] == -1 and header['ROTISKW'] == -1
+    set_bubble_flag(header := fits.Header(), None)
+    assert 'BUBBLE' not in header  # older provenance: keyword absent means unknown
+    assert rel.describe(rel.RELIABILITY_PLASMA_BUBBLE) == 'plasma_bubble'
+    assert rel.RELIABILITY_PLASMA_BUBBLE & rel.RELIABILITY_WARNING_MASK
+
+
+def test_ionospheric_context_header():
+    from skysub.sky_subtraction.product import set_ionospheric_context
+
+    header = fits.Header()
+    set_ionospheric_context(header, {'ctx_names': ['alt', 'iono_log10_vtec', 'iono_hmf2'], 'ionex_source': ['UQRG']})
+    assert header['IONCTX'] == 'map+thermosphere' and header['IONXSRC'] == 'UQRG'
+    set_ionospheric_context(header := fits.Header(), {'ctx_names': ['iono_log10_vtec', 'iono_hmf2', 'iono_log10_roti_max']})
+    assert header['IONCTX'] == 'map+thermosphere+roti'
+    set_ionospheric_context(header := fits.Header(), {'ctx_names': ['alt']})
+    assert header['IONCTX'] == 'none' and 'IONXSRC' not in header
+
+
+def test_oi6300_header_and_step_that_never_raises():
+    from types import SimpleNamespace
+
+    from skysub.sky_subtraction.pipeline import oi6300_prediction
+    from skysub.sky_subtraction.product import set_oi6300
+
+    header = fits.Header()
+    set_oi6300(header, dict(applied=True, log10_rayleigh=2.0))
+    assert header['OI63SRC'] == 'model' and header['OI63R'] == pytest.approx(100.0)
+    set_oi6300(header := fits.Header(), dict(applied=False, reason='no value'))
+    assert header['OI63SRC'] == 'ml' and header['OI63R'] == -1
+    set_oi6300(header := fits.Header(), None)
+    assert 'OI63SRC' not in header  # no model supplied
+    record = oi6300_prediction('missing.pkl', None, SimpleNamespace(failed_arms=['SkyE']))
+    assert not record['applied'] and np.isnan(record['coef']) and 'SkyE' in record['reason']
+    record = oi6300_prediction('missing.pkl', None, SimpleNamespace(failed_arms=[]))
+    assert not record['applied'] and 'FileNotFoundError' in record['reason']
+
+
+@pytest.mark.parametrize('value,sigma', [(20., .01), (20., None), (20., 0.), (np.nan, .01)])
+def test_oi_replacement_and_fallback_preserve_other_coefficients(monkeypatch, value, sigma):
+    names = ['OH', 'ATOM_Or', 'continuum']
+    ensemble = dict(coef_names=names, zodi_correction=pipeline.adapter.zodi_correction)
+    monkeypatch.setattr(pipeline.serialization, 'load_ensemble', lambda _: ensemble)
+    monkeypatch.setattr(pipeline.adapter, 'telescope_coords', lambda *a: (40., -30.))
+    monkeypatch.setattr(pipeline, 'fwhm_grid', lambda *a: np.ones(3))
+    calls = []
+
+    def predict(*args, **kwargs):
+        calls.append(kwargs['oi6300_coef'])
+        return dict(coef=np.array([[1., 2., 3.]]), coef_std=np.array([[.1, .2, .3]]),
+                    reliability=np.array([-1]))
+
+    monkeypatch.setattr(pipeline.inference, 'predict_sky_from_minimal_inputs', predict)
+    medians = SimpleNamespace(science_model=SimpleNamespace(design_names=names), failed_arms=[],
+        labels=dict(sci='Sci', sky1='SkyE', sky2='SkyW'),
+        results={k: SimpleNamespace(lsf_state=None, coef=np.ones(3)) for k in pipeline.TELESCOPES})
+    frame = SimpleNamespace(header=dict(OBSTIME='2024-04-09T02:00:00', EXPOSURE=1, EXPTIME=900),
+                            wave=np.arange(3))
+    record = dict(coef=value, sigma_dex=sigma, applied=False)
+    ml, diagnostics = pipeline.predict_ifu('test.pt', frame, medians, record)
+    np.testing.assert_allclose(calls[0], [value], equal_nan=True)
+    np.testing.assert_array_equal(ml.coef[[0, 2]], [1., 3.])
+    np.testing.assert_array_equal(ml.coef_std[[0, 2]], [.1, .3])
+    np.testing.assert_array_equal(ml.oh_coef, ml.coef)
+    assert record['coef_ml'] == 2.
+    assert record['applied'] == np.isfinite(value)
+    assert ml.coef[1] == (value if np.isfinite(value) else 2.)
+    expected = .2 if not np.isfinite(value) else np.nan if sigma is None else value * np.log(10.) * sigma
+    np.testing.assert_allclose(ml.coef_std[1], expected, equal_nan=True)
+    assert diagnostics['reliability'][0] == -1

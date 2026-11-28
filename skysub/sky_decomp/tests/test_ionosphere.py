@@ -212,10 +212,27 @@ def test_exponent_inside_a_map_overrides_the_header(tmp_path):
 def test_nan_rms_is_an_error_not_a_feature(uniform_cache, monkeypatch):
     maps = io._day_maps(DAY)
 
-    def fake(day):
+    def fake(day, download=True):
         return maps | {'rms': np.full_like(maps['tec'], np.nan)}
 
     fake.cache_clear = lambda: None
     monkeypatch.setattr(io, '_day_maps', fake)
     with pytest.raises(ValueError, match='RMS samples are not finite'):
         io.vtec_at(np.array([DAY + 0.1]), np.array([-28.0]), np.array([-70.0]))
+
+
+def test_offline_features_never_download(tmp_path, monkeypatch):
+    monkeypatch.setattr(io, 'CACHE_DIR', tmp_path)
+    io._day_maps.cache_clear()
+    calls = []
+
+    def missing(day, source, download=True):
+        calls.append(download)
+        assert download is False
+        raise FileNotFoundError('not cached')
+
+    monkeypatch.setattr(io, 'ionex_file', missing)
+    with pytest.raises(FileNotFoundError, match='No IONEX map'):
+        io.telescope_features([DAY + 0.2], [70.0], [90.0], download=False)
+    assert calls
+    io._day_maps.cache_clear()

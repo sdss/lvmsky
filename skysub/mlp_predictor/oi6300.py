@@ -35,7 +35,9 @@ With ``fit(..., members=5)`` the correction is an ensemble of 5 models, each tra
 nights, and ``predict`` averages them.
 
 ``oi6300_build`` builds the input table from a decomposed median stack, applies the data cuts (``clean_rows``),
-cross-validates by nights and saves a model with its provenance (``meta``).  The studies behind the method are in
+cross-validates by nights and saves a model with its provenance (``meta``) and its corpus table (``corpus``: the
+night field and the prediction of every corpus exposure).  ``oi6300_exposure`` applies a saved model to single
+exposures (SkyML).  The studies behind the method are in
 ``experiments_ionospheric_oi_model`` and ``experiments_external_data_v1`` (see ``EXPERIMENTS_CHANGELOG.md``).
 """
 
@@ -162,6 +164,9 @@ class OI6300Model:
     oh_groups, meta = (), {}  # set by oi6300_build: OH groups behind tab['sci_near_log_oh']; provenance and scores
     field_hyper = None  # set by oi6300_build: kernel parameters of the night field (sky_field.fit)
     inputs_version = 1  # models saved before INPUTS_VERSION
+    # set by oi6300_build, per corpus exposure: expnum, obstime_mjd, log10_pred (test-night prediction where
+    # pred_from_cv, else this model's) and, with the night field, the SKY_FIELD columns
+    corpus = None
 
     def __init__(self, ni=True, coverage=0.9, ctx_names=(), sci_lines=(), guard=3.0, sky_field=False):
         bad = set(sci_lines) - set(SCI_CONTROL + SCI_GUARDED)
@@ -288,6 +293,21 @@ class OI6300Model:
     def coefficient(self, tab):
         """Predicted decomposition coefficient ATOM_Or of the Science telescope."""
         return 10 ** self.predict(tab)[0] / K['6300']
+
+    def corpus_row(self, expnum):
+        """Row of ``self.corpus`` of each exposure number, -1 for an exposure that was not in the build corpus."""
+        e, expnum = self.corpus['expnum'], np.atleast_1d(expnum)
+        order = np.argsort(e)
+        k = np.minimum(np.searchsorted(e[order], expnum), e.size - 1)
+        return np.where(e[order][k] == expnum, order[k], -1)
+
+    def corpus_coefficient(self, expnum):
+        """ATOM_Or predicted for exposures of the build corpus (NaN elsewhere), as an input for training another
+        model on that corpus: the test-night prediction for the rows this model was trained on."""
+        if self.corpus is None or not self.corpus['pred_from_cv'].any():
+            raise ValueError('this model holds no test-night predictions of its corpus: rebuild it without --no-cv')
+        k = self.corpus_row(expnum)
+        return np.where(k >= 0, 10 ** self.corpus['log10_pred'][np.maximum(k, 0)] / K['6300'], np.nan)
 
     def save(self, path):
         with open(path, 'wb') as fh:

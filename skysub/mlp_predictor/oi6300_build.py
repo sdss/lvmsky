@@ -1,16 +1,22 @@
 """Build, validate and save the Science [O I] 6300 model (``oi6300.OI6300Model``) from a decomposed median stack.
 
-Run from ``skysub/`` (about 10 min; the model class and the method are described in ``oi6300.py``)::
+One command from a decomposed median stack to the saved model; run from ``skysub/`` (the model class and the
+method are described in ``oi6300.py``)::
 
     python -m mlp_predictor.oi6300_build --decomp-root ROOT --stem STEM --out DIR
-        [--sci-lines oh o2 5577 7774 8446] [--sky-field] [--members 5] [--name NAME] [--no-cv]
+        [--sci-lines [oh o2 5577 7774 8446]] [--no-sky-field] [--members 5] [--name NAME] [--no-cv]
+        [--rebuild-context] [--workers 4] [--corpus FILE]
+
+Without options it builds the default model: Science lines OH, O2, 5577, 7774, 8446 and the night field.  It first
+builds what is missing of the ionospheric context of the stack (``iono_corpus.build_context``: ionosphere, ROTI and
+thermosphere tables, then the corpus), so a new DRP version needs this one command after the decomposition.
 
 Input files: ``ROOT/STEM.fits`` (median stack: WAVE, FLUX_*, META), ``ROOT/STEM_meta_only.fits``, the decompositions
-``ROOT/STEM_decomp_{sci,sky1}<suffix>.fits`` (RESID) and ``ROOT/STEM_{sci,sky1,sky2}_meta_coef<suffix>.fits`` (COEF),
-and the ionosphere corpus of the same stack (``iono_corpus``; default ``sky_decomp/data/ionosphere/corpus/``).
+``ROOT/STEM_decomp_{sci,sky1}<suffix>.fits`` (RESID) and ``ROOT/STEM_{sci,sky1,sky2}_meta_coef<suffix>.fits`` (COEF).
 
 Steps, one function each; call them from a notebook to change any of them:
 
+    iono_corpus.build_context -> context tables and corpus of the stack (skipped where they exist)
     build_table     -> table of the ``oi6300.inputs`` columns and per-row quantities of the selection
     row_sets        -> clean rows, LMC+SMC, application domain, gas-poor, training rows
     control_lines   -> Science/SkyNear OH and O2 ratios (inputs ``'oh'``, ``'o2'``)
@@ -47,6 +53,7 @@ POINTINGS = ('sci', 'sky_near', 'sky_far', 'skye', 'skyw')  # a pointing at ra =
 HALPHA, HALPHA_WINDOW = 6562.8, (6560.3, 6565.3)  # [A]
 GAS_POOR_MAX_HALPHA, GAS_POOR_MIN_ABS_B = 2.0, 10.0  # Halpha(Science) - Halpha(SkyNear) [R]; |b| [deg]
 N_OH, O2_COLUMN = 40, 'O2_b01'  # control lines: the N_OH OH groups brightest in SkyNear, and O2 b(0-1)
+DEFAULT_SCI_LINES = ('oh', 'o2', '5577', '7774', '8446')  # the default model, with the night field
 N_FOLDS, SEP_BINS = 5, ((0, 2), (2, 4), (4, 6), (6, 10), (10, 90))  # runs by nights; Science-SkyNear separation [deg]
 
 
@@ -268,12 +275,16 @@ def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__.split('\n')[0])
     p.add_argument('--decomp-root', required=True, help='directory of the median stack and its decompositions')
     p.add_argument('--stem', required=True, help='median-stack file stem (file name without .fits)')
-    p.add_argument('--corpus', help='ionosphere corpus .npz (default: the bundled corpus of this stem)')
+    p.add_argument('--corpus', help='use this ionosphere corpus .npz and build no context')
+    p.add_argument('--rebuild-context', action='store_true', help='rebuild the context tables and the corpus')
+    p.add_argument('--workers', type=int, default=4, help='parallel downloads of GNSS station-days')
     p.add_argument('--out', required=True, help='output directory')
     p.add_argument('--name', help='output file stem (default: oi6300_model[_<lines>]_ens<members>)')
-    p.add_argument('--sci-lines', nargs='*', default=[], choices=oi6300.SCI_CONTROL + oi6300.SCI_GUARDED,
-                   help='Science-spectrum airglow lines used as inputs (default: none)')
-    p.add_argument('--sky-field', action='store_true', help='add the night field of the sky telescopes to the inputs')
+    p.add_argument('--sci-lines', nargs='*', default=list(DEFAULT_SCI_LINES),
+                   choices=oi6300.SCI_CONTROL + oi6300.SCI_GUARDED,
+                   help='Science-spectrum airglow lines used as inputs (default: %(default)s; no value: none)')
+    p.add_argument('--sky-field', action=argparse.BooleanOptionalAction, default=True,
+                   help='night field of the sky telescopes among the inputs (default: on)')
     p.add_argument('--guard', type=float, default=3.0, help='drop a guarded Science line above this many sigma')
     p.add_argument('--members', type=int, default=5, help='ensemble size (1 = single model)')
     p.add_argument('--no-cv', action='store_true', help='skip the cross-validation (no accuracy in the summary)')
@@ -283,7 +294,8 @@ def main(argv=None):
 
     dcfg = PipelineConfig().data
     dcfg.decomp_data_root, dcfg.decomp_stem = args.decomp_root, args.stem
-    corpus = Path(args.corpus or SKYSUB / 'sky_decomp/data/ionosphere/corpus' / f'iono_corpus_{args.stem}.npz')
+    corpus = Path(args.corpus) if args.corpus else iono_corpus.build_context(
+        args.decomp_root, args.stem, args.workers, args.rebuild_context)['corpus']
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     name = args.name or '_'.join(
@@ -307,6 +319,7 @@ def main(argv=None):
                'decomp_suffix': dcfg.decomp_suffix, 'corpus': corpus.name, 'corpus_sha256_16': _sha256(corpus),
                'rows': {k: int(v.sum()) for k, v in sets.items()},
                'rows_dropped_for_zero_coordinates': int((~aux['valid_coords']).sum())}
+    pred = np.full(sets['train'].size, np.nan)
     if not args.no_cv:
         pred, dropped = cross_validate(tab, sets['train'], sets['domain'], members=args.members, prepare=prepare, **kw)
         tr = sets['train']
@@ -328,6 +341,14 @@ def main(argv=None):
                 'inputs_dropped': [n for i, n in enumerate(m.names) if i not in set(m.keep)],
                 'line_level_sigma_dex': {n: round(float(s), 5) for n, (_, s) in m.level.items()}}
     summary |= _provenance(dcfg, corpus)
+    # Per corpus exposure, for SkyML and for training the sky-transfer MLP: the night field, and the prediction a
+    # model that did not see the night gives (the test-night run for the training rows, this model for the rest).
+    cv = sets['train'] & np.isfinite(pred)
+    m.corpus = {'expnum': np.asarray(tab['expnum']), 'obstime_mjd': np.asarray(tab['obstime_mjd'], float),
+                'log10_pred': np.where(cv, pred, m.predict(tab)[0]), 'pred_from_cv': cv,
+                **{c: np.asarray(tab[c], float) for c in oi6300.SKY_FIELD if args.sky_field}}
+    summary['corpus_predictions'] = {'rows': int(cv.size), 'finite': int(np.isfinite(m.corpus['log10_pred']).sum()),
+                                     'from_test_nights': int(cv.sum())}
     m.meta = summary
     m.save(out / f'{name}.pkl.part')  # the pair appears only when the build is complete
     (out / f'{name}.pkl.part').replace(out / f'{name}.pkl')

@@ -19,6 +19,11 @@ HELP = {
         "Required unless reusing same-exposure saved state. Intermediate calculations stay "
         "in memory; no preliminary FITS is written by default. --ensemble is a compatible alias."
     ),
+    "oi_model": (
+        "Saved [O I] 6300 model (.pkl written by `oi-model`, mlp_predictor.oi6300_build). Its Science "
+        "[O I] 6300 replaces the ML coefficient of the line and is an input of an ML model trained with it. "
+        "Unset: the ML coefficient is used. Ignored when saved state is reused."
+    ),
     "gaia_dir": (
         "Direct parent of lvmGAIA-fibers-00011017.fits (eight-digit exposure), "
         "e.g. /cache/gaia/fibers, not /cache/gaia. Requires PRIMARY.EXPNUM and a FIBERS "

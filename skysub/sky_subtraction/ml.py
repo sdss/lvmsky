@@ -13,7 +13,7 @@ _SKYSUB = str(Path(__file__).resolve().parents[1])
 if _SKYSUB not in sys.path:
     sys.path.insert(0, _SKYSUB)
 
-from mlp_predictor import data, inference, serialization  # noqa: E402
+from mlp_predictor import data, inference, ionosphere, oi6300, oi6300_exposure, roti, serialization  # noqa: E402
 from mlp_predictor.sky_arm_correction import (  # noqa: E402
     SkyArm,
     line_protection_masks,
@@ -32,6 +32,10 @@ from mlp_predictor.sky_line_scaling import (  # noqa: E402
 __all__ = [
     'data',
     'inference',
+    'ionosphere',
+    'oi6300',
+    'oi6300_exposure',
+    'roti',
     'serialization',
     'SkyArm',
     'line_protection_masks',

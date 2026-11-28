@@ -34,3 +34,32 @@ def test_match_takes_the_nearer_neighbour_within_the_tolerance():
     mjd = np.array([1.0, 2.0])
     assert list(_match(mjd, np.array([1 + 5e-8, 1 - 5e-8, 2 - 5e-8, 2 + 5e-8, 1.5, 1 + 2e-7]))) == [0, 0, 1, 1, -1, -1]
     assert list(_match(np.array([1.0]), np.array([1.0, 3.0]))) == [0, -1]
+
+
+def test_build_context_skips_what_exists_and_rebuilds_what_follows(tmp_path, monkeypatch):
+    made = []
+    files = {k: tmp_path / f'{k}.npz' for k in ('iono', 'roti', 'thermo', 'corpus')}
+    monkeypatch.setattr(iono_corpus, 'paths', lambda stem: files)
+
+    def maker(key):
+        def make(*args, **kwargs):
+            made.append(key)
+            np.savez(files[key], obstime_mjd=np.array([60000.7, 60001.6]))
+        return make
+
+    monkeypatch.setattr(iono_corpus.ionosphere, 'build_context_table', maker('iono'))
+    monkeypatch.setattr(iono_corpus.roti, 'fetch', lambda nights, workers: made.append(('fetch', list(nights))))
+    monkeypatch.setattr(iono_corpus.roti, 'build_table', maker('roti'))
+    monkeypatch.setattr(iono_corpus.thermosphere, 'build_table', maker('thermo'))
+    monkeypatch.setattr(iono_corpus, 'build', maker('corpus'))
+    assert iono_corpus.build_context('root', 'stem') == files
+    assert made == ['iono', ('fetch', [60000, 60001]), 'roti', 'thermo', 'corpus']
+    made.clear()
+    iono_corpus.build_context('root', 'stem')
+    assert made == []  # everything exists
+    files['thermo'].unlink()
+    iono_corpus.build_context('root', 'stem')
+    assert made == ['thermo', 'corpus']  # a rebuilt table forces what is built from it
+    made.clear()
+    iono_corpus.build_context('root', 'stem', force=True)
+    assert [m if isinstance(m, str) else m[0] for m in made] == ['iono', 'fetch', 'roti', 'thermo', 'corpus']

@@ -31,9 +31,13 @@ from .ml import (
     SkyArm,
     data,
     inference,
+    ionosphere,
     line_templates,
     oh_group_labels,
+    oi6300,
+    oi6300_exposure,
     protection_velocities,
+    roti,
     serialization,
     sky_arm_residual_correction,
     sky_line_scaling_correction,
@@ -74,6 +78,13 @@ CODE_MODULES = (
     'mlp_predictor.sky_arm_correction',
     'mlp_predictor.data',
     'mlp_predictor.inference',
+    'mlp_predictor.iono_corpus',
+    'mlp_predictor.ionosphere',
+    'mlp_predictor.thermosphere',
+    'mlp_predictor.bubbles',
+    'mlp_predictor.roti',
+    'mlp_predictor.oi6300',
+    'mlp_predictor.oi6300_exposure',
     'mlp_predictor.serialization',
     'mlp_predictor.sky_line_scaling',
 )
@@ -203,8 +214,61 @@ def arm_slots(failed):
     return {label: (label if label in good else good[0]) for label in SKY_ARMS}
 
 
-def predict_ifu(ensemble_path, frame, median_fits):
-    """One ML coefficient vector at the Science IFU center; the ensemble is released on return."""
+def oi6300_prediction(model_path, frame, median_fits, download=True):
+    """Science [O I] 6300 of the exposure from the dedicated model (``mlp_predictor.oi6300``); never raises.
+
+    Inputs: the decomposition coefficients of the three medians of this exposure, its observing and ionospheric
+    context, and (for a model with the night field) the model's corpus table.  Returns a record with ``coef``, the
+    ``ATOM_Or`` coefficient of the Science telescope, NaN with a ``reason`` when the model gives no value.
+    """
+    record = dict(model=str(Path(model_path).resolve()), coef=float('nan'), applied=False, reason='')
+    try:
+        if median_fits.failed_arms:
+            raise ValueError(f'sky arm {", ".join(median_fits.failed_arms)} is unusable')
+        model = oi6300.OI6300Model.load(model_path)
+        header, labels = frame.header, median_fits.labels
+        arms = dict(sci=labels['sci'], near=labels['sky1'], far=labels['sky2'])
+        out = oi6300_exposure.predict(
+            model,
+            obstime_mjd=[Time(str(header['OBSTIME']).strip(), scale='utc').mjd],
+            expnum=[int(header['EXPOSURE'])],
+            radec={a: adapter.telescope_coords(header, label) for a, label in arms.items()},
+            coef={a: median_fits.results[label].coef[None, :] for a, label in arms.items()},
+            coef_names=list(median_fits.science_model.design_names),
+            near_is_skye=[arms['near'] == 'SkyE'],
+            download=download,
+        )
+        sigma = model.meta.get('test_nights', {}).get('all', {}).get('sigma')
+        record.update(
+            name=model.meta.get('name'),
+            model_sha256=sha256(model_path),
+            coef=float(out['coef'][0]),
+            log10_rayleigh=float(out['log10_R'][0]),
+            sigma_dex=sigma,
+            inputs_out_of_range=int(out['out_of_range'][0]),
+            inputs_missing=int(out['missing'][0]),
+            in_model_corpus=bool(out['in_corpus'][0]),
+            science_lines_used={name: bool(used[0]) for name, used in out['lines_used'].items()},
+        )
+        if not np.isfinite(record['coef']) or record['coef'] <= 0:
+            record['reason'] = (
+                'exposure is not in the corpus of this night-field model'
+                if model.sky_field and not record['in_model_corpus']
+                else 'sky-telescope [O I] 6300 is not valid'
+            )
+    except Exception as error:  # noqa: BLE001 - the ML coefficient stays in place
+        record['reason'] = repr(error)
+    if record['reason']:
+        LOG.warning('[O I] 6300 model gives no value, the ML coefficient is kept: %s', record['reason'])
+    return record
+
+
+def predict_ifu(ensemble_path, frame, median_fits, oi=None):
+    """One ML coefficient vector at the Science IFU center; the ensemble is released on return.
+
+    ``oi`` (``oi6300_prediction``): its coefficient is offered to the ensemble as an input and, where finite,
+    replaces the ensemble's ``ATOM_Or`` in the returned vector.
+    """
     ensemble = serialization.load_ensemble(ensemble_path)
     model = median_fits.science_model
     if list(model.design_names) != list(ensemble['coef_names']):
@@ -238,14 +302,25 @@ def predict_ifu(ensemble_path, frame, median_fits):
         date_obs=date,
         expnum=int(header['EXPOSURE']),
         exposure_seconds=float(header['EXPTIME']),
+        oi6300_coef=None if oi is None else [oi['coef']],
     )
     coef = np.asarray(prediction['coef'][0], float)
+    coef_std = np.asarray(prediction['coef_std'][0], float)
     if not np.isfinite(coef).all():
         raise ValueError('ML prediction contains nonfinite coefficients')
+    if oi is not None:
+        j = list(model.design_names).index('ATOM_Or')
+        oi['coef_ml'] = float(coef[j])
+        if np.isfinite(oi['coef']) and oi['coef'] > 0:
+            coef[j], oi['applied'] = oi['coef'], True
+            sigma = oi.get('sigma_dex')
+            # The old ensemble's spread does not describe the replacement coefficient.
+            coef_std[j] = (oi['coef'] * np.log(10.0) * sigma
+                           if sigma is not None and np.isfinite(sigma) and sigma >= 0 else np.nan)
     ml = MLCoefficients(
         names=list(model.design_names),
         coef=coef,
-        coef_std=np.asarray(prediction['coef_std'][0], float),
+        coef_std=coef_std,
         oh_coef=coef.copy(),
     )
     diagnostics = {k: v for k, v in prediction.items() if k not in ('coef', 'coef_std')}
@@ -254,6 +329,30 @@ def predict_ifu(ensemble_path, frame, median_fits):
     extra = rel.fallback_bits(median_fits.failed_arms, median_fits.labels['sky1'])
     diagnostics['reliability'] = np.where(bits < 0, bits, bits | extra).astype(np.int32)
     return ml, diagnostics
+
+
+def plasma_bubble_qa(header, settings=SETTINGS, download=True):
+    """GNSS ROTI near each telescope's 285 km pierce point; a QA flag only, the subtraction is unchanged.
+
+    Returns ``mlp_predictor.roti.exposure_flag`` output (``bubble``: 1, 0, or -1 for unknown); never raises.
+    """
+    from astropy import units as u
+    from astropy.coordinates import AltAz, EarthLocation, SkyCoord
+
+    try:
+        when = Time(str(header['OBSTIME']).strip(), scale='utc')
+        site = EarthLocation(lat=ionosphere.LCO_LAT_DEG * u.deg, lon=ionosphere.LCO_LON_DEG * u.deg, height=2380 * u.m)
+        ipp = {}
+        for label in TELESCOPES:
+            ra, dec = adapter.telescope_coords(header, label)
+            aa = SkyCoord(ra * u.deg, dec * u.deg).transform_to(AltAz(obstime=when, location=site))
+            if aa.alt.deg > 5.0:
+                ipp[label] = ionosphere.pierce_point(aa.alt.deg, aa.az.deg)[:2]
+        return roti.exposure_flag(when.mjd, ipp, settings.roti_bubble_threshold, settings.roti_radius_km,
+                                  settings.roti_window_min, download=download)
+    except Exception as error:  # noqa: BLE001 - QA must not stop the subtraction
+        LOG.warning('Plasma-bubble QA unavailable: %r', error)
+        return {'bubble': -1, 'errors': [repr(error)], 'telescopes': {}}
 
 
 def corrected_coefficients(model, matrices, coefficient, parameters):
@@ -421,6 +520,8 @@ def run(
     render_sky=True,
     return_hdus=False,
     hash_input=True,
+    bubble_qa=True,
+    oi_model=None,
 ):
     """Process one lvmCFrame and publish ``lvmSFrame-skyml-<exposure>.fits``; returns its path.
 
@@ -428,6 +529,11 @@ def run(
     names the Gaia cache folder); the caller owns it.
     The block pipeline sets ``hash_input=False`` to record file size/mtime instead of reading
     the entire CFrame again for its content hash.
+    ``bubble_qa`` fetches public GNSS RINEX (BKG) for the plasma-bubble QA flag; it never alters the sky and an
+    unavailable flag is recorded as unknown.
+    ``oi_model`` is a saved ``OI6300Model`` (``mlp_predictor.oi6300_build``): its Science [O I] 6300 replaces the
+    ensemble's ``ATOM_Or`` coefficient wherever the model gives a value, and is an input of an ensemble trained
+    with it.  Its ionospheric context downloads IONEX maps and GNSS station-days that are not cached.
 
     Workers are forked after the ML ensemble is released. Callers outside the CLI should
     limit native threads (OPENBLAS/OMP/MKL_NUM_THREADS=1) before importing numpy.
@@ -457,10 +563,15 @@ def run(
     labels = dict(sci='Sci', sky1=near, sky2=far)
     median_fits = adapter.fit_medians(stack, {kind: median_references[label] for kind, label in labels.items()}, labels)
     LOG.info('Predicting one Science IFU coefficient vector')
-    ml, prediction_diagnostics = predict_ifu(ensemble_path, frame, median_fits)
+    oi = oi6300_prediction(oi_model, frame, median_fits) if oi_model else None
+    ml, prediction_diagnostics = predict_ifu(ensemble_path, frame, median_fits, oi)
     extra = rel.RELIABILITY_GAIA_FALLBACK if any(d['fallback'] for d in selection.diagnostics.values()) else 0
     if any(f.fit_status not in ('Solved', 'AlmostSolved') for f in median_fits.results.values()):
         extra |= rel.RELIABILITY_FIT_FAILED
+    bubble = plasma_bubble_qa(frame.header, settings) if bubble_qa else {'bubble': -1, 'disabled': True}
+    if bubble['bubble'] == 1:
+        extra |= rel.RELIABILITY_PLASMA_BUBBLE
+        LOG.warning('Plasma bubble near the pierce points (GNSS ROTI >= %s TECU/min)', settings.roti_bubble_threshold)
     bits = np.asarray(prediction_diagnostics['reliability'], np.int32)
     prediction_diagnostics['reliability'] = np.where(bits < 0, bits, bits | extra).astype(np.int32)
     corrections = estimate_corrections(frame, median_fits, ml, medians, stack, near, settings)
@@ -530,6 +641,8 @@ def run(
         code_revision=revision,
         residual_correction=corrections.residual_info,
         oh_correction=corrections.oh_info,
+        plasma_bubble=bubble,
+        oi6300=oi,
         median_fits={
             label: dict(
                 status=fit.fit_status,

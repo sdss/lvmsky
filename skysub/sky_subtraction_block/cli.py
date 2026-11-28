@@ -119,6 +119,8 @@ app = typer.Typer(name="skyml-block", help=ROOT_HELP, rich_markup_mode="markdown
 ModelFile = Annotated[Path | None, typer.Option("--ml-model-file", "--ensemble",
                       help=HELP["ensemble"], rich_help_panel="Model and Gaia")]
 Gaia = Annotated[Path | None, typer.Option("--gaia-dir", help=HELP["gaia_dir"], rich_help_panel="Model and Gaia")]
+OIModel = Annotated[Path | None, typer.Option("--oi-model", exists=True, dir_okay=False, help=HELP["oi_model"],
+                                             rich_help_panel="Model and Gaia")]
 Seed = Annotated[Path | None, typer.Option("--reuse-state", "--seed", help=HELP["seed"], rich_help_panel="Optional saved-state reuse")]
 Keep = Annotated[bool, typer.Option("--keep-preparation", help=HELP["keep_preparation"], rich_help_panel="Optional saved-state reuse")]
 Jobs = Annotated[int, typer.Option("--nproc", "--jobs", min=1, help=HELP["jobs"], rich_help_panel="CPU budget")]
@@ -146,7 +148,7 @@ LogLevel = Annotated[Level, typer.Option("--log-level", case_sensitive=False, he
 
 
 def _model(values):
-    return {name: values[name] for name in ("ensemble", "gaia_dir", "jobs", *DEFAULTS)}
+    return {name: values[name] for name in ("ensemble", "gaia_dir", "oi_model", "jobs", *DEFAULTS)}
 
 
 def _logging(level):
@@ -174,7 +176,7 @@ def single(
         "One final FITS file, retaining the lvmSFrame-skyml-block- prefix. Default: beside INPUT, "
         "replace lvmCFrame- with lvmSFrame-skyml-block-; remove trailing .gz. Existing files are protected by default."),
         rich_help_panel="Input and final output")] = None,
-    ensemble: ModelFile = None, gaia_dir: Gaia = None, seed: Seed = None,
+    ensemble: ModelFile = None, gaia_dir: Gaia = None, oi_model: OIModel = None, seed: Seed = None,
     on_existing: Annotated[Existing, typer.Option(help=(
         "error: destination conflict; skip: verify/reuse a matching product; "
         "overwrite: recompute and atomically replace the final FITS only on success."))] = Existing.error,
@@ -282,7 +284,7 @@ def batch(
         rich_help_panel="Final output")] = Existing.error,
     missing_input: Annotated[Missing, typer.Option(help="error: stop planning; skip: record unavailable local CFrame and continue.",
                          rich_help_panel="Catalogue selection")] = Missing.error,
-    ensemble: ModelFile = None, gaia_dir: Gaia = None,
+    ensemble: ModelFile = None, gaia_dir: Gaia = None, oi_model: OIModel = None,
     reuse_state_dir: Annotated[Path | None, typer.Option(help=(
         "Advanced: existing snapshots from earlier --keep-preparation runs. Preserve-tree mode expects "
         "DIR/TILEGROUP/TILE/MJD/lvmSFrame-skyml-preparation-00011017.fits; flat mode "
@@ -361,6 +363,31 @@ def batch(
             typer.echo(line)
     if result["state"] != "complete":
         raise typer.Exit(1)
+
+
+OI_MODEL_HELP = """Build the Science [O I] 6300 model for a decomposed median stack (new DRP version, new corpus).
+
+One step of the standard workflow, after the medians and their decomposition and before `single` / `batch`:
+
+    python -m skysub.sky_subtraction_block.cli oi-model \\
+        --decomp-root /data/sky_decomposition_1.3.2_knox \\
+        --stem lvmsframe_median_stack_1.3.2_knox_gaia1over100 --out /models/oi6300
+
+It builds what is missing of the ionospheric context of the stack (IONEX map table, GNSS ROTI table, thermosphere
+table, corpus; downloads included), selects the training exposures, validates on held-out nights and saves
+`<name>.pkl`, `<name>.json` and `<name>_cv.csv`. Pass the `.pkl` to `single` / `batch` with `--oi-model`.
+Everything after `oi-model` goes to `python -m mlp_predictor.oi6300_build`; add `--help` for its options.
+"""
+
+
+@app.command("oi-model", help=OI_MODEL_HELP, add_help_option=False,
+             context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
+def oi_model_build(ctx: typer.Context):
+    import importlib
+    skysub = str(Path(__file__).resolve().parents[1])
+    if skysub not in sys.path:
+        sys.path.insert(0, skysub)  # mlp_predictor is a top-level package, as in sky_subtraction.ml
+    importlib.import_module("mlp_predictor.oi6300_build").main(ctx.args)
 
 
 def main():

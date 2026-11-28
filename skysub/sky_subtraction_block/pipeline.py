@@ -98,7 +98,7 @@ def _mapped(function,indices,jobs):
 
 
 def run(input_path, *, output=None, seed=None, ensemble=None, gaia_dir=None, jobs=8, slit_count=4, centered=False, keep_preparation=False,
-        offset_count=11, wave_count=4, offset_roughness=0., wave_roughness=0., slit_roughness=0., reference_prior=0., fit_sky_fibers=False, execution_metadata=None, overwrite=False):
+        offset_count=11, wave_count=4, offset_roughness=0., wave_roughness=0., slit_roughness=0., reference_prior=0., fit_sky_fibers=False, execution_metadata=None, overwrite=False, oi_model=None):
     global _WORK
     _keep_freed_memory()
     started=time.perf_counter(); input_path=Path(input_path).resolve()
@@ -120,7 +120,7 @@ def run(input_path, *, output=None, seed=None, ensemble=None, gaia_dir=None, job
         else:
             if ensemble is None:raise ValueError('Supply an ensemble for median/ML preparation or an existing --seed product')
             # Median/ML/correction stage of the common pipeline, kept in memory; per-fiber LSF fits are off.
-            prepared=common.run(input_path,ensemble,gaia_dir=gaia_dir,output=default,jobs=jobs,survey_only=True,render_sky=False,return_hdus=True,hash_input=False)
+            prepared=common.run(input_path,ensemble,gaia_dir=gaia_dir,output=default,jobs=jobs,survey_only=True,render_sky=False,return_hdus=True,hash_input=False,oi_model=oi_model)
             if keep_preparation:publish_product(prepared,default,input_path);seed_path=default.resolve()
     header,slit,wave,flux,ivar,mask,_=read_cframe(input_path)
     with SkyMLReconstructor(prepared if prepared is not None else seed_path,cframe=input_path) as r:

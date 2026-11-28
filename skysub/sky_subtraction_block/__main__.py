@@ -43,6 +43,7 @@ SFrame; saved-state reuse is a special optional mode.
     parser.add_argument("input", help="One observed-flux lvmCFrame FITS path.")
     parser.add_argument("--output", help="One final lvmSFrame-skyml-block-* FITS; default beside INPUT. Existing files are protected.")
     parser.add_argument("--ml-model-file", "--ensemble", dest="ensemble", help=HELP["ensemble"])
+    parser.add_argument("--oi-model", help=HELP["oi_model"])
     parser.add_argument("--gaia-dir", help=HELP["gaia_dir"])
     parser.add_argument("--reuse-state", "--seed", dest="seed", help=HELP["seed"])
     parser.add_argument("--nproc", "--jobs", dest="jobs", type=int, default=8, help=HELP["jobs"])

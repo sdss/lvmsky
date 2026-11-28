@@ -20,6 +20,9 @@ def main():
     parser.add_argument('--output', help='Output path; default is adjacent lvmSFrame-skyml-*.fits')
     parser.add_argument('--jobs', type=int, default=1, help='Fiber fit worker processes')
     parser.add_argument('--survey-only', action='store_true', help='Use survey R/Z for the validation baseline')
+    parser.add_argument('--oi-model', help='Saved [O I] 6300 model (.pkl of mlp_predictor.oi6300_build); '
+                        'its value replaces the ensemble coefficient of the line')
+    parser.add_argument('--no-bubble-qa', action='store_true', help='Skip the GNSS ROTI plasma-bubble QA flag')
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
     from .pipeline import run
@@ -32,6 +35,8 @@ def main():
         output=args.output,
         jobs=args.jobs,
         survey_only=args.survey_only,
+        bubble_qa=not args.no_bubble_qa,
+        oi_model=args.oi_model,
     )
     logging.getLogger(__name__).info('Published %s', output)
 

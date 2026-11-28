@@ -8,10 +8,15 @@ named in ``sky_near_label``), or a plain name for per-exposure values.  ``COLUMN
 it is also stored in the file as ``columns_json``.  All quantities are vertical or local except the observed line
 coefficients, which are as seen along each line of sight (divide by ``<arm>_vanrhijn_<h>km`` for zenith-equivalent).
 
-Run from ``skysub/`` (needs the corpus META and decomposition files and the ROTI station-day cache)::
+``build_context`` builds the three tables and the corpus of a decomposed median stack in one call, skipping what
+exists (``paths``); ``exposure_columns`` computes the same quantities for any exposure (SkyML).  Run from ``skysub/``::
 
-    python -m mlp_predictor.iono_corpus --out sky_decomp/data/ionosphere/corpus/iono_corpus_<stem>.npz
+    python -m mlp_predictor.iono_corpus --decomp-root DIR --stem STEM          # tables and corpus, what is missing
     python -m mlp_predictor.iono_corpus --plot sky_decomp/data/ionosphere/corpus/iono_corpus_<stem>.npz
+
+The build needs the corpus META and decomposition files; it downloads the IONEX maps and the GNSS station-days it
+does not have, and needs the ``thermosphere`` extra with HWM14 built (``python -m mlp_predictor.thermosphere
+build-hwm``).
 """
 
 import argparse
@@ -97,13 +102,106 @@ def _match(mjd, query):
     return np.where(np.abs(mjd[pos] - query) < 1e-7, pos, -1)
 
 
+def paths(stem):
+    """Files of a corpus stem: the ionosphere, thermosphere and ROTI tables and the corpus."""
+    d = ionosphere.CONTEXT_TABLE_DIR
+    return {'iono': d / f'iono_ctx_{stem}.npz', 'thermo': thermosphere.TABLE_DIR / f'thermo_ctx_{stem}.npz',
+            'roti': roti.TABLE_DIR / f'roti_ctx_{stem}.npz', 'corpus': d / 'corpus' / f'iono_corpus_{stem}.npz'}
+
+
+def _derived(t, mjd):
+    """Add the per-arm columns that follow from pointing, pierce point and solar activity already in ``t``."""
+    for a in ARMS:
+        el = np.asarray(t[f'{a}_alt'], np.float64)
+        t[f'{a}_vanrhijn_95km'] = roti.mapping(el, 95.0).astype(np.float32)
+        t[f'{a}_vanrhijn_285km'] = roti.mapping(el, ionosphere.IPP_HEIGHT_KM).astype(np.float32)
+        t[f'{a}_local_time'] = bubbles.local_time_h(mjd, t[f'{a}_ipp_lon']).astype(np.float32)
+        apex = bubbles.apex_height_km(np.asarray(t[f'{a}_dip_lat'], np.float64), ionosphere.IPP_HEIGHT_KM)
+        t[f'{a}_bubble_p'] = bubbles.reach_probability(mjd, t[f'{a}_ipp_lon'], apex, t['f107']).astype(np.float32)
+
+
+def exposure_columns(mjd, alt, az, download=True):
+    """The corpus columns that need no decomposition, computed for any exposures.
+
+    mjd (n,) mid-exposure UT MJD; alt, az: dicts arm -> (n,) [deg] for ``ARMS``.  Same functions and precision as
+    the corpus tables: IONEX maps, IRI / NRLMSIS / HWM14, GNSS station-days (downloaded if missing and
+    ``download``), Swarm bubble prior.  The per-event dVTEC columns are not computed.
+    """
+    from mlp_predictor import data
+
+    mjd = np.atleast_1d(np.asarray(mjd, np.float64))
+    t = {'obstime_mjd': mjd, 'night_mjd': np.floor(mjd - 0.5).astype(np.int32),
+         'sun_alt_conjugate': ionosphere.sun_alt_conjugate(mjd).astype(np.float32)}
+    solar = lambda when, key: data._solar_activity_lookup(when, key).astype(np.float64)  # noqa: E731
+    f107_prev, f107a, ap = solar(mjd - 1.0, 'f107'), solar(mjd, 'f107_81d'), thermosphere.kp_to_ap(solar(mjd, 'kp'))
+    t |= {'f107': solar(mjd, 'f107').astype(np.float32), 'kp': solar(mjd, 'kp').astype(np.float32),
+          'f107_prev': f107_prev.astype(np.float32), 'f107a': f107a.astype(np.float32), 'ap': ap.astype(np.float32)}
+    for a in ARMS:
+        el, azimuth = (np.asarray(x[a], np.float64).astype(np.float32) for x in (alt, az))  # as the tables store them
+        f, source = ionosphere.telescope_features(mjd, el, azimuth, download=download)
+        f = {k: np.asarray(f[k], np.float32) for k in ionosphere._TABLE_FEATURES}
+        t |= {f'{a}_alt': el, f'{a}_az': azimuth, f'{a}_ionex_source': source} | {f'{a}_{k}': v for k, v in f.items()}
+        th = thermosphere.features(mjd, f['ipp_lat'], f['ipp_lon'], f['vtec'], f107_prev, f107a, ap)
+        t |= {f'{a}_{k}': np.asarray(th[k], np.float32) for k in thermosphere.FEATURES}
+        r = roti.roti_at(mjd, f['ipp_lat'], f['ipp_lon'], download=download, aligned=True)
+        t |= {f'{a}_roti_max': r[:, 0].astype(np.float32), f'{a}_roti_med': r[:, 1].astype(np.float32),
+              f'{a}_roti_n': r[:, 2].astype(np.int32)}
+    _derived(t, mjd)
+    return t
+
+
+def build_context(decomp_root, stem, workers=4, force=False):
+    """Build what is missing of the context tables and the corpus of a decomposed median stack; returns ``paths``.
+
+    Order: ionosphere table (IONEX maps of every night), GNSS station-days and the ROTI table, thermosphere table,
+    corpus.  A table that is rebuilt forces everything after it; ``force`` rebuilds all four.
+    """
+    from mlp_predictor.config import DataConfig
+
+    cfg = DataConfig()
+    cfg.decomp_data_root, cfg.decomp_stem = str(decomp_root), stem
+    p = paths(stem)
+    for f in p.values():
+        f.parent.mkdir(parents=True, exist_ok=True)
+
+    def step(key, make):
+        nonlocal force
+        if force or not p[key].exists():
+            print(f'context: building {p[key].name}', flush=True)
+            make()
+            force = True
+        else:
+            print(f'context: {p[key].name} exists', flush=True)
+
+    step('iono', lambda: ionosphere.build_context_table(cfg.input_fits_meta, p['iono']))
+
+    def make_roti():
+        roti.fetch(np.unique(np.floor(np.load(p['iono'])['obstime_mjd'] - 0.5).astype(int)), workers)
+        roti.build_table(p['iono'], p['roti'])
+
+    step('roti', make_roti)
+    step('thermo', lambda: thermosphere.build_table(p['iono'], p['thermo']))
+    step('corpus', lambda: build(p['corpus'], decomp_root, stem))
+    ionosphere._bundled_tables.cache_clear()
+    thermosphere.bundled_table.cache_clear()
+    return p
+
+
 def build(out, decomp_root=DECOMP_ROOT, decomp_stem=DECOMP_STEM, training_mjd=None):
+    """Join the three context tables of ``decomp_stem`` (``paths``) with the decomposition into the corpus."""
     from astropy.table import Table
 
     from mlp_predictor import data
     from mlp_predictor.config import DataConfig
 
-    iono, thermo, rt = ionosphere._bundled_tables(), thermosphere.bundled_table(), roti.bundled_table()
+    p = paths(decomp_stem)
+    iono, thermo, rt = ({k: v for k, v in np.load(p[key], allow_pickle=False).items() if np.ndim(v) == 1}
+                        for key in ('iono', 'thermo', 'roti'))
+    if not all(np.array_equal(x['obstime_mjd'], iono['obstime_mjd']) for x in (thermo, rt)):
+        raise ValueError(f'the thermosphere or ROTI table of {decomp_stem} is not row-aligned with its ionosphere '
+                         'table: rebuild them (build_context, force=True)')
+    order = np.argsort(iono['obstime_mjd'], kind='stable')
+    iono, thermo, rt = ({k: v[order] for k, v in x.items()} for x in (iono, thermo, rt))
     mjd = iono['obstime_mjd']
     n = mjd.size
     t = {'obstime_mjd': mjd, 'night_mjd': np.floor(mjd - 0.5).astype(np.int32),
@@ -134,14 +232,9 @@ def build(out, decomp_root=DECOMP_ROOT, decomp_stem=DECOMP_STEM, training_mjd=No
             t[f'{a}_{k}'] = thermo[f'{a}_{k}'].astype(np.float32)
         for k in ('roti_max', 'roti_med', 'roti_n'):
             t[f'{a}_{k}'] = rt[f'{a}_{k}']
-        el = t[f'{a}_alt'].astype(np.float64)
-        t[f'{a}_vanrhijn_95km'] = roti.mapping(el, 95.0).astype(np.float32)
-        t[f'{a}_vanrhijn_285km'] = roti.mapping(el, ionosphere.IPP_HEIGHT_KM).astype(np.float32)
-        t[f'{a}_local_time'] = bubbles.local_time_h(mjd, t[f'{a}_ipp_lon']).astype(np.float32)
-        apex = bubbles.apex_height_km(t[f'{a}_dip_lat'].astype(np.float64), ionosphere.IPP_HEIGHT_KM)
-        t[f'{a}_bubble_p'] = bubbles.reach_probability(mjd, t[f'{a}_ipp_lon'], apex, t['f107']).astype(np.float32)
         t[f'{a}_dvtec_event'], t[f'{a}_dvtec_event_dist_km'], t[f'{a}_dvtec_event_el'] = (
             np.full(n, np.nan, np.float32) for _ in range(3))
+    _derived(t, mjd)
     for night in np.unique(t['night_mjd']):
         parts = []
         for sta in roti.STATIONS:
@@ -199,7 +292,9 @@ def load(path):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split('\n')[0])
-    ap.add_argument('--out', help='build the corpus into this .npz')
+    ap.add_argument('--out', help='build only the corpus, into this .npz (the three tables must exist)')
+    ap.add_argument('--force', action='store_true', help='rebuild the tables and the corpus even if they exist')
+    ap.add_argument('--workers', type=int, default=4, help='parallel downloads of GNSS station-days')
     ap.add_argument('--training-triplet', help='pickled filtered triplet: marks in_training_set')
     ap.add_argument('--decomp-root', default=DECOMP_ROOT, help='directory of the median stack and its decompositions')
     ap.add_argument('--stem', default=DECOMP_STEM, help='median-stack file stem (file name without .fits)')
@@ -212,6 +307,8 @@ def main():
 
             tm = pickle.loads(Path(args.training_triplet).read_bytes())['obstime_mjd']
         build(args.out, decomp_root=args.decomp_root, decomp_stem=args.stem, training_mjd=tm)
+    elif not args.plot:
+        build_context(args.decomp_root, args.stem, args.workers, args.force)
     if args.plot:
         from mlp_predictor.diagnostics_cells import iono_corpus_hist
 

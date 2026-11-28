@@ -694,6 +694,8 @@ def train_compressed_group_mlp(
     isolated_branch_inputs=(),
     # Optional {group: alpha} held fixed instead of learned (model.py).
     fixed_blend_alpha=None,
+    # Optional isolated-branch groups that alone see the iono_* ctx columns (model.py); None = every path.
+    iono_ctx_groups=None,
     weight_decay=1e-4, grad_clip=1.0, patience=4,
     seed=42,
     moon_group_weight=1.0,
@@ -1141,6 +1143,7 @@ def train_compressed_group_mlp(
         isolated_branches=isolated_branches,
         isolated_branch_inputs=tuple(isolated_branch_inputs),
         fixed_blend_alpha=fixed_blend_alpha,
+        iono_ctx_groups=iono_ctx_groups,
         blend_init_alpha=(dict(blend_init_alpha) if isinstance(blend_init_alpha, Mapping)
                           else float(blend_init_alpha)),
         alpha_ctx_features=alpha_ctx_features,
@@ -1800,6 +1803,7 @@ def train_compressed_group_mlp(
             'isolated_branches': {str(g): tuple(int(v) for v in d) for g, d in (isolated_branches or {}).items()},
             'isolated_branch_inputs': tuple(str(g) for g in isolated_branch_inputs),
             'fixed_blend_alpha': {str(g): float(a) for g, a in (fixed_blend_alpha or {}).items()},
+            'iono_ctx_groups': None if iono_ctx_groups is None else tuple(str(g) for g in iono_ctx_groups),
             'alpha_ctx_features': tuple(str(x) for x in alpha_ctx_features),
             'patience': int(patience), 'seed': int(seed),
             'moon_group_weight': float(moon_group_weight),
@@ -2405,7 +2409,7 @@ class Trainer:
     _OPTIONAL_CFG_KEYS = frozenset({
         # read via cfg.get(); absent means the trainer default applies
         "ensemble_workers", "ensemble_start_method", "group_weight_overrides",
-        "isolated_branches", "isolated_branch_inputs", "fixed_blend_alpha",
+        "isolated_branches", "isolated_branch_inputs", "fixed_blend_alpha", "iono_ctx_groups",
         "moon_down_amp_free", "moon_down_amp_rule", "moon_down_alt_deg",
         "moon_down_frac_max", "moon_down_ratio_transfer",
         "zodi_ceiling_rule", "zodi_ceiling_amp_free",
@@ -2457,6 +2461,7 @@ class Trainer:
             isolated_branches=c.get("isolated_branches"),
             isolated_branch_inputs=tuple(c.get("isolated_branch_inputs", ())),
             fixed_blend_alpha=c.get("fixed_blend_alpha"),
+            iono_ctx_groups=c.get("iono_ctx_groups"),
             blend_init_alpha=(dict(c["blend_init_alpha"])
                               if isinstance(c["blend_init_alpha"], Mapping)
                               else float(c["blend_init_alpha"])),

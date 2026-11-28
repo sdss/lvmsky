@@ -1,6 +1,6 @@
 {
  "name": "oi6300_model_oh_o2_5577_7774_8446_ens5",
- "created": "2026-11-27 17:03:32+0400",
+ "created": "2026-11-28 00:29:03+0400",
  "sci_lines": [
   "oh",
   "o2",
@@ -176,12 +176,12 @@
    "mtime": 1794788911
   }
  },
- "git_head": "be94923da91f2ef3b266f1225814d8431578b87b",
+ "git_head": "9c852a54714d2c438caf29873bc77b4a60df5827",
  "inputs_version": 2,
  "code_sha256_16": {
-  "oi6300.py": "890da7d7d623672e",
-  "oi6300_build.py": "1de0627696897d1f",
-  "sky_field.py": "d9f27d8f98fd9c8d"
+  "oi6300.py": "3b23e2007ee71b67",
+  "oi6300_build.py": "966761c0a6474ef7",
+  "sky_field.py": "3d7f785e10683131"
  },
  "settings": {
   "K_rayleigh_per_coefficient": {
@@ -218,5 +218,10 @@
   "scipy": "1.17.1",
   "scikit-learn": "1.9.1",
   "astropy": "7.2.3"
+ },
+ "corpus_predictions": {
+  "rows": 18640,
+  "finite": 18576,
+  "from_test_nights": 4834
  }
 }

@@ -106,6 +106,19 @@ def _resolve_ctx_indices(ctx_names, want, purpose):
     return idx, tuple(ctx_names_lower[i] for i in idx)
 
 
+def _shared_ctx_indices(ctx_names, iono_ctx_groups, isolated_branches):
+    """ctx columns the encoders, trunk and non-listed branches see: all, or all but ``iono_*`` when routed."""
+    if iono_ctx_groups is None:
+        return list(range(len(ctx_names)))
+    shared = [i for i, n in enumerate(ctx_names) if not n.startswith("iono_")]
+    if len(shared) == len(ctx_names):
+        raise ValueError("iono_ctx_groups is set but ctx_names has no iono_* columns.")
+    unknown = [g for g in iono_ctx_groups if g not in isolated_branches]
+    if unknown:
+        raise ValueError(f"iono_ctx_groups must be isolated branches; got {unknown}")
+    return shared
+
+
 class DualEncoderGroupHeadMLPCompressed(nn.Module):
     """Deployed compressed dual-encoder group-head MLP.
 
@@ -152,6 +165,7 @@ class DualEncoderGroupHeadMLPCompressed(nn.Module):
         isolated_branches: Mapping[str, Sequence[int]] | None = None,
         isolated_branch_inputs: Sequence[str] = (),
         fixed_blend_alpha: Mapping[str, float] | None = None,
+        iono_ctx_groups: Sequence[str] | None = None,
     ) -> None:
         super().__init__()
         if not zodi_ctx_restriction:
@@ -173,12 +187,21 @@ class DualEncoderGroupHeadMLPCompressed(nn.Module):
             for i, g in enumerate(group_score_dims)
         }
 
+        # ---- Ionospheric-context routing (optional, off by default) -----------
+        # ``iono_ctx_groups=None``: every path sees every ctx column.  A tuple of isolated-branch groups: only
+        # those branches see the ``iono_*`` columns; encoders, trunk and all other branches see the rest.
+        self.iono_ctx_groups = None if iono_ctx_groups is None else tuple(str(g) for g in iono_ctx_groups)
+        shared_idx = _shared_ctx_indices(self.ctx_names, self.iono_ctx_groups, isolated_branches or {})
+        # Not persistent: derived from ctx_names, so checkpoints saved before this option still load strictly.
+        self.register_buffer("shared_ctx_idx", torch.tensor(shared_idx, dtype=torch.long), persistent=False)
+        n_shared = len(shared_idx)
+
         # ---- Encoders + trunk -------------------------------------------------
-        self.sky_encoder = _make_mlp(int(n_score) + int(n_ctx), encoder_dims)
+        self.sky_encoder = _make_mlp(int(n_score) + n_shared, encoder_dims)
         sky_embed_dim = int(encoder_dims[-1])
 
-        self.ctx_encoder = _make_mlp(int(n_ctx), ctx_dims)
-        ctx_embed_dim = int(ctx_dims[-1]) if len(ctx_dims) > 0 else int(n_ctx)
+        self.ctx_encoder = _make_mlp(n_shared, ctx_dims)
+        ctx_embed_dim = int(ctx_dims[-1]) if len(ctx_dims) > 0 else n_shared
 
         fusion_in = 3 * sky_embed_dim + ctx_embed_dim
         self.trunk = _make_mlp(fusion_in, trunk_dims)
@@ -312,7 +335,8 @@ class DualEncoderGroupHeadMLPCompressed(nn.Module):
             raise ValueError(f"isolated branches need known groups and inputs; unknown: {missing}")
         n_branch_score = sum(int(group_score_dims[g]) for g in self.isolated_branch_inputs)
         self.airglow_branches = nn.ModuleDict({
-            g: nn.Sequential(_make_mlp(3 * int(n_ctx) + 2 * n_branch_score, dims),
+            g: nn.Sequential(_make_mlp(3 * (int(n_ctx) if self._sees_iono(g) else n_shared) + 2 * n_branch_score,
+                                       dims),
                              nn.Linear(int(dims[-1]), int(group_score_dims[g])))
             for g, dims in self.isolated_branches.items()
         })
@@ -349,6 +373,9 @@ class DualEncoderGroupHeadMLPCompressed(nn.Module):
         )
 
     # ------------------------------------------------------------------
+    def _sees_iono(self, g):
+        return self.iono_ctx_groups is None or g in self.iono_ctx_groups
+
     # Forward
     # ------------------------------------------------------------------
     def forward(
@@ -359,12 +386,13 @@ class DualEncoderGroupHeadMLPCompressed(nn.Module):
         far_ctx: torch.Tensor,
         sci_ctx: torch.Tensor,
     ) -> dict[str, torch.Tensor]:
-        e_near = self.sky_encoder(torch.cat([near_score, near_ctx], dim=1))
-        e_far = self.sky_encoder(torch.cat([far_score, far_ctx], dim=1))
+        s_near, s_far, s_sci = (c[:, self.shared_ctx_idx] for c in (near_ctx, far_ctx, sci_ctx))
+        e_near = self.sky_encoder(torch.cat([near_score, s_near], dim=1))
+        e_far = self.sky_encoder(torch.cat([far_score, s_far], dim=1))
         e_mean = 0.5 * (e_near + e_far)
         e_diff = e_near - e_far
         e_absdiff = torch.abs(e_diff)
-        e_ctx = self.ctx_encoder(sci_ctx)
+        e_ctx = self.ctx_encoder(s_sci)
 
         h = self.trunk(torch.cat([e_mean, e_diff, e_absdiff, e_ctx], dim=1))
 
@@ -382,11 +410,13 @@ class DualEncoderGroupHeadMLPCompressed(nn.Module):
         mz_latent = self.moon_zodi_coupling_branch(mzin)
 
         alpha_ctx_sci = sci_ctx[:, self.alpha_ctx_idx]
-        if self.airglow_branches:
-            branch_in = torch.cat(
-                [sci_ctx, near_ctx, far_ctx]
-                + [s[:, slice(*self._score_offsets[g])] for s in (near_score, far_score)
-                   for g in self.isolated_branch_inputs], dim=1)
+        branch_scores = [s[:, slice(*self._score_offsets[g])] for s in (near_score, far_score)
+                         for g in self.isolated_branch_inputs]
+        branch_in = {
+            g: torch.cat(([sci_ctx, near_ctx, far_ctx] if self._sees_iono(g) else [s_sci, s_near, s_far])
+                         + branch_scores, dim=1)
+            for g in self.airglow_branches
+        }
 
         out: dict[str, torch.Tensor] = {}
         for g in self.group_score_dims:
@@ -423,7 +453,7 @@ class DualEncoderGroupHeadMLPCompressed(nn.Module):
                 head_out = head(h) + self.moon_zodi_moon_projector(mz_latent)
                 out[g] = blend + head_out
             elif g in self.airglow_branches:
-                out[g] = blend + head(branch_in)
+                out[g] = blend + head(branch_in[g])
             else:
                 out[g] = blend + head(h)
         return out

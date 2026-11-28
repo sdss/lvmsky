@@ -38,7 +38,7 @@ Example: exposure 59750, 1944 input fibers × 12401 wavelengths; 1754 processed 
 
 | Extension | Type / shape | MiB | Meaning |
 |---|---|---:|---|
-| `PRIMARY` | header; — | 0.000 | Exposure header; SKYMFMT=COEFFICIENTS; internal format SKYMLVER=3; SKYMLREL = the prediction's `sky_decomp.reliability` bits (−1: not evaluated), including `one_arm_fallback` (warning) and `arm_misfit` (error) when a sky arm is unusable. A sky arm is unusable when its median fit carries `misfit` (weighted R² < 0.9) or `moon_glare` (within 15° of a bright Moon and redder than the other arm); `SKYML_META.median_fits[label].failed`, `.r2` and `.reliability` record it. |
+| `PRIMARY` | header; — | 0.000 | Exposure header; SKYMFMT=COEFFICIENTS; internal format SKYMLVER=3; SKYMLREL = the prediction's `sky_decomp.reliability` bits (−1: not evaluated), including `one_arm_fallback` (warning) and `arm_misfit` (error) when a sky arm is unusable. A sky arm is unusable when its median fit carries `misfit` (weighted R² < 0.9) or `moon_glare` (within 15° of a bright Moon and redder than the other arm); `SKYML_META.median_fits[label].failed`, `.r2` and `.reliability` record it. `BUBBLE`, `ROTISCI`, `ROTISKE`, `ROTISKW`: plasma-bubble QA (see below). `IONCTX`, `IONXSRC`: ionospheric context (see below). `OI63SRC`, `OI63R`: dedicated [O I] 6300 model (see below). |
 | `FLUX` | f4; 1944 × 12401 | 91.964 | Delivered observed minus applied SKY on processed Science and Sky rows. |
 | `IVAR` | f4; 1944 × 12401 | 91.964 | Observed-noise inverse variance; zero on invalid adopted-sky pixels. |
 | `MASK` | uint8; 1944 × 12401 | 22.992 | Input flags plus invalid adopted-sky flags. |
@@ -97,6 +97,49 @@ for each Sky telescope. Below the target, select up to that many eligible fibers
 by increasing Gaia-to-observed flux ratio, breaking ties by fiber ID. Larger clean
 samples are retained in full. No spectrum or wavelength grid is transformed by
 this selection.
+
+### Ionospheric context
+
+`IONCTX` records which ionospheric context the ensemble read: `none`, `map` (nine `iono_*` per telescope from the
+UQRG/UPRG/CODE IONEX VTEC map and IGRF, `mlp_predictor.ionosphere`) or `map+thermosphere` (plus six F-layer and
+thermosphere quantities, `mlp_predictor.thermosphere`: IRI hmF2, NRLMSIS O2 and T at hmF2, Link & Cogger model 6300,
+its emission height, HWM14 wind-driven drift); `+roti` when the ensemble also reads measured GNSS ROTI per telescope
+(`mlp_predictor.roti`: log max and log median ROTI of the GPS rays within 200 km, field-aligned, and 10 min of the
+pierce point, and an availability flag). `IONXSRC` is the VTEC map used at the Science pierce point. The values
+of every context column for the three telescopes are in `SKYML_META.prediction_diagnostics.triplet` (`ctx_names`,
+`ctx_sci`, `ctx_near`, `ctx_far`), with `ionex_source`, `thermosphere_source` and `roti_source` (`table` or `computed`) and
+`thermosphere_models` (IRI, MSIS and HWM14 versions). All quantities are vertical, so the van Rhijn factor applied to
+the airglow coefficients is counted once. If the context cannot be built (IONEX not yet public, HWM14 not compiled),
+the run stops with an explanatory error instead of substituting values.
+
+### Dedicated [O I] 6300 model
+
+With `--oi-model` (a model saved by `mlp_predictor.oi6300_build`) the Science [O I] 6300 is predicted before the
+ensemble runs, from the decomposition coefficients of the three medians of the exposure and its observing and
+ionospheric context (`mlp_predictor.oi6300_exposure`). The value is offered to the ensemble as an input (columns
+`iono_sqrt_oi6300_model`, `iono_oi6300_model_avail`; read only by an ensemble trained with them), and it replaces the
+ensemble's `ATOM_Or` coefficient in `ML_COEF`, so the rendered and subtracted [O I] 6300/6364 is the model's.
+The coefficient uncertainty becomes the model's test-night scatter, converted to coefficient units to first
+order; it is NaN when that scatter is unavailable, rather than retaining the old ensemble spread. `OI63SRC` is `model` when the replacement was
+made and `ml` when the model gave no value: a sky arm is unusable, the sky-telescope line is not valid, the context
+could not be built, or the model uses the night field and the exposure is not in its corpus. The ensemble
+coefficient is then kept and the run continues. `OI63R` is the model's slant brightness [R], -1 without a value.
+`SKYML_META.oi6300` records the model file and hash, both coefficients (`coef`, `coef_ml`), `applied`, `reason`, the
+number of inputs missing or outside the training range, and which guarded Science lines were used. Both keywords
+are absent when no model was supplied.
+
+### Plasma-bubble QA
+
+New products record `BUBBLE` in the primary header: 1 when GNSS ROTI near any telescope's 285 km pierce
+point reaches `Settings.roti_bubble_threshold` (1 TECU/min) within `roti_radius_km` (200 km) and
+`roti_window_min` (10 min), 0 when ROTI samples exist and none reaches it, and -1 when no GNSS ray is near any
+pierce point, the RINEX is not yet public, or the QA was disabled (`--no-bubble-qa`). `ROTISCI`, `ROTISKE` and
+`ROTISKW` give each telescope's max ROTI [TECU/min], -1 without samples. `SKYMLREL` carries `plasma_bubble`
+(`1 << 26`, a warning) when `BUBBLE = 1`. `SKYML_META.plasma_bubble` records the stations used, fetch errors,
+thresholds, and per-telescope pierce point, max ROTI and sample count. The flag is QA only: the sky model and
+subtraction are unchanged. ROTI comes from public BKG 30 s RINEX of five Chilean and Argentine IGS stations
+(`mlp_predictor.roti`), cached under `skysub/ionosphere_cache/roti/`; an absent keyword in an older product
+means unknown.
 
 Median fits ending in `InsufficientProgress` may continue with their finite
 coefficient vector. `MEDFITFL=True` in the primary header identifies this case,

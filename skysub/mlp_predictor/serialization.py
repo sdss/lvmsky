@@ -172,6 +172,7 @@ def _build_model_from_config(cfg: Mapping[str, Any], *, n_input_score: int,
         isolated_branches=cfg.get("isolated_branches"),
         isolated_branch_inputs=tuple(cfg.get("isolated_branch_inputs", ())),
         fixed_blend_alpha=cfg.get("fixed_blend_alpha"),
+        iono_ctx_groups=cfg.get("iono_ctx_groups"),
         # Scalar or per-group mapping; a restored ensemble must rebuild the
         # SAME model or its alphas start somewhere the training never saw.
         blend_init_alpha=(dict(cfg["blend_init_alpha"])

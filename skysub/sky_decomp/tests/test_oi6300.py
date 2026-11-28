@@ -241,3 +241,56 @@ def test_night_field_recovers_a_gradient_and_improves_the_model():
     err = {k: np.abs(y - oi6300.OI6300Model(ctx_names=('moon_alt',), sky_field=k).fit(tab, rows).predict(tab)[0])[test]
            for k in (False, True)}
     assert np.median(err[True]) < 0.5 * np.median(err[False])
+
+
+def test_corpus_table_gives_the_prediction_of_each_corpus_exposure():
+    m = oi6300.OI6300Model()
+    m.corpus = {'expnum': np.array([30, 10, 20]), 'log10_pred': np.array([2.0, 1.0, np.nan]),
+                'pred_from_cv': np.array([True, False, False])}
+    assert m.corpus_row([10, 20, 25, 30]).tolist() == [1, 2, -1, 0]
+    assert m.corpus_coefficient([30, 25, 20, 10]) == pytest.approx(
+        [100 / oi6300.K['6300'], np.nan, np.nan, 10 / oi6300.K['6300']], nan_ok=True)
+    m.corpus['pred_from_cv'][:] = False  # a model built without the test-night runs has only in-sample values
+    with pytest.raises(ValueError, match='--no-cv'):
+        m.corpus_coefficient([10])
+
+
+def test_exposure_table_reproduces_the_build_table(monkeypatch):
+    """SkyML path: the table built for single exposures gives the prediction of the corpus table."""
+    pytest.importorskip('sklearn')
+    from astropy.coordinates import SkyCoord
+
+    from mlp_predictor import iono_corpus, oi6300_exposure
+
+    tab, rng = with_science_lines(synthetic()), np.random.default_rng(3)
+    n = tab['kp'].size
+    radec = {a: (rng.uniform(100, 110, n), rng.uniform(-40, -30, n)) for a in oi6300.ARMS}
+    sky = {a: SkyCoord(*radec[a], unit='deg') for a in radec}
+    for a, b in oi6300_exposure.PAIRS:
+        tab[f'sep_{a}_{b}'] = sky[a].separation(sky[b]).deg
+    tab |= {c: rng.normal(0, 0.02, n) for c in oi6300.SKY_FIELD}
+    tab['sci_near_log_oh'] = oi6300.control_ratio(tab['sci_coef_5577'], tab['near_coef_5577'],
+                                                  tab['sci_vanrhijn_95km'], tab['near_vanrhijn_95km'])
+    m = oi6300.OI6300Model(ctx_names=('moon_alt',), sci_lines=('oh',), sky_field=True).fit(tab, np.arange(400))
+    m.oh_groups = ('ATOM_Og',)  # the control group of this test
+    in_corpus = np.arange(n) < 500
+    m.corpus = {'expnum': 1000 + np.flatnonzero(in_corpus)} | {c: tab[c][in_corpus] for c in oi6300.SKY_FIELD}
+    ref = m.predict(tab)[0]
+
+    rows = np.array([5, 450, 499, 500, 599])
+    names = list(iono_corpus.LINES)
+    coef = {a: np.column_stack([tab[f'{a}_coef_{iono_corpus.LINES[c]}'][rows] for c in names]) for a in oi6300.ARMS}
+    built = ('sep_', 'field_', 'sci_near')  # columns the exposure table adds itself, like the lines and the ctx
+    plain = [k for k in tab if '_coef_' not in k and '_ctx_' not in k and not k.startswith(built)]
+    monkeypatch.setattr(iono_corpus, 'exposure_columns', lambda *a: {k: tab[k][rows] for k in plain})
+    ctx = {f'ctx_{a}': np.column_stack([tab[f'{a}_alt'][rows], np.zeros(5), np.ones(5), tab[f'{a}_ctx_moon_alt'][rows]])
+           for a in oi6300.ARMS}
+    monkeypatch.setattr(oi6300_exposure.inference, 'build_triplet_from_pointings',
+                        lambda **kw: ctx | {'ctx_names': ['alt', 'az_sin', 'az_cos', 'moon_alt']})
+    out = oi6300_exposure.predict(m, obstime_mjd=np.arange(5.0), expnum=1000 + rows,
+                                  radec={a: (radec[a][0][rows], radec[a][1][rows]) for a in radec}, coef=coef,
+                                  coef_names=names, near_is_skye=np.ones(5, bool))
+    assert out['in_corpus'].tolist() == [True, True, True, False, False]
+    assert out['log10_R'][:3] == pytest.approx(ref[rows[:3]], abs=1e-9)
+    assert np.isnan(out['log10_R'][3:]).all()  # a night-field model has no value outside its corpus
+    assert out['coef'][:3] == pytest.approx(10 ** ref[rows[:3]] / oi6300.K['6300'])

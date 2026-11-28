@@ -37,10 +37,30 @@ python -m skysub.sky_subtraction_block.cli batch \
   --gaia-dir /cache/gaia/fibers --nproc 1 --cpus 2 \
   --output-dir /results --preserve-drp-tree
 
+# Take the Science [O I] 6300 from the dedicated model (built by the oi-model step below).
+python -m skysub.sky_subtraction_block.cli single /data/lvmCFrame-00011017.fits \
+  --ml-model-file /models/trained-sky.pt --oi-model /models/oi6300/oi6300_model_oh_o2_5577_7774_8446_field_ens5.pkl
+
 # Inspect the plan before any fitting, network queries or output creation.
 python -m skysub.sky_subtraction_block.cli batch \
   --mjd 60325:60330 --max-exposures 3 --ml-model-file /models/trained-sky.pt --dry-run
 ```
+
+`oi-model` builds the dedicated [O I] 6300 model for a decomposed median stack; it is the step between the
+decomposition and `single` / `batch` when the DRP version or the corpus changes:
+
+```sh
+python -m skysub.sky_subtraction_block.cli oi-model \
+  --decomp-root /data/sky_decomposition_1.3.2_knox \
+  --stem lvmsframe_median_stack_1.3.2_knox_gaia1over100 --out /models/oi6300
+```
+
+It builds what is missing of the ionospheric context of the stack (IONEX map, GNSS ROTI and thermosphere tables,
+corpus; downloads included), selects the training exposures, validates on held-out nights and saves the model.
+Its options are those of `python -m mlp_predictor.oi6300_build` (`oi-model --help`); the method, the files and
+the accuracy are in `skysub/mlp_predictor/OI6300_MODEL.md`. `--oi-model FILE` of `single`, `batch` and the legacy
+entry point then replaces the ML coefficient of the line with the model's value; the file enters the product
+fingerprint only when the option is given, so existing products stay reusable without it.
 
 `--cpus C` sets the total logical-CPU budget. `--nproc N` sets workers per
 exposure (default: 1 in batch, 8 in single/legacy). Batch automatically runs up to

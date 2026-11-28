@@ -266,8 +266,47 @@ def build_product(input_path, inputs, provenance):
     product[0].header['MEDFITFL'] = (any(f.fit_status not in ('Solved', 'AlmostSolved')
                                        for f in inputs.median_fits.results.values()),
                                     'Retained median with failed solver status')
+    set_bubble_flag(product[0].header, provenance.get('plasma_bubble'))
+    set_oi6300(product[0].header, provenance.get('oi6300'))
+    set_ionospheric_context(product[0].header, provenance.get('prediction_diagnostics', {}).get('triplet'))
     product.append(json_hdu('SKYML_META', provenance, indent=2, allow_nan=True))
     return product
+
+
+def set_ionospheric_context(header, triplet):
+    """IONCTX: ionospheric context the ensemble read (none, or map / thermosphere / roti joined by '+');
+    IONXSRC: Science VTEC map."""
+    if triplet is None:
+        return
+    names = [str(n) for n in triplet.get('ctx_names', [])]
+    has_map = 'iono_log10_vtec' in names
+    parts = [p for p, n in (('map', 'iono_log10_vtec'), ('thermosphere', 'iono_hmf2'), ('roti', 'iono_log10_roti_max'))
+             if n in names]
+    header['IONCTX'] = ('+'.join(parts) or 'none', 'ionospheric context read by the ensemble')
+    source = triplet.get('ionex_source')
+    if has_map and source is not None and len(source):
+        header['IONXSRC'] = (str(np.asarray(source).ravel()[0]), 'VTEC map at the Science pierce point')
+
+
+def set_oi6300(header, record):
+    """OI63SRC: origin of the ATOM_Or ([O I] 6300/6364) coefficient, 'model' (dedicated model) or 'ml'; OI63R: the
+    model's slant brightness [R], -1 when it gave none.  Absent when no model was supplied."""
+    if record is None:
+        return
+    header['OI63SRC'] = ('model' if record.get('applied') else 'ml', '[O I] 6300 coefficient: dedicated model or ML')
+    value = record.get('log10_rayleigh', float('nan'))
+    header['OI63R'] = (round(10 ** float(value), 3) if np.isfinite(value) else -1.0, 'model [O I] 6300 [R]; -1 none')
+
+
+def set_bubble_flag(header, qa):
+    """BUBBLE (1 yes, 0 no, -1 unknown) and per-telescope max GNSS ROTI near the pierce point (-1: no rays)."""
+    if qa is None:
+        return
+    header['BUBBLE'] = (int(qa.get('bubble', -1)), 'plasma bubble near pierce points (GNSS ROTI); -1 unknown')
+    for label, keyword in (('Sci', 'ROTISCI'), ('SkyE', 'ROTISKE'), ('SkyW', 'ROTISKW')):
+        t = qa.get('telescopes', {}).get(label, {})
+        value = t.get('roti_max', float('nan')) if t.get('n_samples', 0) > 0 else -1.0
+        header[keyword] = (round(float(value), 4), f'{label} max GNSS ROTI [TECU/min]; -1 none')
 
 
 def set_prediction_reliability(header, bits):

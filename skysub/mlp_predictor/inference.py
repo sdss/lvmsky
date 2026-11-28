@@ -95,6 +95,11 @@ def build_triplet_from_pointings(
     sky_far_label=None,
     context_columns=None,
     moon_model_inputs=None,
+    ionosphere=False,
+    thermosphere=False,
+    thermosphere_extra=False,
+    bubble_prior=False,
+    roti=False,
     verbose=True,
 ) -> dict:
     """Build a triplet dict with 39-dim per-arm ctx from minimal inputs.
@@ -205,6 +210,22 @@ def build_triplet_from_pointings(
     data._augment_triplet_with_physics_priors(triplet, force=True)
     if moon_model_inputs:
         _moon_model_augment_direct(triplet, verbose=verbose, **moon_model_inputs)
+    try:
+        if ionosphere or thermosphere or bubble_prior or roti:
+            data._augment_triplet_with_ionosphere(triplet, force=True)
+        if thermosphere:
+            data._augment_triplet_with_thermosphere(triplet, force=True, extra=thermosphere_extra)
+        if bubble_prior:
+            data._augment_triplet_with_bubble_prior(triplet, force=True)
+        if roti:
+            data._augment_triplet_with_roti(triplet, force=True)
+    except (FileNotFoundError, ImportError, OSError, ValueError) as error:
+        raise RuntimeError(
+            'this ensemble reads the ionospheric context, which could not be built for these exposures: '
+            f'{error!r}. Daily IONEX maps appear 1-2 days after the night (cache: mlp_predictor.ionosphere.CACHE_DIR); '
+            'the thermosphere features need the `thermosphere` extra and HWM14 '
+            '(python -m mlp_predictor.thermosphere build-hwm, needs gfortran). '
+            'Use an ensemble without iono_* context to process the exposure now.') from error
     return triplet
 
 
@@ -438,6 +459,9 @@ def predict_sky_from_minimal_inputs(
     # other arm's resolution.
     wave=None, lsf_e=None, lsf_w=None, lsf_sci=None,
     date_obs=None, expnum=None, exposure_seconds=900.0,
+    # Science ATOM_Or coefficient of the dedicated [O I] 6300 model, (n_rows,), NaN where it gives no value;
+    # needed only by an ensemble whose ctx_names hold data.OI6300_MODEL_NAMES.
+    oi6300_coef=None,
     verbose=True,
 ) -> dict:
     """Predict the science-arm decomposition coefficients + a confidence score.
@@ -561,8 +585,14 @@ def predict_sky_from_minimal_inputs(
         moon_phase_deg=moon_phase_deg,
         sky_near_label=sky_near_label, sky_far_label=sky_far_label,
         moon_model_inputs=_mm_inputs, verbose=verbose,
+        ionosphere=any(str(n) in data.IONOSPHERE_FEATURE_NAMES for n in ensemble["ctx_names"]),
+        thermosphere=any(str(n) in data.THERMOSPHERE_FEATURE_NAMES for n in ensemble["ctx_names"]),
+        thermosphere_extra=any(str(n) in data.THERMOSPHERE_EXTRA_NAMES for n in ensemble["ctx_names"]),
+        bubble_prior=any(str(n) in data.BUBBLE_PRIOR_NAMES for n in ensemble["ctx_names"]),
+        roti=any(str(n) in data.ROTI_NAMES for n in ensemble["ctx_names"]),
     )
-    _need = [n for n in ensemble["ctx_names"] if n not in triplet["ctx_names"]]
+    _need = [n for n in ensemble["ctx_names"]
+             if n not in triplet["ctx_names"] and n not in data.SKY_LINE_NAMES + data.OI6300_MODEL_NAMES]
     if _need:
         raise ValueError(
             f"this ensemble needs {len(ensemble['ctx_names'])} context features "
@@ -587,10 +617,19 @@ def predict_sky_from_minimal_inputs(
     near_mask = near_is_east[:, None]
     coef_near_arr = np.where(near_mask, coef_e_arr, coef_w_arr).astype(np.float32)
     coef_far_arr  = np.where(near_mask, coef_w_arr, coef_e_arr).astype(np.float32)
+    if any(str(n) in data.SKY_LINE_NAMES for n in ensemble["ctx_names"]):  # from the sky arms' own amplitudes
+        data._augment_triplet_with_sky_lines(triplet, coef_near_arr, coef_far_arr, ensemble["coef_names"])
+    if any(str(n) in data.OI6300_MODEL_NAMES for n in ensemble["ctx_names"]):
+        if oi6300_coef is None:
+            raise ValueError("this ensemble reads the dedicated [O I] 6300 model: pass oi6300_coef= "
+                             "(mlp_predictor.oi6300_exposure.predict; SkyML option --oi-model)")
+        data._augment_triplet_with_oi6300(triplet, oi6300_coef, coef_near_arr, ensemble["coef_names"])
 
-    ctx_near = triplet["ctx_near"]
-    ctx_far  = triplet["ctx_far"]
-    ctx_sci  = triplet["ctx_sci"]
+    # The scaler and the network are positional: feed the columns in the order the ensemble was trained with.
+    _order = [list(triplet["ctx_names"]).index(n) for n in ensemble["ctx_names"]]
+    ctx_near = triplet["ctx_near"][:, _order]
+    ctx_far  = triplet["ctx_far"][:, _order]
+    ctx_sci  = triplet["ctx_sci"][:, _order]
 
     per_seed = []
     for member in ensemble["members"]:

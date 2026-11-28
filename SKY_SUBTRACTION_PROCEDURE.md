@@ -100,11 +100,36 @@ stays at its input path. Use a new output directory for a different
 calibration or method. This is decomposition only; it neither trains the MLP
 nor writes sky-subtracted SFrames.
 
+## 4. Build the Science [O I] 6300 model
+
+One command after the decomposition (added 2026-11-28; run on the local knox 1.3.2 decomposition, not on Utah):
+
+```bash
+python -m skysub.sky_subtraction_block.cli oi-model \
+  --decomp-root /uufs/chpc.utah.edu/common/home/sdss/sdsswork/users/u6058164/sky_decomposition_1.3.2_knox \
+  --stem lvmsframe_median_stack_1.3.2_knox_gaia1over100 \
+  --out /uufs/chpc.utah.edu/common/home/sdss/sdsswork/users/u6058164/oi6300_models
+```
+
+It builds the ionospheric context of the stack where it is missing (IONEX map table, GNSS ROTI table,
+thermosphere table, corpus, written under `skysub/sky_decomp/data/ionosphere/` of the checkout), selects the
+training exposures, validates on held-out nights and writes `<name>.pkl`, `<name>.json` and `<name>_cv.csv`.
+It needs network access for the IONEX maps and the GNSS station-days, and the thermosphere models
+(`python -m mlp_predictor.thermosphere build-hwm`, run once from `skysub/`, needs gfortran). Details:
+[skysub/mlp_predictor/OI6300_MODEL.md](skysub/mlp_predictor/OI6300_MODEL.md).
+
+## 5. Subtract the sky
+
+Pass the saved model to the SkyML commands with `--oi-model FILE.pkl` (`python -m skysub.sky_subtraction`,
+`python -m skysub.sky_subtraction_block.cli single | batch`). The model's [O I] 6300 then replaces the ensemble
+coefficient of the line. Training the sky-transfer ensemble itself is still done from its notebook and is not
+part of these commands.
+
 ## Sky Subtraction interface compatibility
 
 The shared-LSF change preserves the public `run(...)` signatures of
 `skysub.sky_subtraction.pipeline` and `skysub.sky_subtraction_block.pipeline`.
-The Sky Subtraction command-line entry points and options are unchanged.
+The Sky Subtraction command-line entry points and options are unchanged; `--oi-model` and the `oi-model` step were added later (2026-11-28) and are optional.
 Internal LSF loading and averaging moved into `sky_decomp.lsf_reference`;
 Sky Subtraction retains its existing CSV reference behavior.
 

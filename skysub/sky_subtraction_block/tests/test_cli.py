@@ -864,3 +864,17 @@ raise SystemExit(_worker.main(sys.argv[1]))
     assert result['state'] == 'complete_with_errors'
     recorded = Table.read(Path(result['run_dir']) / 'results.ecsv')
     assert recorded['mjd'][0] == 60325 and recorded['status'][1] == 'skipped_input'
+
+
+def test_runtime_resources_without_linux_affinity(monkeypatch):
+    monkeypatch.delattr(resources.os, 'sched_getaffinity', raising=False)
+    monkeypatch.setitem(sys.modules, 'torch', SimpleNamespace(
+        get_num_threads=lambda: 1, get_num_interop_threads=lambda: 1))
+    monkeypatch.setitem(sys.modules, 'threadpoolctl', SimpleNamespace(
+        threadpool_info=lambda: [dict(num_threads=1)]))
+    for name in resources.THREAD_VARIABLES:
+        monkeypatch.setenv(name, '1')
+    assert resources.cpu_budget(jobs=2, strict=False)['cpu_ids'] is None
+    assert resources.runtime_resources()['cpu_ids'] is None
+    with pytest.raises(ValueError, match='requires Linux'):
+        resources.cpu_budget(jobs=2, strict=True)

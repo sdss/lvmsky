@@ -513,6 +513,21 @@ def _fetch_retry(job, tries=4):
     return False
 
 
+def fetch(nights, workers=4, stations=STATIONS):
+    """Download and reduce the station-days of the given evening MJDs that are not cached; returns the failures."""
+    days = sorted({int(d) for n in nights for d in (n, n + 1)})
+    for d in days:  # navigation first, serially (shared by all stations)
+        try:
+            _nav(d)
+        except (OSError, http.client.HTTPException) as e:
+            print(f'navigation {d}: {e!r}', flush=True)
+    jobs = [(s, d) for d in days for s in stations]
+    with ThreadPoolExecutor(workers) as pool:
+        failed = [j for j, ok in zip(jobs, pool.map(_fetch_retry, jobs), strict=True) if not ok]
+    print(f'{len(jobs) - len(failed)}/{len(jobs)} station-days done; failed: {failed}')
+    return failed
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split('\n')[0])
     ap.add_argument('step', choices=('fetch', 'table'))
@@ -525,17 +540,7 @@ def main():
     if args.step == 'table':
         build_table(args.iono_table, args.out, tuple(args.stations))
         return
-    nights = np.loadtxt(args.nights, dtype=int, ndmin=1)
-    days = sorted({int(d) for n in nights for d in (n, n + 1)})
-    for d in days:  # navigation first, serially (shared by all stations)
-        try:
-            _nav(d)
-        except (OSError, http.client.HTTPException) as e:
-            print(f'navigation {d}: {e!r}', flush=True)
-    jobs = [(s, d) for d in days for s in args.stations]
-    with ThreadPoolExecutor(args.workers) as pool:
-        failed = [j for j, ok in zip(jobs, pool.map(_fetch_retry, jobs), strict=True) if not ok]
-    print(f'{len(jobs) - len(failed)}/{len(jobs)} station-days done; failed: {failed}')
+    fetch(np.loadtxt(args.nights, dtype=int, ndmin=1), args.workers, tuple(args.stations))
 
 
 if __name__ == '__main__':

@@ -127,12 +127,12 @@ def read_ionex(path):
 
 
 @lru_cache(maxsize=4)
-def _day_maps(mjd_day):
+def _day_maps(mjd_day, download=True):
     """Maps of the first source in SOURCES whose file for this day downloads and parses."""
     errors = []
     for source in SOURCES:
         try:
-            path = ionex_file(mjd_day, source)
+            path = ionex_file(mjd_day, source, download=download)
             maps = read_ionex(path)
             if maps['epoch'].size < 2:
                 raise ValueError(f'{path.name}: fewer than two maps')
@@ -157,7 +157,7 @@ def _sample(maps, field, k, lat, lon):
             + wy * (1 - wx) * g[k, y0 + 1, x0] + wy * wx * g[k, y0 + 1, x0 + 1])
 
 
-def vtec_at(mjd, lat, lon):
+def vtec_at(mjd, lat, lon, *, download=True):
     """Vertical TEC and its RMS [TECU] at (mjd, lat, lon), plus the map source of each row.
 
     Rotated-map time interpolation between the two bracketing maps (IONEX 1.0 manual, eq. 3): each map is
@@ -169,10 +169,10 @@ def vtec_at(mjd, lat, lon):
     source = np.empty(mjd.shape, dtype='<U4')
     for day in np.unique(np.floor(mjd)).astype(int):
         rows = np.floor(mjd) == day
-        maps = _day_maps(day)
+        maps = _day_maps(day, download=download)
         source[rows] = maps['source']
         if mjd[rows].max() > maps['epoch'][-1]:  # last quarter-hour of the day: append next day's maps
-            nxt = _day_maps(day + 1)
+            nxt = _day_maps(day + 1, download=download)
             maps = {k: np.concatenate([maps[k], nxt[k]]) for k in ('epoch', 'tec', 'rms')} | {
                 'lat': maps['lat'], 'lon': maps['lon']}
         t = mjd[rows]
@@ -216,7 +216,7 @@ def geomag_at(lat, lon, mjd):
     return dec, inc, np.degrees(np.arctan(np.tan(np.radians(inc)) / 2.0))
 
 
-def telescope_features(mjd, alt_deg, az_deg, h_km=IPP_HEIGHT_KM):
+def telescope_features(mjd, alt_deg, az_deg, h_km=IPP_HEIGHT_KM, *, download=True):
     """Ionospheric features of telescope pointings; all TEC values are vertical (see module docstring).
 
     ``dlog10vtec_dt`` is the centred +-30 min rate [dex/h]; ``dlog10vtec_dlat`` / ``dlog10vtec_dlon`` are the
@@ -227,7 +227,7 @@ def telescope_features(mjd, alt_deg, az_deg, h_km=IPP_HEIGHT_KM):
     half, dlat, dlon = 0.5 / 24.0, 1.25, 2.5
     queries = [(mjd, lat, lon), (mjd + half, lat, lon), (mjd - half, lat, lon), (mjd, lat + dlat, lon),
                (mjd, lat - dlat, lon), (mjd, lat, lon + dlon), (mjd, lat, lon - dlon)]
-    tec, rms, source = vtec_at(*(np.concatenate(q) for q in zip(*queries, strict=True)))
+    tec, rms, source = vtec_at(*(np.concatenate(q) for q in zip(*queries, strict=True)), download=download)
     n = mjd.size
     lt = np.log10(np.clip(tec, 0.1, None)).reshape(len(queries), n)
     dec, _, dip_lat = geomag_at(lat, lon, mjd)

@@ -4,6 +4,44 @@
 
 ### Changed
 
+- O I integration review (2026-11-28): offline exposure context now passes `download=False` through to IONEX;
+  replacing `ATOM_Or` without a valid test-night scatter records an unknown uncertainty rather than the old
+  MLP spread; standard block `single` records unavailable CPU affinity on macOS without crashing. Added
+  regression checks for these paths and coefficient replacement/fallback. Product code hashes now include
+  the ionosphere, thermosphere, bubble-prior and ROTI implementations.
+
+- SkyML reads the dedicated Science [O I] 6300 model, and the model is rebuilt by one command.
+  - `mlp_predictor.oi6300_build` now starts from the decomposed median stack: it builds what is missing of the
+    ionospheric context (`iono_corpus.build_context`: IONEX map table, GNSS station-days and ROTI table,
+    thermosphere table, corpus; a rebuilt file forces the ones after it, `--rebuild-context` rebuilds all), then
+    selects the rows, validates by nights and saves the model. Without options it builds the default model
+    (`--sci-lines` defaults to `oh o2 5577 7774 8446`, the night field is on; `--no-sky-field` and `--sci-lines`
+    without values give the other variants). The same command is `python -m skysub.sky_subtraction_block.cli
+    oi-model`. `iono_corpus.build` reads the three tables of its own stem instead of the merged tables of every
+    stem; the rebuilt knox corpus equals the stored one in all 146 data columns (`in_training_set` aside).
+  - A saved model holds `corpus`: for every corpus exposure the night field and the model's prediction, the
+    test-night prediction for the rows it was trained on (`OI6300Model.corpus_row`, `corpus_coefficient`).
+  - `mlp_predictor.oi6300_exposure` (new) applies a saved model to single exposures: it builds the input table from
+    the three median decompositions, the observing context and `iono_corpus.exposure_columns` (the corpus columns
+    computed for any exposure). On 360 knox exposures it gives the prediction of the build table within 1e-4 dex for
+    95% of them (largest difference 0.0015 dex). A night-field model gives no value outside its corpus.
+  - SkyML and the block: `--oi-model FILE` (`pipeline.run(oi_model=...)`). The model runs after the median fits; its
+    `ATOM_Or` replaces the ensemble coefficient (uncertainty: the model's test-night scatter), and the ensemble
+    coefficient is kept, with the reason recorded, when the model gives no value. New keywords `OI63SRC`, `OI63R`
+    and `SKYML_META.oi6300` (`FITS_STRUCTURE.md`). The block fingerprint includes the model file only when the
+    option is given. Checked on exposure 47284 (DRP 1.3.2): no-field model 138.2 and night-field model 145.4
+    against the ensemble's 143.8 and the Science median's own 147.4; the no-field value agrees with the corpus
+    prediction of that exposure within 0.0004 dex.
+  - Sky-transfer ensemble inputs: `data.augment_ionospheric_context` appends the ionospheric context the model reads
+    and, with `oi_model`, the columns `iono_sqrt_oi6300_model` and `iono_oi6300_model_avail`
+    (`data.OI6300_MODEL_NAMES`); `inference.predict_sky_from_minimal_inputs(oi6300_coef=...)` builds them for an
+    exposure. No ensemble has been trained with them yet.
+  - The default and the no-field models were rebuilt with the new command; their test-night scores are unchanged
+    (0.0055 and 0.0062 dex). The other four saved models have no `corpus` table.
+  - Not done: the ionospheric context of a new stack was not built from scratch in one run (on knox the tables
+    existed). The later integration review fixed the macOS affinity-reporting failure and ran standard
+    `skysub.sky_subtraction_block.cli single` successfully on exposure 47284 with the night-field model.
+
 - `mlp_predictor.sky_field` (new) and `OI6300Model(sky_field=True)`: optional inputs from a night-long field of the
   zenith [O I] 6300 measured by SkyNear and SkyFar (Gaussian process over all exposures of the night, read at the
   Science and SkyNear pierce points; 4 field inputs plus the number of samples within 1 h). Ported from
@@ -132,6 +170,24 @@
   `diagnostics_cells/thermosphere_signal.py` makes the report figures. `mlp_predictor.roti` now also keeps a
   60-min high-passed vertical TEC perturbation (dvtec) per sample (cache files `*_v2.npz`).
 
+- SkyML runs ensembles that read the ionospheric context: `predict_ifu` builds the nine map and six thermosphere
+  `iono_*` columns per telescope (bundled tables first, otherwise IONEX, PyIRI, NRLMSIS and HWM14) and stops with an
+  explanatory error when they cannot be built, instead of substituting values. New primary keys `IONCTX`
+  (none / map / map+thermosphere) and `IONXSRC`; the per-telescope values, `thermosphere_source` and model versions
+  are in `SKYML_META.prediction_diagnostics.triplet`. Exposure 14771 with the thermosphere ensemble: F-line
+  coefficients move by <= 0.007 dex; the computed path matches the bundled values to 9e-6. The isolated-branches
+  ensemble reproduces 14771 bit for bit. The default ensemble is unchanged.
+
+- Full ionospheric context variant: `data.THERMOSPHERE_EXTRA_NAMES` (NmF2, bottom thickness, VTEC/IRI, N2, O, model
+  7774, meridional wind), `BUBBLE_PRIOR_NAMES` (`iono_bubble_p`, Swarm IBP reach probability) and `SKY_LINE_NAMES`
+  (`iono_sky_altimeter`, `iono_sky_q`, from the SkyNear/SkyFar amplitudes only; Science carries SkyNear's) with
+  their augments, built at inference for ensembles that read them. Notebook `IONO_CTX=full`
+  (`run_notebook.py --ionoctx-full`): vs `thermo` 7774 -5.5% [-12.9, +1.8], 8446 -8.8% [-15.7, -1.1], 6300 +2.4%
+  (in noise); vs deployed -30 / -32 / -38% (6300 / 7774 / 8446). Review fixes: a 404 for a RINEX day younger than
+  4 days is no longer cached as missing; IONEX downloads use per-process temp files; non-finite map RMS raises;
+  in-map IONEX EXPONENT records are honoured; incomplete downloads fall through to the next map source; HWM14
+  downloads are written atomically. The thermosphere table is now tracked (`.gitignore`) and packaged.
+
 - `mlp_predictor.ionosphere` (new, not yet wired into the context or SkyML): IONEX vertical TEC
   (UPC UQRG 15 min, CODE fallback, daily files cached in `skysub/ionosphere_cache/`) at the 285 km
   pierce point of each telescope (Science, SkyE, SkyW). Also RMS, a +-30 min VTEC trend, IGRF
@@ -142,6 +198,18 @@
   `pyproject.toml` gains `ionosphere` and `geomag` (ppigrf, dev-only) extras.
   Later additions: d log10 VTEC/dt, local VTEC gradient at the pierce point, and sun altitude at the IGRF-traced
   magnetic conjugate point (+8.1 N, -74.5 W).
+
+- `mlp_predictor`: `predict_sky_from_minimal_inputs` now feeds the context columns in the order of the
+  ensemble's `ctx_names`, so new columns no longer shift an older model's inputs. The deployed ensemble's order is
+  unchanged. `data._augment_triplet_with_ionosphere` adds nine `iono_*` columns per arm, built automatically at
+  inference for ensembles trained with them. The new optional model and trainer key `iono_ctx_groups` routes them
+  to the listed isolated branches only; it is off by default, and older checkpoints load unchanged.
+  `pyproject.toml` gains a dev-only `notebook` extra.
+  The bundled `sky_decomp/data/ionosphere/iono_ctx_lvmsframe_median_stack_1.3.2_knox_gaia1over100.npz` (2.9 MB) holds
+  the features of 18,640 knox META rows; the augment reads it first, so training on that corpus needs no IONEX
+  download. The isolated-branches notebook gains an `IONO_CTX` variant (`run_notebook.py --ionoctx-branches` or
+  `--ionoctx-all`) and an `ionoctx-compare` cell. Its corpus root and the 14771 CFrame now follow
+  `LVMSKY_DECOMP_DATA_ROOT` and `SAS_BASE_DIR`.
 
 - `mlp_predictor.bubbles` (new, not wired into the context or SkyML): plasma-bubble reach probability per
   telescope. The ESA Swarm IBP climatology (`ibpmodel`, new `bubbles` extra) is calibrated in field-line apex height
@@ -158,6 +226,13 @@
   exposures): the near/far proxy q doubles when ROTI >= 1 TECU/min at a sky telescope (x2.0, 95% [1.2, 2.9],
   37 nights), but such exposures are 3.8% of the total and adding ROTI gives no cross-validated gain on the
   deployed residual. Candidate use: per-exposure bubble flag, not a model input.
+
+- SkyML plasma-bubble QA: `pipeline.plasma_bubble_qa` computes GNSS ROTI near each telescope's 285 km pierce point
+  (`mlp_predictor.roti.exposure_flag`, five IGS stations, RINEX fetched from BKG and cached) and records `BUBBLE`
+  (1/0/-1 unknown), `ROTISCI`/`ROTISKE`/`ROTISKW`, the new warning bit `plasma_bubble` (`1 << 26`, appended to
+  `sky_decomp.reliability`) and `SKYML_META.plasma_bubble`. Thresholds live in `Settings` (1 TECU/min, 200 km,
+  10 min). QA only: never raises and never changes the sky; `--no-bubble-qa` / `bubble_qa=False` skips it.
+  Exposure 14771 reproduces `ML_COEF`, `SKY`, `FLUX` and `MED_COEF` bit for bit with `BUBBLE = 0`.
 
 - `mlp_predictor`: optional split of the `ionospheric` group into one group per
   emission mechanism (`data.IONOSPHERIC_SPLIT`, `data.split_ionospheric_group()`),
