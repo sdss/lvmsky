@@ -440,6 +440,28 @@ def test_single_aliases_forward_same_scientific_options(cframe, model, tmp_path,
                                     '--fit-sky-fibers','--output',str(tmp_path / 'lvmSFrame-skyml-block-00011017.fits')])
     assert result.exit_code == 0, result.output
     assert calls[-1][1]['fit_sky_fibers'] is True
+    assert calls[-1][1]['bubble_qa'] is True
+    result = RUNNER.invoke(cli.app, ['single', str(path), '--ml-model-file', str(model['ensemble']), '--no-bubble-qa',
+                                    '--output', str(tmp_path / 'lvmSFrame-skyml-block-00011017.fits')])
+    assert result.exit_code == 0, result.output
+    assert calls[-1][1]['bubble_qa'] is False
+
+
+def test_batch_forwards_bubble_qa_switch_and_fingerprints_it(cframe, model, tmp_path, monkeypatch):
+    plans = []
+    original = planning.make_plan
+    monkeypatch.setattr(planning, 'make_plan', lambda entries, options, **kwargs: (
+        original(entries, options, **kwargs), plans.append((dict(options), entries[0].fingerprint)))[0])
+    monkeypatch.setattr(cli, 'cpu_budget', lambda **kwargs: dict(processes=1, cpu_ids=[]))
+    monkeypatch.setattr(cli, 'apply_affinity', lambda _: None)
+    args = ['batch', str(cframe()), *model_arguments(model), '--output-dir', str(tmp_path / 'out'), '--dry-run']
+    for extra in ([], ['--no-bubble-qa']):
+        result = RUNNER.invoke(cli.app, args + extra)
+        assert result.exit_code == 0, result.output
+    assert [options['bubble_qa'] for options, _ in plans] == [True, False]
+    assert plans[0][1] != plans[1][1]  # a product without the flag is not a product with it
+    assert build_parser().parse_args(['x.fits', '--no-bubble-qa']).bubble_qa is False
+    assert build_parser().parse_args(['x.fits']).bubble_qa is True
 
 
 @pytest.mark.parametrize('individual',[False,True])

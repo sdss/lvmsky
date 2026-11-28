@@ -4,6 +4,11 @@
 
 ### Changed
 
+- Block `single`, `batch` and the legacy entry point accept `--no-bubble-qa` (2026-11-28). The plasma-bubble QA
+  flag ran in every block run with no way to turn it off, and offline each uncached GNSS request waits for its
+  timeout. The switch reaches `sky_subtraction.pipeline.run(bubble_qa=...)`, gives `BUBBLE = -1`, leaves the sky
+  unchanged and enters the product fingerprint only when given. Checked on exposure 47284.
+
 - O I integration review (2026-11-28): offline exposure context now passes `download=False` through to IONEX;
   replacing `ATOM_Or` without a valid test-night scatter records an unknown uncertainty rather than the old
   MLP spread; standard block `single` records unavailable CPU affinity on macOS without crashing. Added

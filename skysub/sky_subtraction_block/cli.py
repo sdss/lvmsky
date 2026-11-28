@@ -121,6 +121,8 @@ ModelFile = Annotated[Path | None, typer.Option("--ml-model-file", "--ensemble",
 Gaia = Annotated[Path | None, typer.Option("--gaia-dir", help=HELP["gaia_dir"], rich_help_panel="Model and Gaia")]
 OIModel = Annotated[Path | None, typer.Option("--oi-model", exists=True, dir_okay=False, help=HELP["oi_model"],
                                              rich_help_panel="Model and Gaia")]
+NoBubbleQA = Annotated[bool, typer.Option("--no-bubble-qa", help=HELP["no_bubble_qa"],
+                                          rich_help_panel="Model and Gaia")]
 Seed = Annotated[Path | None, typer.Option("--reuse-state", "--seed", help=HELP["seed"], rich_help_panel="Optional saved-state reuse")]
 Keep = Annotated[bool, typer.Option("--keep-preparation", help=HELP["keep_preparation"], rich_help_panel="Optional saved-state reuse")]
 Jobs = Annotated[int, typer.Option("--nproc", "--jobs", min=1, help=HELP["jobs"], rich_help_panel="CPU budget")]
@@ -148,7 +150,8 @@ LogLevel = Annotated[Level, typer.Option("--log-level", case_sensitive=False, he
 
 
 def _model(values):
-    return {name: values[name] for name in ("ensemble", "gaia_dir", "oi_model", "jobs", *DEFAULTS)}
+    model = {name: values[name] for name in ("ensemble", "gaia_dir", "oi_model", "jobs", *DEFAULTS)}
+    return model | {"bubble_qa": not values["no_bubble_qa"]}
 
 
 def _logging(level):
@@ -176,7 +179,8 @@ def single(
         "One final FITS file, retaining the lvmSFrame-skyml-block- prefix. Default: beside INPUT, "
         "replace lvmCFrame- with lvmSFrame-skyml-block-; remove trailing .gz. Existing files are protected by default."),
         rich_help_panel="Input and final output")] = None,
-    ensemble: ModelFile = None, gaia_dir: Gaia = None, oi_model: OIModel = None, seed: Seed = None,
+    ensemble: ModelFile = None, gaia_dir: Gaia = None, oi_model: OIModel = None, no_bubble_qa: NoBubbleQA = False,
+    seed: Seed = None,
     on_existing: Annotated[Existing, typer.Option(help=(
         "error: destination conflict; skip: verify/reuse a matching product; "
         "overwrite: recompute and atomically replace the final FITS only on success."))] = Existing.error,
@@ -285,6 +289,7 @@ def batch(
     missing_input: Annotated[Missing, typer.Option(help="error: stop planning; skip: record unavailable local CFrame and continue.",
                          rich_help_panel="Catalogue selection")] = Missing.error,
     ensemble: ModelFile = None, gaia_dir: Gaia = None, oi_model: OIModel = None,
+    no_bubble_qa: NoBubbleQA = False,
     reuse_state_dir: Annotated[Path | None, typer.Option(help=(
         "Advanced: existing snapshots from earlier --keep-preparation runs. Preserve-tree mode expects "
         "DIR/TILEGROUP/TILE/MJD/lvmSFrame-skyml-preparation-00011017.fits; flat mode "

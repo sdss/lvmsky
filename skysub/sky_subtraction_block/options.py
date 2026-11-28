@@ -24,6 +24,11 @@ HELP = {
         "[O I] 6300 replaces the ML coefficient of the line and is an input of an ML model trained with it. "
         "Unset: the ML coefficient is used. Ignored when saved state is reused."
     ),
+    "no_bubble_qa": (
+        "Skip the plasma-bubble QA flag (GNSS ROTI). The flag never changes the sky; computing it downloads "
+        "public GNSS station-days that are not cached, and each unreachable request waits for its timeout. "
+        "Use it offline or for bulk runs without the cache. Ignored when saved state is reused."
+    ),
     "gaia_dir": (
         "Direct parent of lvmGAIA-fibers-00011017.fits (eight-digit exposure), "
         "e.g. /cache/gaia/fibers, not /cache/gaia. Requires PRIMARY.EXPNUM and a FIBERS "

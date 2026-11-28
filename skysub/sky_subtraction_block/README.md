@@ -62,6 +62,11 @@ the accuracy are in `skysub/mlp_predictor/OI6300_MODEL.md`. `--oi-model FILE` of
 entry point then replaces the ML coefficient of the line with the model's value; the file enters the product
 fingerprint only when the option is given, so existing products stay reusable without it.
 
+Every run also computes the plasma-bubble QA flag (`BUBBLE`), which downloads the public GNSS station-days it does
+not have. `--no-bubble-qa` of `single`, `batch` and the legacy entry point skips it (the product then has
+`BUBBLE = -1`); use it offline, where each unreachable request would wait for its timeout. The sky is the same
+either way. The switch enters the fingerprint only when given.
+
 `--cpus C` sets the total logical-CPU budget. `--nproc N` sets workers per
 exposure (default: 1 in batch, 8 in single/legacy). Batch automatically runs up to
 `floor(C / N)` exposures simultaneously, with disjoint N-CPU allocations.

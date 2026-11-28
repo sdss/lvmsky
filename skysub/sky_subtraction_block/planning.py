@@ -400,6 +400,8 @@ def prepare_exposure(item, model, *, seed=None, implementation=None, on_existing
                        implementation_sha256=implementation or scientific_implementation())
     if model.get("oi_model") and (item.seed is None or same_computed_snapshot):  # absent: fingerprints unchanged
         fingerprint["oi_model_stat"] = file_identity(Path(model["oi_model"]).expanduser().resolve())
+    if model.get("bubble_qa") is False and (item.seed is None or same_computed_snapshot):  # the product has no flag
+        fingerprint["bubble_qa"] = False
     item.fingerprint = hashlib.sha256(json.dumps(fingerprint, sort_keys=True).encode()).hexdigest()
     if item.output.exists() and on_existing == "skip":
         verify_product(item)
